@@ -1,0 +1,9 @@
+[package]
+name = "sdr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+soapysdr = "0.4.5"
+num-complex = "0.4"
+rustfft = "6.2"
