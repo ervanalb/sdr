@@ -57,21 +57,18 @@ impl eframe::App for SdrApp {
             hardware.update(&mut self.hardware_params);
 
             // Poll waterfall messages
-            let mut waterfalls = 0;
-            while let Some(_msg) = hardware.waterfall_try_recv() {
-                //println!(
-                //    "Waterfall: device={}, channel={}, t={:?}..{:?} freq={:.2} MHz, width={:.2} MHz, samples={}",
-                //    msg.device_id,
-                //    msg.channel_index,
-                //    msg.start_time,
-                //    msg.end_time,
-                //    msg.center_frequency / 1e6,
-                //    msg.width / 1e6,
-                //    msg.waterfall_row.len()
-                //);
-                waterfalls += 1;
+            while let Some(msg) = hardware.waterfall_try_recv() {
+                println!(
+                    "Waterfall: device={}, channel={}, t={:?}..{:?} freq={:.2} MHz, width={:.2} MHz, samples={}",
+                    msg.device_id,
+                    msg.channel_index,
+                    msg.start_time,
+                    msg.end_time,
+                    msg.center_frequency / 1e6,
+                    msg.width / 1e6,
+                    msg.waterfall_row.len()
+                );
             }
-            println!("Got {waterfalls} waterfall messages this frame");
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -125,7 +122,8 @@ impl eframe::App for SdrApp {
                                             ui.add(
                                                 egui::Slider::new(
                                                     frequency,
-                                                    rx_channel.frequency_min..=rx_channel.frequency_max,
+                                                    rx_channel.frequency_min
+                                                        ..=rx_channel.frequency_max,
                                                 )
                                                 .text("Frequency (Hz)"),
                                             );
@@ -136,22 +134,21 @@ impl eframe::App for SdrApp {
                                             ui.add(
                                                 egui::Slider::new(
                                                     sample_rate,
-                                                    rx_channel.sample_rate_min..=rx_channel.sample_rate_max,
+                                                    rx_channel.sample_rate_min
+                                                        ..=rx_channel.sample_rate_max,
                                                 )
                                                 .text("Sample Rate (Hz)")
                                                 .logarithmic(true),
                                             );
-                                            ui.label(format!(
-                                                "{:.3} Msps",
-                                                *sample_rate / 1e6
-                                            ));
+                                            ui.label(format!("{:.3} Msps", *sample_rate / 1e6));
                                         }
 
                                         if let Some(bandwidth) = &mut rx_channel.bandwidth {
                                             ui.add(
                                                 egui::Slider::new(
                                                     bandwidth,
-                                                    rx_channel.bandwidth_min..=rx_channel.bandwidth_max,
+                                                    rx_channel.bandwidth_min
+                                                        ..=rx_channel.bandwidth_max,
                                                 )
                                                 .text("Bandwidth (Hz)")
                                                 .logarithmic(true),
