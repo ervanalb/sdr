@@ -306,9 +306,15 @@ impl HardwareDevice {
 #[derive(Debug, Clone, Default)]
 pub struct HardwareDeviceRxChannelParams {
     pub active: bool,
-    pub sample_rate: f64,
-    pub frequency: f64,
-    pub bandwidth: f64,
+    pub sample_rate: Option<f64>,
+    pub frequency: Option<f64>,
+    pub bandwidth: Option<f64>,
+    pub sample_rate_min: f64,
+    pub sample_rate_max: f64,
+    pub frequency_min: f64,
+    pub frequency_max: f64,
+    pub bandwidth_min: f64,
+    pub bandwidth_max: f64,
 }
 
 struct ActiveHardwareDeviceRxChannel {
@@ -332,9 +338,30 @@ struct HardwareDeviceRxChannel {
     sample_rate_range: Vec<soapysdr::Range>,
     frequency_range: Vec<soapysdr::Range>,
     bandwidth_range: Vec<soapysdr::Range>,
+    sample_rate_min: f64,
+    sample_rate_max: f64,
+    frequency_min: f64,
+    frequency_max: f64,
+    bandwidth_min: f64,
+    bandwidth_max: f64,
     sample_rate: f64,
     frequency: f64,
     bandwidth: f64,
+}
+
+fn compute_range_min_max(ranges: &[soapysdr::Range]) -> (f64, f64) {
+    if ranges.is_empty() {
+        return (0.0, 0.0);
+    }
+    let min = ranges
+        .iter()
+        .map(|r| r.minimum)
+        .fold(f64::INFINITY, f64::min);
+    let max = ranges
+        .iter()
+        .map(|r| r.maximum)
+        .fold(f64::NEG_INFINITY, f64::max);
+    (min, max)
 }
 
 impl HardwareDeviceRxChannel {
@@ -354,6 +381,19 @@ impl HardwareDeviceRxChannel {
             .bandwidth_range(soapysdr::Direction::Rx, channel_index)
             .unwrap_or_default();
 
+        let (sample_rate_min, sample_rate_max) = compute_range_min_max(&sample_rate_range);
+        let (frequency_min, frequency_max) = compute_range_min_max(&frequency_range);
+        let (bandwidth_min, bandwidth_max) = compute_range_min_max(&bandwidth_range);
+
+        // Set sample_rate and bandwidth to max values
+        device
+            .set_sample_rate(soapysdr::Direction::Rx, channel_index, sample_rate_max)
+            .ok();
+        device
+            .set_bandwidth(soapysdr::Direction::Rx, channel_index, bandwidth_max)
+            .ok();
+
+        // Read current values (which should now be the max values we just set)
         let sample_rate = device
             .sample_rate(soapysdr::Direction::Rx, channel_index)
             .unwrap();
@@ -372,6 +412,12 @@ impl HardwareDeviceRxChannel {
             sample_rate_range,
             frequency_range,
             bandwidth_range,
+            sample_rate_min,
+            sample_rate_max,
+            frequency_min,
+            frequency_max,
+            bandwidth_min,
+            bandwidth_max,
             sample_rate,
             frequency,
             bandwidth,
@@ -445,6 +491,25 @@ impl HardwareDeviceRxChannel {
 
         // Update params:
 
+        // Always write min/max values to params
+        params.sample_rate_min = self.sample_rate_min;
+        params.sample_rate_max = self.sample_rate_max;
+        params.frequency_min = self.frequency_min;
+        params.frequency_max = self.frequency_max;
+        params.bandwidth_min = self.bandwidth_min;
+        params.bandwidth_max = self.bandwidth_max;
+
+        // If params has None values, assign from hardware struct
+        if params.sample_rate.is_none() {
+            params.sample_rate = Some(self.sample_rate);
+        }
+        if params.frequency.is_none() {
+            params.frequency = Some(self.frequency);
+        }
+        if params.bandwidth.is_none() {
+            params.bandwidth = Some(self.bandwidth);
+        }
+
         if matches!(self.active, HardwareState::ShuttingDown(_)) {
             // It is not valid for active = true
             // while we are shutting down
@@ -453,21 +518,30 @@ impl HardwareDeviceRxChannel {
 
         // Snap any values in parameters to the nearest valid option
         // Only run snap_to_ranges if the given parameter has changed
-        if self.sample_rate != params.sample_rate {
-            params.sample_rate = snap_to_ranges(&self.sample_rate_range, params.sample_rate);
+        if self.sample_rate != params.sample_rate.unwrap() {
+            params.sample_rate = Some(snap_to_ranges(
+                &self.sample_rate_range,
+                params.sample_rate.unwrap(),
+            ));
         }
 
-        if self.frequency != params.frequency {
-            params.frequency = snap_to_ranges(&self.frequency_range, params.frequency);
+        if self.frequency != params.frequency.unwrap() {
+            params.frequency = Some(snap_to_ranges(
+                &self.frequency_range,
+                params.frequency.unwrap(),
+            ));
         }
 
-        if self.bandwidth != params.bandwidth {
-            params.bandwidth = snap_to_ranges(&self.bandwidth_range, params.bandwidth);
+        if self.bandwidth != params.bandwidth.unwrap() {
+            params.bandwidth = Some(snap_to_ranges(
+                &self.bandwidth_range,
+                params.bandwidth.unwrap(),
+            ));
         }
 
         // If parameters have changed, send message
-        if params.sample_rate != self.sample_rate {
-            self.sample_rate = params.sample_rate;
+        if params.sample_rate.unwrap() != self.sample_rate {
+            self.sample_rate = params.sample_rate.unwrap();
             if let HardwareState::Active(active) = &self.active {
                 active
                     .control_sender
@@ -477,8 +551,8 @@ impl HardwareDeviceRxChannel {
                     .unwrap();
             }
         }
-        if params.frequency != self.frequency {
-            self.frequency = params.frequency;
+        if params.frequency.unwrap() != self.frequency {
+            self.frequency = params.frequency.unwrap();
             if let HardwareState::Active(active) = &self.active {
                 active
                     .control_sender
@@ -488,8 +562,8 @@ impl HardwareDeviceRxChannel {
                     .unwrap();
             }
         }
-        if params.bandwidth != self.bandwidth {
-            self.bandwidth = params.bandwidth;
+        if params.bandwidth.unwrap() != self.bandwidth {
+            self.bandwidth = params.bandwidth.unwrap();
             if let HardwareState::Active(active) = &self.active {
                 active
                     .control_sender

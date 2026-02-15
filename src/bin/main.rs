@@ -58,7 +58,7 @@ impl eframe::App for SdrApp {
 
             // Poll waterfall messages
             let mut waterfalls = 0;
-            while let Some(msg) = hardware.waterfall_try_recv() {
+            while let Some(_msg) = hardware.waterfall_try_recv() {
                 //println!(
                 //    "Waterfall: device={}, channel={}, t={:?}..{:?} freq={:.2} MHz, width={:.2} MHz, samples={}",
                 //    msg.device_id,
@@ -121,38 +121,43 @@ impl eframe::App for SdrApp {
                                     ui.collapsing(format!("RX Channel {}", channel_idx), |ui| {
                                         ui.checkbox(&mut rx_channel.active, "Active");
 
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut rx_channel.frequency,
-                                                0.0..=6000e6,
-                                            )
-                                            .text("Frequency (Hz)")
-                                            .logarithmic(true),
-                                        );
-                                        ui.label(format!("{:.3} MHz", rx_channel.frequency / 1e6));
+                                        if let Some(frequency) = &mut rx_channel.frequency {
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    frequency,
+                                                    rx_channel.frequency_min..=rx_channel.frequency_max,
+                                                )
+                                                .text("Frequency (Hz)"),
+                                            );
+                                            ui.label(format!("{:.3} MHz", *frequency / 1e6));
+                                        }
 
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut rx_channel.sample_rate,
-                                                1e5..=20e6,
-                                            )
-                                            .text("Sample Rate (Hz)")
-                                            .logarithmic(true),
-                                        );
-                                        ui.label(format!(
-                                            "{:.3} Msps",
-                                            rx_channel.sample_rate / 1e6
-                                        ));
+                                        if let Some(sample_rate) = &mut rx_channel.sample_rate {
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    sample_rate,
+                                                    rx_channel.sample_rate_min..=rx_channel.sample_rate_max,
+                                                )
+                                                .text("Sample Rate (Hz)")
+                                                .logarithmic(true),
+                                            );
+                                            ui.label(format!(
+                                                "{:.3} Msps",
+                                                *sample_rate / 1e6
+                                            ));
+                                        }
 
-                                        ui.add(
-                                            egui::Slider::new(
-                                                &mut rx_channel.bandwidth,
-                                                1e5..=20e6,
-                                            )
-                                            .text("Bandwidth (Hz)")
-                                            .logarithmic(true),
-                                        );
-                                        ui.label(format!("{:.3} MHz", rx_channel.bandwidth / 1e6));
+                                        if let Some(bandwidth) = &mut rx_channel.bandwidth {
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    bandwidth,
+                                                    rx_channel.bandwidth_min..=rx_channel.bandwidth_max,
+                                                )
+                                                .text("Bandwidth (Hz)")
+                                                .logarithmic(true),
+                                            );
+                                            ui.label(format!("{:.3} MHz", *bandwidth / 1e6));
+                                        }
                                     });
                                 }
                             }

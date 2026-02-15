@@ -23,3 +23,6 @@ wgpu = { version = "27.0", features = ["vulkan", "dx12", "metal"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
+
+[profile.dev]
+opt-level = 2
