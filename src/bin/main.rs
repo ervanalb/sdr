@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use sdr::{Hardware, HardwareParams};
 
 mod ui;
 
@@ -23,6 +24,8 @@ fn main() -> eframe::Result<()> {
 }
 
 struct SdrApp {
+    hardware: Option<Hardware>,
+    hardware_params: HardwareParams,
     viewport_state: ui::canvas::Viewport,
 }
 
@@ -31,13 +34,46 @@ impl SdrApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         ui::canvas::init(cc);
         Self {
+            hardware: Some(Hardware::new()),
+            hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
         }
     }
 }
 
 impl eframe::App for SdrApp {
+    fn on_exit(&mut self) {
+        if let Some(hardware) = self.hardware.take() {
+            hardware.shutdown();
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request continuous repaints
+        ctx.request_repaint();
+
+        // Update hardware every frame
+        if let Some(hardware) = &mut self.hardware {
+            hardware.update(&mut self.hardware_params);
+
+            // Poll waterfall messages
+            let mut waterfalls = 0;
+            while let Some(msg) = hardware.waterfall_try_recv() {
+                //println!(
+                //    "Waterfall: device={}, channel={}, t={:?}..{:?} freq={:.2} MHz, width={:.2} MHz, samples={}",
+                //    msg.device_id,
+                //    msg.channel_index,
+                //    msg.start_time,
+                //    msg.end_time,
+                //    msg.center_frequency / 1e6,
+                //    msg.width / 1e6,
+                //    msg.waterfall_row.len()
+                //);
+                waterfalls += 1;
+            }
+            println!("Got {waterfalls} waterfall messages this frame");
+        }
+
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -52,41 +88,82 @@ impl eframe::App for SdrApp {
         });
 
         egui::SidePanel::left("left_sidebar")
-            .default_width(250.0)
+            .default_width(300.0)
             .show(ctx, |ui| {
-                ui.heading("Controls");
+                ui.heading("Hardware Control");
                 ui.separator();
 
-                ui.group(|ui| {
-                    ui.label("Device");
-                    ui.horizontal(|ui| {
-                        ui.label("Status:");
-                        ui.label("Not connected");
-                    });
-                    if ui.button("Connect").clicked() {
-                        // Placeholder
+                if ui.button("Enumerate Devices").clicked() {
+                    self.hardware_params.enumerate = true;
+                }
+
+                ui.add_space(10.0);
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let device_ids: Vec<String> =
+                        self.hardware_params.devices.keys().cloned().collect();
+                    let has_devices = !device_ids.is_empty();
+
+                    for device_id in &device_ids {
+                        let device_params =
+                            self.hardware_params.devices.get_mut(device_id).unwrap();
+
+                        ui.group(|ui| {
+                            ui.label(format!("Device: {}", device_id));
+                            ui.checkbox(&mut device_params.active, "Active");
+
+                            if device_params.active {
+                                ui.separator();
+
+                                for (channel_idx, rx_channel) in
+                                    device_params.rx_channels.iter_mut().enumerate()
+                                {
+                                    ui.collapsing(format!("RX Channel {}", channel_idx), |ui| {
+                                        ui.checkbox(&mut rx_channel.active, "Active");
+
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut rx_channel.frequency,
+                                                0.0..=6000e6,
+                                            )
+                                            .text("Frequency (Hz)")
+                                            .logarithmic(true),
+                                        );
+                                        ui.label(format!("{:.3} MHz", rx_channel.frequency / 1e6));
+
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut rx_channel.sample_rate,
+                                                1e5..=20e6,
+                                            )
+                                            .text("Sample Rate (Hz)")
+                                            .logarithmic(true),
+                                        );
+                                        ui.label(format!(
+                                            "{:.3} Msps",
+                                            rx_channel.sample_rate / 1e6
+                                        ));
+
+                                        ui.add(
+                                            egui::Slider::new(
+                                                &mut rx_channel.bandwidth,
+                                                1e5..=20e6,
+                                            )
+                                            .text("Bandwidth (Hz)")
+                                            .logarithmic(true),
+                                        );
+                                        ui.label(format!("{:.3} MHz", rx_channel.bandwidth / 1e6));
+                                    });
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
                     }
-                });
 
-                ui.add_space(10.0);
-
-                ui.group(|ui| {
-                    ui.label("Frequency");
-                    ui.add(egui::Slider::new(&mut 100.0, 0.0..=1000.0).text("MHz"));
-                });
-
-                ui.add_space(10.0);
-
-                ui.group(|ui| {
-                    ui.label("Gain");
-                    ui.add(egui::Slider::new(&mut 50.0, 0.0..=100.0).text("%"));
-                });
-
-                ui.add_space(10.0);
-
-                ui.group(|ui| {
-                    ui.label("Sample Rate");
-                    ui.add(egui::Slider::new(&mut 2.4, 0.1..=20.0).text("Msps"));
+                    if !has_devices {
+                        ui.label("No devices enumerated. Click 'Enumerate Devices' to scan.");
+                    }
                 });
             });
 

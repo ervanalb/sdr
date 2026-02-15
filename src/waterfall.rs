@@ -13,7 +13,7 @@ pub struct Waterfall {
 const TARGET_BIN_SIZE: f64 = 20_000.0; // 20 KHz
 
 impl Waterfall {
-    pub fn new(sample_rate: f64, output_rate: f64) -> Self {
+    pub fn new(sample_rate: f64, output_period: f64) -> Self {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / TARGET_BIN_SIZE`
         let min_fft_size = (sample_rate / TARGET_BIN_SIZE).ceil() as usize;
         let fft_size = min_fft_size.next_power_of_two();
@@ -26,7 +26,8 @@ impl Waterfall {
         // output_rate is how many waterfall rows per second we want
         // Each FFT takes (fft_size / sample_rate) seconds
         // So we need (sample_rate / (fft_size * output_rate)) FFTs per output
-        let accumulations_target = (sample_rate / (fft_size as f64 * output_rate)).ceil() as usize;
+        let accumulations_target =
+            (sample_rate * output_period / (fft_size as f64)).ceil() as usize;
         let accumulations_target = accumulations_target.max(1); // At least 1
 
         Self {

@@ -1,18 +1,19 @@
 mod waterfall;
 
-use core::time;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{JoinHandle, spawn};
+use std::time::{Duration, Instant};
 use std::{mem, thread};
 use waterfall::Waterfall;
 
 const WATERFALL_MESSAGE_CAPACITY: usize = 64;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
-const STREAM_READ_TIMEOUT: f64 = 0.01;
-const STREAM_BUFFER_SIZE: usize = 1024;
-const WATERFALL_OUTPUT_RATE: f64 = 120.0; // 120 waterfall rows per second
+const STREAM_READ_TIMEOUT: f64 = 1.;
+const STREAM_BUFFER_DURATION: f64 = 0.001;
+const WATERFALL_OUTPUT_PERIOD: f64 = 0.01; // 100 waterfall rows per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 
 fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
@@ -53,6 +54,8 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
 pub struct WaterfallMessage {
     pub device_id: HardwareDeviceId,
     pub channel_index: usize,
+    pub start_time: Instant,
+    pub end_time: Instant,
     pub center_frequency: f64,
     pub width: f64,
     pub waterfall_row: Vec<f32>,
@@ -124,7 +127,7 @@ impl Hardware {
     }
 
     pub fn shutdown(mut self) {
-        let polling_period = time::Duration::from_micros((SHUTDOWN_POLLING_PERIOD * 1e9) as u64);
+        let polling_period = Duration::from_micros((SHUTDOWN_POLLING_PERIOD * 1e9) as u64);
         let mut params = Default::default();
         while !self
             .devices
@@ -392,14 +395,10 @@ impl HardwareDeviceRxChannel {
                     let frequency = self.frequency;
                     let bandwidth = self.bandwidth;
                     let join_handle = spawn(move || {
-                        let stream = device
-                            .rx_stream::<num_complex::Complex32>(&[channel_index])
-                            .unwrap();
                         Self::process(
                             device_id,
                             channel_index,
                             device,
-                            stream,
                             control_receiver,
                             waterfall_sender,
                             sample_rate,
@@ -445,6 +444,13 @@ impl HardwareDeviceRxChannel {
         };
 
         // Update params:
+
+        if matches!(self.active, HardwareState::ShuttingDown(_)) {
+            // It is not valid for active = true
+            // while we are shutting down
+            params.active = false;
+        }
+
         // Snap any values in parameters to the nearest valid option
         // Only run snap_to_ranges if the given parameter has changed
         if self.sample_rate != params.sample_rate {
@@ -459,43 +465,38 @@ impl HardwareDeviceRxChannel {
             params.bandwidth = snap_to_ranges(&self.bandwidth_range, params.bandwidth);
         }
 
-        match &self.active {
-            HardwareState::Inactive => {}
-            HardwareState::Active(active) => {
-                // If parameters have changed,
-                // send message
-                if params.sample_rate != self.sample_rate {
-                    self.sample_rate = params.sample_rate;
-                    active
-                        .control_sender
-                        .send(HardwareDeviceRxChannelControlMessage::SetSampleRate(
-                            self.sample_rate,
-                        ))
-                        .unwrap();
-                }
-                if params.frequency != self.frequency {
-                    self.frequency = params.frequency;
-                    active
-                        .control_sender
-                        .send(HardwareDeviceRxChannelControlMessage::SetFrequency(
-                            self.frequency,
-                        ))
-                        .unwrap();
-                }
-                if params.bandwidth != self.bandwidth {
-                    self.bandwidth = params.bandwidth;
-                    active
-                        .control_sender
-                        .send(HardwareDeviceRxChannelControlMessage::SetBandwidth(
-                            self.bandwidth,
-                        ))
-                        .unwrap();
-                }
+        // If parameters have changed, send message
+        if params.sample_rate != self.sample_rate {
+            self.sample_rate = params.sample_rate;
+            if let HardwareState::Active(active) = &self.active {
+                active
+                    .control_sender
+                    .send(HardwareDeviceRxChannelControlMessage::SetSampleRate(
+                        self.sample_rate,
+                    ))
+                    .unwrap();
             }
-            HardwareState::ShuttingDown(_) => {
-                // It is not valid for active = true
-                // while we are shutting down
-                params.active = false;
+        }
+        if params.frequency != self.frequency {
+            self.frequency = params.frequency;
+            if let HardwareState::Active(active) = &self.active {
+                active
+                    .control_sender
+                    .send(HardwareDeviceRxChannelControlMessage::SetFrequency(
+                        self.frequency,
+                    ))
+                    .unwrap();
+            }
+        }
+        if params.bandwidth != self.bandwidth {
+            self.bandwidth = params.bandwidth;
+            if let HardwareState::Active(active) = &self.active {
+                active
+                    .control_sender
+                    .send(HardwareDeviceRxChannelControlMessage::SetBandwidth(
+                        self.bandwidth,
+                    ))
+                    .unwrap();
             }
         }
     }
@@ -504,13 +505,13 @@ impl HardwareDeviceRxChannel {
         device_id: HardwareDeviceId,
         channel_index: usize,
         device: soapysdr::Device,
-        mut stream: soapysdr::RxStream<num_complex::Complex32>,
         control_receiver: Receiver<HardwareDeviceRxChannelControlMessage>,
         waterfall_sender: SyncSender<WaterfallMessage>,
         mut sample_rate: f64,
         mut frequency: f64,
         mut bandwidth: f64,
     ) {
+        info!("Started thread for RX channel {channel_index:?} on device {device_id:?}");
         'outer: loop {
             // Apply current parameters
             device
@@ -523,9 +524,20 @@ impl HardwareDeviceRxChannel {
                 .set_bandwidth(soapysdr::Direction::Rx, channel_index, bandwidth)
                 .unwrap();
 
+            let buffer_size = (STREAM_BUFFER_DURATION * sample_rate) as usize;
+            let buffer_size = buffer_size.next_power_of_two();
+            info!(
+                "Channel parameters: sample_rate={sample_rate:?}, frequency={frequency:?}, bandwidth={bandwidth:?}, buffer_size={buffer_size:?}"
+            );
+
+            let mut buffer = vec![num_complex::Complex::<i8>::new(0, 0); buffer_size];
+            let mut waterfall = Waterfall::new(sample_rate, WATERFALL_OUTPUT_PERIOD);
+            info!("Opening stream");
+            let mut stream = device
+                .rx_stream::<num_complex::Complex<i8>>(&[channel_index])
+                .unwrap();
             stream.activate(None).unwrap();
-            let mut buffer = vec![num_complex::Complex32::new(0.0, 0.0); STREAM_BUFFER_SIZE];
-            let mut waterfall = Waterfall::new(sample_rate, WATERFALL_OUTPUT_RATE);
+            let mut last_t = Instant::now();
 
             // Inner loop for data reading
             'inner: loop {
@@ -555,30 +567,36 @@ impl HardwareDeviceRxChannel {
                 }
 
                 match stream.read(&mut [&mut buffer], (STREAM_READ_TIMEOUT * 1e6) as i64) {
-                    Ok(_) => {
+                    Ok(len) => {
+                        let t = Instant::now();
                         let waterfall_sender_clone = waterfall_sender.clone();
                         let center_frequency = frequency;
                         let width = sample_rate;
 
-                        waterfall.process(&buffer, |waterfall_row| {
+                        waterfall.process(&buffer[..len], |waterfall_row| {
                             let msg = WaterfallMessage {
                                 device_id: device_id.clone(),
                                 channel_index,
+                                start_time: last_t,
+                                end_time: t,
                                 center_frequency,
                                 width,
                                 waterfall_row,
                             };
                             let _ = waterfall_sender_clone.try_send(msg);
+                            last_t = t;
                         });
                     }
                     Err(e) => {
-                        eprintln!("Error reading from stream: {:?}", e);
+                        warn!("Error reading from stream: {e:?}");
                     }
                 }
             }
+            info!("Closing stream");
+            stream.deactivate(None).ok();
         }
 
-        stream.deactivate(None).ok();
+        info!("Stopping thread for RX channel {channel_index:?} on device {device_id:?}");
     }
 }
 
