@@ -1,11 +1,5 @@
 use crate::IntoComplexF32;
 
-pub struct WaterfallMessage {
-    pub center_frequency: f64,
-    pub width: f64,
-    pub waterfall_row: Vec<f32>,
-}
-
 pub struct Waterfall {
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     fft_buffer: Vec<num_complex::Complex32>,

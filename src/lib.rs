@@ -1,14 +1,19 @@
 mod waterfall;
 
+use core::time;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{JoinHandle, spawn};
-use waterfall::{Waterfall, WaterfallMessage};
+use std::{mem, thread};
+use waterfall::Waterfall;
 
 const WATERFALL_MESSAGE_CAPACITY: usize = 64;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 0.01;
 const STREAM_BUFFER_SIZE: usize = 1024;
 const WATERFALL_OUTPUT_RATE: f64 = 120.0; // 120 waterfall rows per second
+const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 
 fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
     if ranges.is_empty() {
@@ -45,62 +50,258 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
     value.clamp(closest_range.minimum, closest_range.maximum)
 }
 
-pub struct HardwareDeviceDescriptor {
-    pub args: soapysdr::Args,
+pub struct WaterfallMessage {
+    pub device_id: HardwareDeviceId,
+    pub channel_index: usize,
+    pub center_frequency: f64,
+    pub width: f64,
+    pub waterfall_row: Vec<f32>,
 }
 
-impl std::fmt::Debug for HardwareDeviceDescriptor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HardwareDeviceDescriptor")
-            .field("args", &format_args!("{}", self.args))
-            .finish()
-    }
+type HardwareDeviceId = String;
+
+#[derive(Clone, Debug, Default)]
+pub struct HardwareParams {
+    pub devices: HashMap<HardwareDeviceId, HardwareDeviceParams>,
+    pub enumerate: bool,
 }
 
-impl Clone for HardwareDeviceDescriptor {
-    fn clone(&self) -> Self {
-        Self {
-            args: self.args.iter().collect(),
+pub struct Hardware {
+    devices: HashMap<HardwareDeviceId, HardwareDevice>,
+    waterfall_sender: SyncSender<WaterfallMessage>,
+    waterfall_receiver: Receiver<WaterfallMessage>,
+}
+
+impl Hardware {
+    pub fn new() -> Self {
+        let (waterfall_sender, waterfall_receiver) = mpsc::sync_channel(WATERFALL_MESSAGE_CAPACITY);
+        Hardware {
+            devices: Default::default(),
+            waterfall_sender,
+            waterfall_receiver,
         }
     }
+
+    pub fn update(&mut self, params: &mut HardwareParams) {
+        if params.enumerate {
+            self.devices
+                .retain(|_, d| matches!(d.active, HardwareState::Active(_)));
+
+            let enumerated_devices = soapysdr::enumerate("").unwrap();
+            for enumerated_args in enumerated_devices {
+                let enumerated_id = format!("{}", enumerated_args);
+                if self.devices.iter().any(|(id, _)| id == &enumerated_id) {
+                    continue;
+                }
+                self.devices.insert(
+                    enumerated_id.clone(),
+                    HardwareDevice::new(
+                        enumerated_id,
+                        enumerated_args,
+                        self.waterfall_sender.clone(),
+                    ),
+                );
+            }
+            params.enumerate = false;
+        }
+
+        // Remove any devices from params that are not present
+        params.devices.retain(|id, _| self.devices.contains_key(id));
+
+        // Insert devices that are present but missing from params
+        for (id, _) in self.devices.iter() {
+            if let Entry::Vacant(e) = params.devices.entry(id.to_string()) {
+                e.insert(Default::default());
+            }
+        }
+        params.devices.retain(|id, _| self.devices.contains_key(id));
+
+        // Call update on each device
+        for (id, device_params) in params.devices.iter_mut() {
+            let device = self.devices.get_mut(id).unwrap();
+            device.update(device_params);
+        }
+    }
+
+    pub fn shutdown(mut self) {
+        let polling_period = time::Duration::from_micros((SHUTDOWN_POLLING_PERIOD * 1e9) as u64);
+        let mut params = Default::default();
+        while !self
+            .devices
+            .values()
+            .all(|device| matches!(device.active, HardwareState::Inactive))
+        {
+            self.update(&mut params);
+            thread::sleep(polling_period);
+        }
+    }
+
+    pub fn waterfall_try_recv(&mut self) -> Option<WaterfallMessage> {
+        self.waterfall_receiver.try_recv().ok()
+    }
 }
 
-pub fn enumerate() -> Result<Vec<HardwareDeviceDescriptor>, soapysdr::Error> {
-    let devices = soapysdr::enumerate("")?;
-    Ok(devices
-        .into_iter()
-        .map(|args| HardwareDeviceDescriptor { args })
-        .collect())
+struct HardwareDevice {
+    device_id: HardwareDeviceId,
+    args: soapysdr::Args,
+    active: HardwareState<ActiveHardwareDevice>,
+    waterfall_sender: SyncSender<WaterfallMessage>,
 }
 
-pub struct HardwareDevice {
+enum HardwareState<T> {
+    Inactive,
+    Active(T),
+    ShuttingDown(T),
+}
+
+impl<T> HardwareState<T> {
+    fn shutdown(&mut self) {
+        let Self::Active(val) = mem::replace(self, HardwareState::Inactive) else {
+            panic!("Must be in Active state to shut down");
+        };
+        *self = Self::ShuttingDown(val);
+    }
+    fn deactivate(&mut self) -> T {
+        let Self::ShuttingDown(val) = mem::replace(self, HardwareState::Inactive) else {
+            panic!("Must be in ShuttingDown state to deactivate");
+        };
+        val
+    }
+}
+
+struct ActiveHardwareDevice {
     rx_channels: Vec<HardwareDeviceRxChannel>,
     tx_channels: Vec<HardwareDeviceTxChannel>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct HardwareDeviceParams {
+    pub active: bool,
+    pub rx_channels: Vec<HardwareDeviceRxChannelParams>,
+    pub tx_channels: Vec<HardwareDeviceTxChannelParams>,
+}
+
 impl HardwareDevice {
-    pub fn new(descriptor: HardwareDeviceDescriptor) -> Result<Self, soapysdr::Error> {
-        let device = soapysdr::Device::new(descriptor.args)?;
-        let num_rx = device.num_channels(soapysdr::Direction::Rx)?;
-        let num_tx = device.num_channels(soapysdr::Direction::Tx)?;
+    fn new(
+        device_id: HardwareDeviceId,
+        args: soapysdr::Args,
+        waterfall_sender: SyncSender<WaterfallMessage>,
+    ) -> Self {
+        HardwareDevice {
+            device_id,
+            args,
+            active: HardwareState::Inactive,
+            waterfall_sender,
+        }
+    }
 
-        let rx_channels = (0..num_rx)
-            .map(|i| HardwareDeviceRxChannel::new(i, device.clone()))
-            .collect();
+    fn update(&mut self, params: &mut HardwareDeviceParams) {
+        match &self.active {
+            // Handle state transitions
+            HardwareState::Inactive => {
+                if params.active {
+                    // Create a new device
+                    let device = soapysdr::Device::new(format!("{}", self.args).as_str()).unwrap();
+                    let num_rx = device.num_channels(soapysdr::Direction::Rx).unwrap();
+                    let num_tx = device.num_channels(soapysdr::Direction::Tx).unwrap();
 
-        let tx_channels = (0..num_tx)
-            .map(|i| HardwareDeviceTxChannel::new(i, device.clone()))
-            .collect();
+                    let rx_channels = (0..num_rx)
+                        .map(|i| {
+                            HardwareDeviceRxChannel::new(
+                                self.device_id.clone(),
+                                device.clone(),
+                                i,
+                                self.waterfall_sender.clone(),
+                            )
+                        })
+                        .collect();
 
-        Ok(Self {
-            rx_channels,
-            tx_channels,
-        })
+                    let tx_channels = (0..num_tx)
+                        .map(|i| HardwareDeviceTxChannel::new(i, device.clone()))
+                        .collect();
+
+                    self.active = HardwareState::Active(ActiveHardwareDevice {
+                        rx_channels,
+                        tx_channels,
+                    });
+                }
+            }
+            HardwareState::Active(_) => {
+                if !params.active {
+                    self.active.shutdown();
+                }
+            }
+            HardwareState::ShuttingDown(active) => {
+                if active
+                    .rx_channels
+                    .iter()
+                    .all(|channel| matches!(channel.active, HardwareState::Inactive))
+                // && active
+                //    .tx_channels
+                //    .iter()
+                //    .all(|channel| matches!(channel.active, HardwareState::Inactive))
+                {
+                    self.active.deactivate();
+                }
+            }
+        };
+
+        // Update params
+        let shutting_down = matches!(self.active, HardwareState::ShuttingDown(_));
+        match &mut self.active {
+            HardwareState::Inactive => {
+                // Make sure params reflects no channels
+                params.rx_channels.clear();
+                params.tx_channels.clear();
+            }
+            HardwareState::Active(active) | HardwareState::ShuttingDown(active) => {
+                // Remove extra channels from params
+                params.rx_channels.truncate(active.rx_channels.len());
+                params.tx_channels.truncate(active.tx_channels.len());
+
+                // Add missing channels to params
+                for _ in params.rx_channels.len()..active.rx_channels.len() {
+                    params.rx_channels.push(Default::default());
+                }
+                for _ in params.tx_channels.len()..active.tx_channels.len() {
+                    params.tx_channels.push(Default::default());
+                }
+
+                if shutting_down {
+                    // It is not valid for active = true
+                    // while we are shutting down
+                    params.active = false;
+                }
+
+                // Call update on all channels in params
+                for (channel, channel_params) in active
+                    .rx_channels
+                    .iter_mut()
+                    .zip(params.rx_channels.iter_mut())
+                {
+                    if shutting_down {
+                        channel_params.active = false;
+                    }
+                    channel.update(channel_params);
+                }
+
+                for (channel, channel_params) in active
+                    .tx_channels
+                    .iter_mut()
+                    .zip(params.tx_channels.iter_mut())
+                {
+                    if shutting_down {
+                        channel_params.active = false;
+                    }
+                    channel.update(channel_params);
+                }
+            }
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct HardwareDeviceRxChannelParameters {
+#[derive(Debug, Clone, Default)]
+pub struct HardwareDeviceRxChannelParams {
     pub active: bool,
     pub sample_rate: f64,
     pub frequency: f64,
@@ -109,25 +310,37 @@ pub struct HardwareDeviceRxChannelParameters {
 
 struct ActiveHardwareDeviceRxChannel {
     join_handle: JoinHandle<()>,
-    control_sender: SyncSender<HardwareDeviceRxChannelParameters>,
+    control_sender: SyncSender<HardwareDeviceRxChannelControlMessage>,
 }
 
-pub struct HardwareDeviceRxChannel {
+enum HardwareDeviceRxChannelControlMessage {
+    SetSampleRate(f64),
+    SetFrequency(f64),
+    SetBandwidth(f64),
+    Shutdown,
+}
+
+struct HardwareDeviceRxChannel {
+    device_id: HardwareDeviceId,
     channel_index: usize,
-    active: Option<ActiveHardwareDeviceRxChannel>,
+    waterfall_sender: SyncSender<WaterfallMessage>,
+    active: HardwareState<ActiveHardwareDeviceRxChannel>,
     device: soapysdr::Device,
-    last_parameters: HardwareDeviceRxChannelParameters,
     sample_rate_range: Vec<soapysdr::Range>,
     frequency_range: Vec<soapysdr::Range>,
     bandwidth_range: Vec<soapysdr::Range>,
-    waterfall_receiver: Receiver<WaterfallMessage>,
-    waterfall_sender: SyncSender<WaterfallMessage>,
+    sample_rate: f64,
+    frequency: f64,
+    bandwidth: f64,
 }
 
 impl HardwareDeviceRxChannel {
-    fn new(channel_index: usize, device: soapysdr::Device) -> Self {
-        let (waterfall_sender, waterfall_receiver) = mpsc::sync_channel(WATERFALL_MESSAGE_CAPACITY);
-
+    fn new(
+        device_id: HardwareDeviceId,
+        device: soapysdr::Device,
+        channel_index: usize,
+        waterfall_sender: SyncSender<WaterfallMessage>,
+    ) -> Self {
         let sample_rate_range = device
             .get_sample_rate_range(soapysdr::Direction::Rx, channel_index)
             .unwrap_or_default();
@@ -138,169 +351,219 @@ impl HardwareDeviceRxChannel {
             .bandwidth_range(soapysdr::Direction::Rx, channel_index)
             .unwrap_or_default();
 
-        let last_parameters = HardwareDeviceRxChannelParameters {
-            active: false,
-            sample_rate: device
-                .sample_rate(soapysdr::Direction::Rx, channel_index)
-                .unwrap(),
-            frequency: device
-                .frequency(soapysdr::Direction::Rx, channel_index)
-                .unwrap(),
-            bandwidth: device
-                .bandwidth(soapysdr::Direction::Rx, channel_index)
-                .unwrap(),
-        };
+        let sample_rate = device
+            .sample_rate(soapysdr::Direction::Rx, channel_index)
+            .unwrap();
+        let frequency = device
+            .frequency(soapysdr::Direction::Rx, channel_index)
+            .unwrap();
+        let bandwidth = device
+            .bandwidth(soapysdr::Direction::Rx, channel_index)
+            .unwrap();
 
         Self {
+            device_id,
             channel_index,
-            active: None,
+            active: HardwareState::Inactive,
             device,
-            last_parameters,
             sample_rate_range,
             frequency_range,
             bandwidth_range,
-            waterfall_receiver,
+            sample_rate,
+            frequency,
+            bandwidth,
             waterfall_sender,
         }
     }
 
-    pub fn poll(&mut self, parameters: &mut HardwareDeviceRxChannelParameters) {
-        // Receive updates from thread
-        if let Some(active) = self.active.as_ref()
-            && active.join_handle.is_finished()
-        {
-            self.active
-                .take()
-                .unwrap()
-                .join_handle
-                .join()
-                .unwrap_or_else(|e| {
-                    eprintln!("Radio RX thread panicked: {e:?}");
-                })
-        }
+    fn update(&mut self, params: &mut HardwareDeviceRxChannelParams) {
+        match &self.active {
+            // Handle state transitions
+            HardwareState::Inactive => {
+                if params.active {
+                    // Start new thread
+                    let device_id = self.device_id.clone();
+                    let channel_index = self.channel_index;
+                    let device = self.device.clone();
+                    let waterfall_sender = self.waterfall_sender.clone();
+                    let (control_sender, control_receiver) =
+                        mpsc::sync_channel(CONTROL_MESSAGE_CAPACITY);
+                    let sample_rate = self.sample_rate;
+                    let frequency = self.frequency;
+                    let bandwidth = self.bandwidth;
+                    let join_handle = spawn(move || {
+                        let stream = device
+                            .rx_stream::<num_complex::Complex32>(&[channel_index])
+                            .unwrap();
+                        Self::process(
+                            device_id,
+                            channel_index,
+                            device,
+                            stream,
+                            control_receiver,
+                            waterfall_sender,
+                            sample_rate,
+                            frequency,
+                            bandwidth,
+                        );
+                    });
 
+                    self.active = HardwareState::Active(ActiveHardwareDeviceRxChannel {
+                        join_handle,
+                        control_sender,
+                    });
+                }
+            }
+            HardwareState::Active(active) => {
+                if !params.active {
+                    active
+                        .control_sender
+                        .send(HardwareDeviceRxChannelControlMessage::Shutdown)
+                        .unwrap();
+                    self.active.shutdown();
+                } else if active.join_handle.is_finished() {
+                    self.active.shutdown();
+                    let active = self.active.deactivate();
+                    match active.join_handle.join() {
+                        Err(e) => {
+                            eprintln!("Radio RX thread panicked: {e:?}");
+                        }
+                        Ok(()) => {
+                            eprintln!("Radio RX thread terminated unexpectedly");
+                        }
+                    }
+                }
+            }
+            HardwareState::ShuttingDown(active) => {
+                if active.join_handle.is_finished() {
+                    let active = self.active.deactivate();
+                    active.join_handle.join().unwrap_or_else(|e| {
+                        eprintln!("Radio RX thread panicked while shutting down: {e:?}");
+                    });
+                }
+            }
+        };
+
+        // Update params:
         // Snap any values in parameters to the nearest valid option
         // Only run snap_to_ranges if the given parameter has changed
-        if self.last_parameters.sample_rate != parameters.sample_rate {
-            parameters.sample_rate =
-                snap_to_ranges(&self.sample_rate_range, parameters.sample_rate);
+        if self.sample_rate != params.sample_rate {
+            params.sample_rate = snap_to_ranges(&self.sample_rate_range, params.sample_rate);
         }
 
-        if self.last_parameters.frequency != parameters.frequency {
-            parameters.frequency = snap_to_ranges(&self.frequency_range, parameters.frequency);
+        if self.frequency != params.frequency {
+            params.frequency = snap_to_ranges(&self.frequency_range, params.frequency);
         }
 
-        if self.last_parameters.bandwidth != parameters.bandwidth {
-            parameters.bandwidth = snap_to_ranges(&self.bandwidth_range, parameters.bandwidth);
+        if self.bandwidth != params.bandwidth {
+            params.bandwidth = snap_to_ranges(&self.bandwidth_range, params.bandwidth);
         }
 
-        if parameters.active && !self.last_parameters.active {
-            if self.active.is_some() {
-                // Update active parameter: it is not valid to set it back to true
-                // while we are shutting down (before the thread has terminated)
-                parameters.active = false;
-            } else {
-                // Start new thread
-                let device = self.device.clone();
-                let channel_index = self.channel_index;
-                let waterfall_sender = self.waterfall_sender.clone();
-                let (control_sender, control_receiver) =
-                    mpsc::sync_channel(CONTROL_MESSAGE_CAPACITY);
-
-                let init_parameters = parameters.clone();
-                let device_for_thread = device.clone();
-                let join_handle = spawn(move || {
-                    let stream = device
-                        .rx_stream::<num_complex::Complex32>(&[channel_index])
+        match &self.active {
+            HardwareState::Inactive => {}
+            HardwareState::Active(active) => {
+                // If parameters have changed,
+                // send message
+                if params.sample_rate != self.sample_rate {
+                    self.sample_rate = params.sample_rate;
+                    active
+                        .control_sender
+                        .send(HardwareDeviceRxChannelControlMessage::SetSampleRate(
+                            self.sample_rate,
+                        ))
                         .unwrap();
-                    Self::process(
-                        stream,
-                        device_for_thread,
-                        channel_index,
-                        control_receiver,
-                        waterfall_sender,
-                        init_parameters,
-                    );
-                });
-
-                self.active = Some(ActiveHardwareDeviceRxChannel {
-                    join_handle,
-                    control_sender,
-                });
-                self.last_parameters = parameters.clone();
+                }
+                if params.frequency != self.frequency {
+                    self.frequency = params.frequency;
+                    active
+                        .control_sender
+                        .send(HardwareDeviceRxChannelControlMessage::SetFrequency(
+                            self.frequency,
+                        ))
+                        .unwrap();
+                }
+                if params.bandwidth != self.bandwidth {
+                    self.bandwidth = params.bandwidth;
+                    active
+                        .control_sender
+                        .send(HardwareDeviceRxChannelControlMessage::SetBandwidth(
+                            self.bandwidth,
+                        ))
+                        .unwrap();
+                }
             }
-        }
-
-        if &self.last_parameters != parameters {
-            if let Some(active) = self.active.as_mut() {
-                // Send parameter change message
-                active.control_sender.send(parameters.clone()).unwrap();
+            HardwareState::ShuttingDown(_) => {
+                // It is not valid for active = true
+                // while we are shutting down
+                params.active = false;
             }
-            self.last_parameters = parameters.clone();
         }
     }
 
     fn process(
-        mut stream: soapysdr::RxStream<num_complex::Complex32>,
-        device: soapysdr::Device,
+        device_id: HardwareDeviceId,
         channel_index: usize,
-        control_receiver: Receiver<HardwareDeviceRxChannelParameters>,
+        device: soapysdr::Device,
+        mut stream: soapysdr::RxStream<num_complex::Complex32>,
+        control_receiver: Receiver<HardwareDeviceRxChannelControlMessage>,
         waterfall_sender: SyncSender<WaterfallMessage>,
-        mut current_parameters: HardwareDeviceRxChannelParameters,
+        mut sample_rate: f64,
+        mut frequency: f64,
+        mut bandwidth: f64,
     ) {
-        loop {
-            if !current_parameters.active {
-                // Shutdown requested
-                break;
-            }
-
+        'outer: loop {
             // Apply current parameters
             device
-                .set_sample_rate(
-                    soapysdr::Direction::Rx,
-                    channel_index,
-                    current_parameters.sample_rate,
-                )
+                .set_sample_rate(soapysdr::Direction::Rx, channel_index, sample_rate)
                 .unwrap();
             device
-                .set_frequency(
-                    soapysdr::Direction::Rx,
-                    channel_index,
-                    current_parameters.frequency,
-                    (),
-                )
+                .set_frequency(soapysdr::Direction::Rx, channel_index, frequency, ())
                 .unwrap();
             device
-                .set_bandwidth(
-                    soapysdr::Direction::Rx,
-                    channel_index,
-                    current_parameters.bandwidth,
-                )
+                .set_bandwidth(soapysdr::Direction::Rx, channel_index, bandwidth)
                 .unwrap();
 
             stream.activate(None).unwrap();
             let mut buffer = vec![num_complex::Complex32::new(0.0, 0.0); STREAM_BUFFER_SIZE];
-            let mut waterfall =
-                Waterfall::new(current_parameters.sample_rate, WATERFALL_OUTPUT_RATE);
+            let mut waterfall = Waterfall::new(sample_rate, WATERFALL_OUTPUT_RATE);
 
             // Inner loop for data reading
-            loop {
+            'inner: loop {
                 // Check for parameter changes
-                if let Ok(new_parameters) = control_receiver.try_recv() {
-                    // Deactivate stream to apply new parameters
-                    stream.deactivate(None).unwrap();
-                    current_parameters = new_parameters;
-                    break; // Break to outer loop to reapply parameters
+                let mut new_parameters = false;
+                while let Ok(msg) = control_receiver.try_recv() {
+                    match msg {
+                        HardwareDeviceRxChannelControlMessage::SetSampleRate(x) => {
+                            sample_rate = x;
+                            new_parameters = true;
+                        }
+                        HardwareDeviceRxChannelControlMessage::SetFrequency(x) => {
+                            frequency = x;
+                            new_parameters = true;
+                        }
+                        HardwareDeviceRxChannelControlMessage::SetBandwidth(x) => {
+                            bandwidth = x;
+                            new_parameters = true;
+                        }
+                        HardwareDeviceRxChannelControlMessage::Shutdown => {
+                            break 'outer;
+                        }
+                    }
+                }
+                if new_parameters {
+                    break 'inner;
                 }
 
                 match stream.read(&mut [&mut buffer], (STREAM_READ_TIMEOUT * 1e6) as i64) {
                     Ok(_) => {
                         let waterfall_sender_clone = waterfall_sender.clone();
-                        let center_frequency = current_parameters.frequency;
-                        let width = current_parameters.sample_rate;
+                        let center_frequency = frequency;
+                        let width = sample_rate;
 
                         waterfall.process(&buffer, |waterfall_row| {
                             let msg = WaterfallMessage {
+                                device_id: device_id.clone(),
+                                channel_index,
                                 center_frequency,
                                 width,
                                 waterfall_row,
@@ -317,13 +580,17 @@ impl HardwareDeviceRxChannel {
 
         stream.deactivate(None).ok();
     }
-
-    pub fn try_recv_waterfall(&mut self) -> Option<WaterfallMessage> {
-        self.waterfall_receiver.try_recv().ok()
-    }
 }
 
-pub struct HardwareDeviceTxChannel {
+#[derive(Debug, Clone, Default)]
+pub struct HardwareDeviceTxChannelParams {
+    pub active: bool,
+    pub sample_rate: f64,
+    pub frequency: f64,
+    pub bandwidth: f64,
+}
+
+struct HardwareDeviceTxChannel {
     channel_index: usize,
     device: soapysdr::Device,
 }
@@ -335,6 +602,7 @@ impl HardwareDeviceTxChannel {
             device,
         }
     }
+    fn update(&mut self, _params: &mut HardwareDeviceTxChannelParams) {}
 }
 
 pub trait IntoComplexF32 {

@@ -3,7 +3,23 @@ name = "sdr"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "sdr-gui"
+path = "src/bin/main.rs"
+
 [dependencies]
 soapysdr = "0.4.5"
 num-complex = "0.4"
 rustfft = "6.2"
+eframe = { version = "0.33.3", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "wayland",
+    "x11",
+] }
+egui = "0.33.3"
+egui-wgpu = { version = "0.33.3", features = ["winit"] }
+wgpu = { version = "27.0", features = ["vulkan", "dx12", "metal"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
