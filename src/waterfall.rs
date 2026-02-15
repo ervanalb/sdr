@@ -1,4 +1,4 @@
-use crate::IntoComplexF32;
+use crate::hardware::IntoComplexF32;
 
 pub struct Waterfall {
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
@@ -8,6 +8,7 @@ pub struct Waterfall {
     fft_size: usize,
     accumulations_target: usize,
     accumulations_count: usize,
+    period: f64,
 }
 
 const TARGET_BIN_SIZE: f64 = 20_000.0; // 20 KHz
@@ -30,6 +31,8 @@ impl Waterfall {
             (sample_rate * output_period / (fft_size as f64)).ceil() as usize;
         let accumulations_target = accumulations_target.max(1); // At least 1
 
+        let period = accumulations_target as f64 * fft_size as f64 / sample_rate;
+
         Self {
             fft,
             fft_buffer: vec![num_complex::Complex32::new(0.0, 0.0); fft_size],
@@ -38,7 +41,12 @@ impl Waterfall {
             fft_size,
             accumulations_target,
             accumulations_count: 0,
+            period,
         }
+    }
+
+    pub fn period(&self) -> f64 {
+        self.period
     }
 
     pub fn process<T: IntoComplexF32 + Copy>(
