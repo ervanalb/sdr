@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use sdr::hardware::{Hardware, HardwareParams};
+use sdr::waterfall_gpu::WaterfallGpu;
 
 mod ui;
 
@@ -27,6 +28,7 @@ struct SdrApp {
     hardware: Option<Hardware>,
     hardware_params: HardwareParams,
     viewport_state: ui::canvas::Viewport,
+    waterfall_gpu: WaterfallGpu,
 }
 
 impl SdrApp {
@@ -37,6 +39,7 @@ impl SdrApp {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
+            waterfall_gpu: WaterfallGpu::new(),
         }
     }
 }
@@ -48,7 +51,7 @@ impl eframe::App for SdrApp {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
 
@@ -56,19 +59,34 @@ impl eframe::App for SdrApp {
         if let Some(hardware) = &mut self.hardware {
             hardware.update(&mut self.hardware_params);
 
-            // Poll waterfall messages
-            while let Some(msg) = hardware.waterfall_try_recv() {
-                println!(
-                    "Waterfall: device={}, channel={}, t={:?}..{:?} freq={:.2} MHz, width={:.2} MHz, samples={}",
-                    msg.device_id,
-                    msg.channel_index,
-                    msg.start_time,
-                    msg.end_time,
-                    msg.center_frequency / 1e6,
-                    msg.width / 1e6,
-                    msg.waterfall_row.len()
-                );
+            // Upload waterfall messages to GPU
+            if let Some(wgpu_render_state) = frame.wgpu_render_state() {
+                let device = &wgpu_render_state.device;
+                let queue = &wgpu_render_state.queue;
+
+                while let Some(msg) = hardware.waterfall_try_recv() {
+                    self.waterfall_gpu.add_row(&msg, device, queue);
+                }
             }
+        }
+
+        // Get draw list and print chunk info
+        let draw_list = self.waterfall_gpu.draw_list();
+
+        // Print chunk draw info
+        for chunk in draw_list {
+            println!(
+                "Chunk: device={}, channel={}, rows={}..{}, t={:?}..{:?}, freq={:.2} MHz, width={:.2} MHz, period={:.3}s",
+                chunk.device_id,
+                chunk.channel_index,
+                chunk.start_row,
+                chunk.end_row,
+                chunk.start_time,
+                chunk.end_time,
+                chunk.center_frequency / 1e6,
+                chunk.width / 1e6,
+                chunk.period
+            );
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {

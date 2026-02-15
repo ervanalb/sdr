@@ -25,29 +25,23 @@ impl WaterfallGpu {
         }
     }
 
-    pub fn update<'a>(
-        &mut self,
-        messages: impl Iterator<Item = &'a WaterfallMessage>,
-        device: &Device,
-        queue: &Queue,
-    ) -> impl Iterator<Item = ChunkDrawInfo> {
+    pub fn add_row(&mut self, msg: &WaterfallMessage, device: &Device, queue: &Queue) {
+        let key = (
+            msg.device_id.clone(),
+            msg.channel_index,
+            msg.waterfall_row.len(),
+        );
+
+        let group = self.texture_groups.entry(key).or_default();
+        group.add_row(msg, device, queue);
+    }
+
+    pub fn draw_list(&mut self) -> impl Iterator<Item = ChunkDrawInfo> {
         let now = Instant::now();
 
         // Prune old textures across all groups
         self.texture_groups
             .retain(|_, group| group.prune_old_textures(now));
-
-        // Process all incoming waterfall messages
-        for msg in messages {
-            let key = (
-                msg.device_id.clone(),
-                msg.channel_index,
-                msg.waterfall_row.len(),
-            );
-
-            let group = self.texture_groups.entry(key).or_default();
-            group.add_row(msg, device, queue);
-        }
 
         // Collect all chunks into a draw list
         self.texture_groups
@@ -176,13 +170,13 @@ impl TextureInfo {
             && last_chunk.width == msg.width
         {
             // Extend the last chunk
-            last_chunk.end_row = self.current_row;
+            last_chunk.end_row = self.current_row + 1;
             last_chunk.end_time = msg.end_time;
         } else {
             // Create a new chunk
             self.chunks.push(Chunk {
                 start_row: self.current_row,
-                end_row: self.current_row,
+                end_row: self.current_row + 1,
                 period: msg.period,
                 center_frequency: msg.center_frequency,
                 width: msg.width,
