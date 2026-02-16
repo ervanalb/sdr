@@ -14,6 +14,18 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1200.0, 800.0])
             .with_title("SDR"),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
+                eframe::egui_wgpu::WgpuSetupCreateNew {
+                    device_descriptor: std::sync::Arc::new(|_| wgpu::DeviceDescriptor {
+                        required_features: wgpu::Features::FLOAT32_FILTERABLE,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -35,11 +47,12 @@ impl SdrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         ui::canvas::init(cc);
+        let device = &cc.wgpu_render_state.as_ref().unwrap().device;
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
-            waterfall_gpu: WaterfallGpu::new(),
+            waterfall_gpu: WaterfallGpu::new(device),
         }
     }
 }
@@ -68,25 +81,6 @@ impl eframe::App for SdrApp {
                     self.waterfall_gpu.add_row(&msg, device, queue);
                 }
             }
-        }
-
-        // Get draw list and print chunk info
-        let draw_list = self.waterfall_gpu.draw_list();
-
-        // Print chunk draw info
-        for chunk in draw_list {
-            println!(
-                "Chunk: device={}, channel={}, rows={}..{}, t={:?}..{:?}, freq={:.2} MHz, width={:.2} MHz, period={:.3}s",
-                chunk.device_id,
-                chunk.channel_index,
-                chunk.start_row,
-                chunk.end_row,
-                chunk.start_time,
-                chunk.end_time,
-                chunk.center_frequency / 1e6,
-                chunk.width / 1e6,
-                chunk.period
-            );
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -191,7 +185,10 @@ impl eframe::App for SdrApp {
             ui.heading("Waterfall Display");
             ui.separator();
 
-            self::ui::canvas::ui(ui, "canvas", &mut self.viewport_state);
+            // Get draw list from waterfall GPU
+            let waterfall_chunks = self.waterfall_gpu.draw_list().collect();
+
+            self::ui::canvas::ui(ui, "canvas", &mut self.viewport_state, waterfall_chunks);
         });
     }
 }

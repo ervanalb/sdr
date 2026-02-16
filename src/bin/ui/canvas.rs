@@ -1,21 +1,27 @@
+use std::collections::HashMap;
 use std::hash::Hash;
+use std::time::Instant;
 
 use eframe::wgpu;
+use sdr::waterfall_gpu::ChunkDrawInfo;
+
+use super::waterfall::WaterfallRenderer;
 
 const SCROLL_SPEED: f32 = 1.0;
 const ZOOM_SPEED: f32 = 1.0;
 
 pub struct StaticResources {
-    render_pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    resources: Option<Resources>,
+    target_format: wgpu::TextureFormat,
+    instances: HashMap<egui::Id, CanvasResources>,
 }
 
-pub struct Resources {
-    vertex_buffer: wgpu::Buffer,
+struct CanvasResources {
+    grid_pipeline: wgpu::RenderPipeline,
+    grid_vertex_buffer: wgpu::Buffer,
+    grid_num_vertices: u32,
     uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    num_vertices: u32,
+    grid_bind_group: wgpu::BindGroup,
+    waterfall_renderer: WaterfallRenderer,
 }
 
 #[repr(C)]
@@ -23,101 +29,31 @@ pub struct Resources {
 struct ViewportUniforms {
     viewport_size: [f32; 2],
     translation: [f32; 2],
-    scale: f32,
-    _padding: [f32; 3],
+    scale: [f32; 2],
+    _padding: [f32; 2],
 }
 
 pub fn init(cc: &eframe::CreationContext<'_>) {
     let wgpu_render_state = cc.wgpu_render_state.as_ref().unwrap();
-    let device = &wgpu_render_state.device;
     let target_format = wgpu_render_state.target_format;
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Canvas Shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("canvas_shader.wgsl").into()),
-    });
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Viewport Bind Group Layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }],
-    });
-
-    let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Canvas Render Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Canvas Render Pipeline"),
-        layout: Some(&render_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            }],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: target_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        multiview: None,
-        cache: None,
-    });
 
     wgpu_render_state
         .renderer
         .write()
         .callback_resources
         .insert(StaticResources {
-            render_pipeline,
-            bind_group_layout,
-            resources: None,
+            target_format,
+            instances: HashMap::new(),
         });
 }
 
 struct Callback {
+    id: egui::Id,
     viewport_size: egui::Vec2,
     translation: egui::Vec2,
-    scale: f32,
+    scale: egui::Vec2,
+    waterfall_chunks: Vec<ChunkDrawInfo>,
+    current_time: Instant,
 }
 
 impl egui_wgpu::CallbackTrait for Callback {
@@ -127,79 +63,174 @@ impl egui_wgpu::CallbackTrait for Callback {
         queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
-        resources: &mut egui_wgpu::CallbackResources,
+        callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let static_resources: &mut StaticResources = resources.get_mut().unwrap();
+        let static_resources: &mut StaticResources = callback_resources.get_mut().unwrap();
+        let target_format = static_resources.target_format;
 
-        if static_resources.resources.is_none() {
-            // Create placeholder geometry: a simple grid
-            let grid_size = 10;
-            let spacing = 50.0;
-            let mut vertices = Vec::new();
+        // Get or create canvas resources
+        let resources = static_resources
+            .instances
+            .entry(self.id)
+            .or_insert_with(|| {
+                // Create grid shader and pipeline
+                let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Grid Shader"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("canvas_shader.wgsl").into()),
+                });
 
-            // Vertical lines
-            for i in -grid_size..=grid_size {
-                let x = i as f32 * spacing;
-                vertices.push([x, -grid_size as f32 * spacing]);
-                vertices.push([x, grid_size as f32 * spacing]);
-            }
+                let grid_bind_group_layout =
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("Grid Bind Group Layout"),
+                        entries: &[wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        }],
+                    });
 
-            // Horizontal lines
-            for i in -grid_size..=grid_size {
-                let y = i as f32 * spacing;
-                vertices.push([-grid_size as f32 * spacing, y]);
-                vertices.push([grid_size as f32 * spacing, y]);
-            }
+                let grid_pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("Grid Pipeline Layout"),
+                        bind_group_layouts: &[&grid_bind_group_layout],
+                        push_constant_ranges: &[],
+                    });
 
-            let num_vertices = vertices.len() as u32;
-            let vertex_buffer_size = std::mem::size_of::<[f32; 2]>() as u64 * num_vertices as u64;
+                let grid_pipeline =
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some("Grid Render Pipeline"),
+                        layout: Some(&grid_pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &grid_shader,
+                            entry_point: Some("vs_main"),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<[f32; 2]>()
+                                    as wgpu::BufferAddress,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[wgpu::VertexAttribute {
+                                    offset: 0,
+                                    shader_location: 0,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                }],
+                            }],
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &grid_shader,
+                            entry_point: Some("fs_main"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: target_format,
+                                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::LineList,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode: None,
+                            polygon_mode: wgpu::PolygonMode::Fill,
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState {
+                            count: 1,
+                            mask: !0,
+                            alpha_to_coverage_enabled: false,
+                        },
+                        multiview: None,
+                        cache: None,
+                    });
 
-            let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Canvas Vertex Buffer"),
-                size: vertex_buffer_size,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+                // Create grid geometry: a simple grid
+                let x_grid_size = 100;
+                let x_spacing = 1e6;
+                let y_grid_size = 10;
+                let y_spacing = 1.;
+                let mut vertices = Vec::new();
+
+                // Vertical lines
+                for i in -x_grid_size..=x_grid_size {
+                    let x = i as f32 * x_spacing;
+                    vertices.push([x, -y_grid_size as f32 * y_spacing]);
+                    vertices.push([x, y_grid_size as f32 * y_spacing]);
+                }
+
+                // Horizontal lines
+                for i in -y_grid_size..=y_grid_size {
+                    let y = i as f32 * y_spacing;
+                    vertices.push([-x_grid_size as f32 * x_spacing, y]);
+                    vertices.push([x_grid_size as f32 * x_spacing, y]);
+                }
+
+                let grid_num_vertices = vertices.len() as u32;
+
+                let grid_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Grid Vertex Buffer"),
+                    size: (vertices.len() * std::mem::size_of::<[f32; 2]>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+
+                queue.write_buffer(&grid_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+
+                // Create uniform buffer
+                let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Viewport Uniform Buffer"),
+                    size: std::mem::size_of::<ViewportUniforms>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+
+                let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Grid Bind Group"),
+                    layout: &grid_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    }],
+                });
+
+                // Create waterfall renderer
+                let waterfall_renderer = WaterfallRenderer::new(device, target_format);
+
+                CanvasResources {
+                    grid_pipeline,
+                    grid_vertex_buffer,
+                    grid_num_vertices,
+                    uniform_buffer,
+                    grid_bind_group,
+                    waterfall_renderer,
+                }
             });
-
-            let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Viewport Uniform Buffer"),
-                size: std::mem::size_of::<ViewportUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Viewport Bind Group"),
-                layout: &static_resources.bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                }],
-            });
-
-            queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-
-            static_resources.resources = Some(Resources {
-                vertex_buffer,
-                uniform_buffer,
-                bind_group,
-                num_vertices,
-            });
-        }
-
-        let resources = static_resources.resources.as_ref().unwrap();
 
         // Update uniform buffer with viewport parameters
         let uniforms = ViewportUniforms {
             viewport_size: [self.viewport_size.x, self.viewport_size.y],
             translation: [self.translation.x, self.translation.y],
-            scale: self.scale,
-            _padding: [0.0; 3],
+            scale: [self.scale.x, self.scale.y],
+            _padding: [0.0; 2],
         };
         queue.write_buffer(
             &resources.uniform_buffer,
             0,
             bytemuck::cast_slice(&[uniforms]),
+        );
+
+        // Prepare waterfall draw calls
+        resources.waterfall_renderer.prepare(
+            self.waterfall_chunks.clone(),
+            device,
+            queue,
+            &resources.uniform_buffer,
+            self.current_time,
         );
 
         Vec::new()
@@ -209,33 +240,50 @@ impl egui_wgpu::CallbackTrait for Callback {
         &self,
         _info: egui::PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
-        resources: &egui_wgpu::CallbackResources,
+        callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let static_resources: &StaticResources = resources.get().unwrap();
-        if let Some(resources) = &static_resources.resources {
-            render_pass.set_pipeline(&static_resources.render_pipeline);
-            render_pass.set_bind_group(0, &resources.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
-            render_pass.draw(0..resources.num_vertices, 0..1);
+        let static_resources: &StaticResources = callback_resources.get().unwrap();
+
+        if let Some(resources) = static_resources.instances.get(&self.id) {
+            // Draw grid
+            render_pass.set_pipeline(&resources.grid_pipeline);
+            render_pass.set_bind_group(0, &resources.grid_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, resources.grid_vertex_buffer.slice(..));
+            render_pass.draw(0..resources.grid_num_vertices, 0..1);
+
+            // Draw waterfall
+            resources.waterfall_renderer.render(render_pass);
         }
     }
 }
 
 pub struct Viewport {
     pub translation: egui::Vec2,
-    pub scale: f32,
+    pub scale: egui::Vec2,
 }
 
 impl Default for Viewport {
     fn default() -> Self {
         Self {
             translation: egui::Vec2::ZERO,
-            scale: 1.0,
+            scale: egui::vec2(1e-3, 1e3),
         }
     }
 }
 
-pub fn ui(ui: &mut egui::Ui, _id_source: impl Hash + std::fmt::Debug, viewport: &mut Viewport) {
+fn clamp_scale(mut scale: egui::Vec2) -> egui::Vec2 {
+    scale.x = scale.x.clamp(1e-6, 1e0);
+    scale.y = scale.y.clamp(1e-1, 1e5);
+    scale
+}
+
+pub fn ui(
+    ui: &mut egui::Ui,
+    id_source: impl Hash + std::fmt::Debug,
+    viewport: &mut Viewport,
+    waterfall_chunks: Vec<ChunkDrawInfo>,
+) {
+    let id = ui.id().with(&id_source);
     let size = ui.available_size();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
@@ -246,8 +294,7 @@ pub fn ui(ui: &mut egui::Ui, _id_source: impl Hash + std::fmt::Debug, viewport: 
         // Ctrl + scroll wheel: zoom
         if zoom_delta != 1.0 {
             let old_scale = viewport.scale;
-            viewport.scale *= zoom_delta.powf(ZOOM_SPEED);
-            viewport.scale = viewport.scale.clamp(0.01, 100.0);
+            viewport.scale = clamp_scale(old_scale * zoom_delta.powf(ZOOM_SPEED));
 
             // Keep pointer position stationary
             if let Some(pointer_pos) = response.hover_pos() {
@@ -272,8 +319,7 @@ pub fn ui(ui: &mut egui::Ui, _id_source: impl Hash + std::fmt::Debug, viewport: 
         // Pinch to zoom
         if multi_touch.zoom_delta != 1.0 {
             let old_scale = viewport.scale;
-            viewport.scale *= multi_touch.zoom_delta;
-            viewport.scale = viewport.scale.clamp(0.01, 100.0);
+            viewport.scale = clamp_scale(old_scale * multi_touch.zoom_delta);
 
             let gesture_center = multi_touch.translation_delta + rect.center().to_vec2();
             let gesture_center = egui::vec2(gesture_center.x, -gesture_center.y);
@@ -291,9 +337,12 @@ pub fn ui(ui: &mut egui::Ui, _id_source: impl Hash + std::fmt::Debug, viewport: 
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         rect,
         Callback {
+            id,
             viewport_size: size,
             translation: viewport.translation,
             scale: viewport.scale,
+            waterfall_chunks,
+            current_time: Instant::now(),
         },
     ));
 }

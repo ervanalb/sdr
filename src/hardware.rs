@@ -11,7 +11,8 @@ const WATERFALL_MESSAGE_CAPACITY: usize = 64;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
 const STREAM_BUFFER_DURATION: f64 = 0.001;
-const WATERFALL_OUTPUT_PERIOD: f64 = 0.01; // 100 waterfall rows per second
+const WATERFALL_TARGET_BIN_SIZE: f64 = 5_000.0; // 5 KHz
+const WATERFALL_OUTPUT_PERIOD: f64 = 0.005; // 200 waterfall rows per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 
 fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
@@ -604,7 +605,11 @@ impl HardwareDeviceRxChannel {
             );
 
             let mut buffer = vec![num_complex::Complex::<i8>::new(0, 0); buffer_size];
-            let mut waterfall = Waterfall::new(sample_rate, WATERFALL_OUTPUT_PERIOD);
+            let mut waterfall = Waterfall::new(
+                sample_rate,
+                WATERFALL_TARGET_BIN_SIZE,
+                WATERFALL_OUTPUT_PERIOD,
+            );
             info!("Opening stream");
             let mut stream = device
                 .rx_stream::<num_complex::Complex<i8>>(&[channel_index])

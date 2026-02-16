@@ -2,7 +2,6 @@ use crate::hardware::IntoComplexF32;
 
 pub struct Waterfall {
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
-    fft_buffer: Vec<num_complex::Complex32>,
     incoming_buffer: Vec<num_complex::Complex32>,
     accumulator: Vec<f32>,
     fft_size: usize,
@@ -11,12 +10,10 @@ pub struct Waterfall {
     period: f64,
 }
 
-const TARGET_BIN_SIZE: f64 = 20_000.0; // 20 KHz
-
 impl Waterfall {
-    pub fn new(sample_rate: f64, output_period: f64) -> Self {
-        // Pick a FFT size that is a power of 2 that is at least `sample_rate / TARGET_BIN_SIZE`
-        let min_fft_size = (sample_rate / TARGET_BIN_SIZE).ceil() as usize;
+    pub fn new(sample_rate: f64, target_bin_size: f64, output_period: f64) -> Self {
+        // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
+        let min_fft_size = (sample_rate / target_bin_size).ceil() as usize;
         let fft_size = min_fft_size.next_power_of_two();
 
         // Create FFT planner and plan
@@ -35,7 +32,6 @@ impl Waterfall {
 
         Self {
             fft,
-            fft_buffer: vec![num_complex::Complex32::new(0.0, 0.0); fft_size],
             incoming_buffer: Vec::with_capacity(fft_size),
             accumulator: vec![0.0; fft_size],
             fft_size,
@@ -49,7 +45,7 @@ impl Waterfall {
         self.period
     }
 
-    pub fn process<T: IntoComplexF32 + Copy>(
+    pub fn process<T: IntoComplexF32 + Copy + std::fmt::Debug>(
         &mut self,
         samples: &[T],
         mut emit: impl FnMut(Vec<f32>),
@@ -72,7 +68,7 @@ impl Waterfall {
                 self.fft.process(&mut self.incoming_buffer);
 
                 // Compute squared magnitude and add to accumulator
-                for (&sample, acc) in self.fft_buffer.iter().zip(self.accumulator.iter_mut()) {
+                for (&sample, acc) in self.incoming_buffer.iter().zip(self.accumulator.iter_mut()) {
                     let power = sample.re * sample.re + sample.im * sample.im;
                     *acc += power;
                 }
@@ -85,7 +81,8 @@ impl Waterfall {
                 // Check if we should emit
                 if self.accumulations_count >= self.accumulations_target {
                     // Normalize and convert to dB
-                    let normalization_factor = 1.0 / (self.accumulations_count as f32);
+                    let normalization_factor =
+                        1.0 / (self.accumulations_count as f32 * self.fft_size as f32);
                     let output: Vec<f32> = self
                         .accumulator
                         .iter()
