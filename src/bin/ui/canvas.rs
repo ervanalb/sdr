@@ -10,6 +10,11 @@ use super::waterfall::WaterfallRenderer;
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
 const DRAG_ZOOM_SPEED: f32 = 1.01;
+const TARGET_GRIDLINE_SEPARATION: f32 = 80.;
+
+const AVAILABLE_FREQUENCY_GRIDLINES: [f64; 15] = [
+    1e2, 5e2, 1e3, 5e3, 1e4, 5e4, 1e5, 5e5, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8, 1e9,
+];
 
 pub struct StaticResources {
     target_format: wgpu::TextureFormat,
@@ -151,6 +156,12 @@ impl Viewport {
     fn screen_space_y(&self, y: f32) -> f32 {
         y * self.scale.y + self.translation.y
     }
+    fn canvas_x(&self, x: f32) -> f32 {
+        (x - self.translation.x) / self.scale.x
+    }
+    fn canvas_y(&self, y: f32) -> f32 {
+        (y - self.translation.y) / self.scale.y
+    }
 }
 
 pub fn ui(
@@ -162,8 +173,17 @@ pub fn ui(
     //band_info: BandInfo,
 ) {
     let id = ui.id().with(&id_source);
-    let size = ui.available_size();
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+    let ui_size = ui.available_size();
+    let (ui_rect, response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
+    let figure_rect = ui_rect
+        .clone()
+        .with_min_x(ui_rect.min.x + 50.)
+        .with_min_y(ui_rect.min.y + 12.);
+    let figure_size = figure_rect.size();
+
+    let overall_size = egui::vec2(1e9, 120.);
+    let min_scale = figure_size / overall_size;
+    let max_zoom = 1e9;
 
     // Handle scroll and zoom
     if response.hovered() {
@@ -173,10 +193,11 @@ pub fn ui(
         if zoom_delta != 1.0 {
             let old_scale = viewport.scale;
             viewport.scale = viewport.scale * zoom_delta.powf(WHEEL_ZOOM_SPEED);
+            viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
 
             // Keep pointer position stationary
             if let Some(pointer_pos) = response.hover_pos() {
-                let pointer_canvas = pointer_pos - rect.min;
+                let pointer_canvas = pointer_pos - figure_rect.min;
                 viewport.translation = pointer_canvas
                     - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
             }
@@ -197,9 +218,10 @@ pub fn ui(
         let old_scale = viewport.scale;
         viewport.scale =
             old_scale * egui::vec2(DRAG_ZOOM_SPEED.powf(drag.x), DRAG_ZOOM_SPEED.powf(drag.y));
+        viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
         // Keep pointer position stationary
         if let Some(pointer_pos) = response.hover_pos() {
-            let pointer_canvas = pointer_pos - rect.min;
+            let pointer_canvas = pointer_pos - figure_rect.min;
             viewport.translation = pointer_canvas
                 - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
         }
@@ -211,6 +233,7 @@ pub fn ui(
         if multi_touch.zoom_delta != 1.0 {
             let old_scale = viewport.scale;
             viewport.scale = old_scale * multi_touch.zoom_delta;
+            viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
 
             let gesture_center = multi_touch.translation_delta;
             viewport.translation = gesture_center
@@ -221,45 +244,78 @@ pub fn ui(
         viewport.translation += multi_touch.translation_delta;
     }
 
-    let overall_size = egui::vec2(1e9, 120.);
-
-    let min_scale = size / overall_size;
-    let max_zoom = 1000.;
-    viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
-
-    let max_translation = (viewport.scale * overall_size - size).max(egui::Vec2::ZERO);
+    let max_translation = (viewport.scale * overall_size - figure_size).max(egui::Vec2::ZERO);
 
     viewport.translation = viewport
         .translation
         .clamp(-max_translation, egui::Vec2::ZERO);
 
-    let painter = ui.painter().with_clip_rect(rect);
+    let painter = ui.painter().with_clip_rect(ui_rect);
 
-    for i in 0..100 {
-        painter.vline(
-            rect.left() + viewport.screen_space_x(i as f32 * 1e7),
-            rect.y_range(),
-            (1., egui::Color32::WHITE),
+    let left = viewport.canvas_x(0.);
+    let right = viewport.canvas_x(figure_rect.width());
+    let target_gridline_period = TARGET_GRIDLINE_SEPARATION / viewport.scale.x;
+    let i = AVAILABLE_FREQUENCY_GRIDLINES
+        .partition_point(|&period| period < target_gridline_period as f64);
+    let i = i.min(AVAILABLE_FREQUENCY_GRIDLINES.len() - 1);
+    let period = AVAILABLE_FREQUENCY_GRIDLINES[i];
+    let precision = period.log10() as usize;
+
+    let left = (left as f64 / period).ceil() as i32;
+    let right = (right as f64 / period).floor() as i32;
+
+    for i in left..right {
+        let val = i as f64 * period;
+        let x = figure_rect.left() + viewport.screen_space_x(val as f32);
+
+        painter.text(
+            egui::pos2(x, figure_rect.top()),
+            egui::Align2::CENTER_BOTTOM,
+            format_freq(val, precision),
+            egui::FontId::proportional(12.),
+            egui::Color32::WHITE,
         );
+
+        painter.vline(x, figure_rect.y_range(), (1., egui::Color32::WHITE));
     }
 
     for i in 0..120 {
         painter.hline(
-            rect.x_range(),
-            rect.top() + viewport.screen_space_y(i as f32),
+            figure_rect.x_range(),
+            figure_rect.top() + viewport.screen_space_y(i as f32),
             (1., egui::Color32::WHITE),
         );
     }
 
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-        rect,
+        figure_rect,
         Callback {
             id,
-            viewport_size: size,
+            viewport_size: figure_size,
             translation: viewport.translation,
             scale: viewport.scale,
             waterfall_chunks,
             reference_time,
         },
     ));
+}
+
+fn format_freq(freq: f64, precision: usize) -> String {
+    if freq < 0. {
+        format!("XXX Hz")
+    } else if freq < 1e3 {
+        format!("{:.0} Hz", freq)
+    } else if freq < 1e6 {
+        format!("{:.*} kHz", 3_usize.saturating_sub(precision), freq * 1e-3)
+    } else if freq < 1e9 {
+        format!("{:.*} MHz", 6_usize.saturating_sub(precision), freq * 1e-6)
+    } else if freq < 1e12 {
+        format!(
+            "{:.*} GHz",
+            12_usize.saturating_sub(precision),
+            freq * 1e-12
+        )
+    } else {
+        format!("XXX Hz")
+    }
 }
