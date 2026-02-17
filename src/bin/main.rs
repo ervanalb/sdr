@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use sdr::hardware::{Hardware, HardwareParams};
@@ -9,6 +9,7 @@ use sdr::waterfall_gpu::WaterfallGpu;
 mod ui;
 
 const WATERFALL_AUTO_COLOR_TIME_CONSTANT: f64 = 1.;
+const CANVAS_DURATION: f64 = 120.;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
@@ -95,6 +96,8 @@ impl eframe::App for SdrApp {
                     );
                 }
             }
+            self.waterfall_gpu
+                .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
         }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -243,7 +246,7 @@ impl eframe::App for SdrApp {
             ui.separator();
 
             // Get draw list from waterfall GPU
-            let waterfall_chunks = self.waterfall_gpu.draw_list(self.reference_time).collect();
+            let waterfall_chunks = self.waterfall_gpu.draw_list().collect();
 
             self::ui::canvas::ui(
                 ui,

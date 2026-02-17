@@ -1,14 +1,13 @@
 use crate::hardware::WaterfallMessage;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use wgpu::{
     Device, Extent3d, Origin3d, Queue, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
 
 const TEXTURE_HEIGHT: u32 = 1024;
-const MAX_DURATION: Duration = Duration::from_secs(60);
 
 type DeviceId = String;
 type ChannelIndex = usize;
@@ -77,11 +76,12 @@ impl WaterfallGpu {
         );
     }
 
-    pub fn draw_list(&mut self, reference_time: Instant) -> impl Iterator<Item = ChunkDrawInfo> {
-        // Prune old textures across all groups
+    pub fn prune_old_textures(&mut self, time: Instant) {
         self.texture_groups
-            .retain(|_, group| group.prune_old_textures(reference_time));
+            .retain(|_, group| group.prune_old_textures(time));
+    }
 
+    pub fn draw_list(&self) -> impl Iterator<Item = ChunkDrawInfo> {
         // Collect all chunks into a draw list
         self.texture_groups
             .iter()
@@ -273,17 +273,17 @@ impl TextureGroup {
     }
 
     // Returns true if there are still chunks
-    fn prune_old_textures(&mut self, now: Instant) -> bool {
+    fn prune_old_textures(&mut self, time: Instant) -> bool {
         let mut any_remain = false;
         self.finished_textures.retain(|texture| {
-            if now.duration_since(texture.end_time) < MAX_DURATION {
+            if texture.end_time > time {
                 any_remain = true;
                 true
             } else {
                 false
             }
         });
-        any_remain || now.duration_since(self.active_texture.end_time) < MAX_DURATION
+        any_remain || self.active_texture.end_time > time
     }
 
     fn swap_active_texture(

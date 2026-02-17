@@ -151,24 +151,24 @@ impl egui_wgpu::CallbackTrait for Callback {
                     });
 
                 // Create grid geometry: a simple grid
-                let x_grid_size = 100;
-                let x_spacing = 1e6;
-                let y_grid_size = 10;
-                let y_spacing = 1.;
+                let x_grid_count = 100;
+                let x_spacing = 1e7;
+                let y_grid_count = 12;
+                let y_spacing = 10.;
                 let mut vertices = Vec::new();
 
                 // Vertical lines
-                for i in -x_grid_size..=x_grid_size {
+                for i in 0..=x_grid_count {
                     let x = i as f32 * x_spacing;
-                    vertices.push([x, -y_grid_size as f32 * y_spacing]);
-                    vertices.push([x, y_grid_size as f32 * y_spacing]);
+                    vertices.push([x, 0.]);
+                    vertices.push([x, y_grid_count as f32 * y_spacing]);
                 }
 
                 // Horizontal lines
-                for i in -y_grid_size..=y_grid_size {
+                for i in 0..=y_grid_count {
                     let y = i as f32 * y_spacing;
-                    vertices.push([-x_grid_size as f32 * x_spacing, y]);
-                    vertices.push([x_grid_size as f32 * x_spacing, y]);
+                    vertices.push([0., y]);
+                    vertices.push([x_grid_count as f32 * x_spacing, y]);
                 }
 
                 let grid_num_vertices = vertices.len() as u32;
@@ -272,18 +272,13 @@ impl Default for Viewport {
     }
 }
 
-fn clamp_scale(mut scale: egui::Vec2) -> egui::Vec2 {
-    scale.x = scale.x.clamp(1e-6, 1e0);
-    scale.y = scale.y.clamp(1e-1, 1e5);
-    scale
-}
-
 pub fn ui(
     ui: &mut egui::Ui,
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
     waterfall_chunks: Vec<ChunkDrawInfo>,
     reference_time: Instant,
+    //band_info: BandInfo,
 ) {
     let id = ui.id().with(&id_source);
     let size = ui.available_size();
@@ -296,11 +291,11 @@ pub fn ui(
         // Ctrl + scroll wheel: zoom
         if zoom_delta != 1.0 {
             let old_scale = viewport.scale;
-            viewport.scale = clamp_scale(viewport.scale * zoom_delta.powf(WHEEL_ZOOM_SPEED));
+            viewport.scale = viewport.scale * zoom_delta.powf(WHEEL_ZOOM_SPEED);
 
             // Keep pointer position stationary
             if let Some(pointer_pos) = response.hover_pos() {
-                let pointer_canvas = pointer_pos - rect.center();
+                let pointer_canvas = pointer_pos - rect.min;
                 viewport.translation = pointer_canvas
                     - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
             }
@@ -319,12 +314,11 @@ pub fn ui(
     if response.dragged_by(egui::PointerButton::Secondary) {
         let drag = response.drag_delta();
         let old_scale = viewport.scale;
-        viewport.scale = clamp_scale(
-            old_scale * egui::vec2(DRAG_ZOOM_SPEED.powf(drag.x), DRAG_ZOOM_SPEED.powf(drag.y)),
-        );
+        viewport.scale =
+            old_scale * egui::vec2(DRAG_ZOOM_SPEED.powf(drag.x), DRAG_ZOOM_SPEED.powf(drag.y));
         // Keep pointer position stationary
         if let Some(pointer_pos) = response.hover_pos() {
-            let pointer_canvas = pointer_pos - rect.center();
+            let pointer_canvas = pointer_pos - rect.min;
             viewport.translation = pointer_canvas
                 - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
         }
@@ -335,9 +329,9 @@ pub fn ui(
         // Pinch to zoom
         if multi_touch.zoom_delta != 1.0 {
             let old_scale = viewport.scale;
-            viewport.scale = clamp_scale(old_scale * multi_touch.zoom_delta);
+            viewport.scale = old_scale * multi_touch.zoom_delta;
 
-            let gesture_center = multi_touch.translation_delta + rect.center().to_vec2();
+            let gesture_center = multi_touch.translation_delta;
             viewport.translation = gesture_center
                 - (gesture_center - viewport.translation) * (viewport.scale / old_scale);
         }
@@ -345,6 +339,18 @@ pub fn ui(
         // Two-finger pan
         viewport.translation += multi_touch.translation_delta;
     }
+
+    let overall_size = egui::vec2(1e9, 120.);
+
+    let min_scale = size / overall_size;
+    let max_zoom = 1000.;
+    viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
+
+    let max_translation = (viewport.scale * overall_size - size).max(egui::Vec2::ZERO);
+
+    viewport.translation = viewport
+        .translation
+        .clamp(-max_translation, egui::Vec2::ZERO);
 
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         rect,

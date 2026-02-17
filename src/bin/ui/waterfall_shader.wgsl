@@ -34,16 +34,14 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(vertex: VertexInput) -> VertexOutput {
-    let inv_viewport_size = vec2<f32>(1., -1) * 2.0 / viewport.viewport_size;
+    let inv_viewport_size = vec2<f32>(2., -2.) / viewport.viewport_size;
     var out: VertexOutput;
-
     // Apply scale and translation, then convert to normalized device coordinates
     let transformed_position = vertex.position * viewport.scale + viewport.translation;
-    let ndc = transformed_position * inv_viewport_size;
+    let ndc = transformed_position * inv_viewport_size + vec2<f32>(-1., 1.);
     out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = vertex.uv;
     out.color_range_db = 10. * log(vertex.color_range) / log(10.);
-
     return out;
 }
 

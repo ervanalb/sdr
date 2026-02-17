@@ -142,7 +142,7 @@ impl Hardware {
     }
 
     pub fn shutdown(mut self) {
-        let polling_period = Duration::from_micros((SHUTDOWN_POLLING_PERIOD * 1e6) as u64);
+        let polling_period = Duration::from_secs_f64(SHUTDOWN_POLLING_PERIOD);
         let mut params = HardwareParams {
             enumerate: false,
             ..Default::default()
