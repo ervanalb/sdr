@@ -86,13 +86,7 @@ impl Waterfall {
                     let output: Vec<f32> = self
                         .accumulator
                         .iter()
-                        .map(|&power| {
-                            let normalized = power * normalization_factor;
-                            // TODO(Claude): Break this out into a function power_to_db
-                            // Convert to dB: 10 * log10(power)
-                            // Add small epsilon to avoid log(0)
-                            10.0 * (normalized + 1e-10).log10()
-                        })
+                        .map(|&power| power * normalization_factor)
                         .collect();
 
                     emit(output);

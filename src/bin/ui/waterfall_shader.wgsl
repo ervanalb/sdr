@@ -57,24 +57,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var value = 0.;
 
+    // TODO: Manually pass in mip level & manually interpolate texture data
     let alpha_prev = 0.5 - in.uv.y * in.texture_height;
+    let prev_value = textureSample(prev_waterfall_texture, waterfall_sampler, vec2<f32>(in.uv.x, in.uv.y + 1.)).r;
     let alpha_next = 0.5 - (1. - in.uv.y) * in.texture_height;
+    let next_value = textureSample(next_waterfall_texture, waterfall_sampler, vec2<f32>(in.uv.x, in.uv.y - 1.)).r;
+    let cur_value = textureSample(waterfall_texture, waterfall_sampler, in.uv).r;
     if alpha_prev > 0. {
-        let prev_value = textureSample(prev_waterfall_texture, waterfall_sampler, vec2<f32>(in.uv.x, 1.)).r;
-        //let prev_value2 = mix(0., prev_value, in.uv.x);
-        let cur_value = textureSample(waterfall_texture, waterfall_sampler, vec2<f32>(in.uv.x, 0.)).r;
 	value = mix(cur_value, prev_value, alpha_prev);
     } else if alpha_next > 0. {
-        let next_value = textureSample(next_waterfall_texture, waterfall_sampler, vec2<f32>(in.uv.x, 0.)).r;
-        //let next_value2 = mix(-100., next_value, in.uv.x);
-        let cur_value = textureSample(waterfall_texture, waterfall_sampler, vec2<f32>(in.uv.x, 1.)).r;
 	value = mix(cur_value, next_value, alpha_next);
     } else {
-        value = textureSample(waterfall_texture, waterfall_sampler, in.uv).r;
+        value = cur_value;
     }
 
+    // Convert to dB
+    let db = 10. * log(value) / log(10.);
+
     // Convert to color
-    let color = jet_colormap((value + 100.) / 100.);
+    let color = jet_colormap((db + 100.) / 100.);
 
     return vec4<f32>(color, 1.0);
 }

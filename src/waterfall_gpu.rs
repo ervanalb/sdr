@@ -107,10 +107,13 @@ struct ActiveTexture {
     width: f64,
     start_time: Instant,
     end_time: Instant,
+    mip_level_count: u32,
+    mip_buffer: Vec<f32>,
 }
 
 impl ActiveTexture {
     pub fn new(device: &Device, msg: &WaterfallMessage, prev_texture: Texture) -> Self {
+        let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Waterfall Texture"),
             size: Extent3d {
@@ -118,7 +121,7 @@ impl ActiveTexture {
                 height: TEXTURE_HEIGHT,
                 depth_or_array_layers: 1,
             },
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: TextureDimension::D2,
             format: TextureFormat::R32Float,
@@ -137,7 +140,73 @@ impl ActiveTexture {
             width: msg.width,
             start_time: msg.start_time,
             end_time: msg.start_time, // since we aren't yet loading in this message
+            mip_level_count,
+            // Allocate some extra space in the mip_buffer
+            // in case waterfall_row.len() is very small
+            mip_buffer: vec![0.; 2 * msg.waterfall_row.len() + mip_level_count as usize],
         }
+    }
+
+    fn add_row(&mut self, queue: &Queue, row: &[f32]) {
+        let mut row_index = self.current_row as u32;
+        let mut row_len = self.texture.width();
+        let mut buffer_offset = 0;
+        self.mip_buffer[0..row_len as usize].clone_from_slice(row);
+        for mip_level in 0..self.mip_level_count {
+            let (row, rest) = self.mip_buffer[buffer_offset..].split_at_mut(row_len as usize);
+
+            // Upload the row data to the GPU
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level,
+                    origin: Origin3d {
+                        x: 0,
+                        y: row_index,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&row),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row_len * 4), // 4 bytes per f32
+                    rows_per_image: Some(1),
+                },
+                Extent3d {
+                    width: row_len,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            // Accumulate into the next row
+            let next_row_len = (row_len / 2).max(1);
+            let next_row = &mut rest[..next_row_len as usize];
+            if row_len == 1 {
+                next_row[0] = 0.5 * row[0];
+            } else {
+                let (chunked_row, _) = row.as_chunks::<2>();
+                for ([a, b], out) in chunked_row.iter().zip(next_row.iter_mut()) {
+                    *out += 0.25 * (a + b);
+                }
+            }
+
+            // Zero out this row
+            row.fill(0.);
+
+            // See if the next mip level is done accumulating
+            if row_index % 2 == 0 {
+                // Not ready yet
+                break;
+            }
+
+            // Ready--loop
+            row_index = row_index / 2;
+            buffer_offset += row_len as usize;
+            row_len = next_row_len;
+        }
+        self.current_row += 1;
     }
 }
 
@@ -166,33 +235,8 @@ impl TextureGroup {
             self.swap_active_texture(device, queue, blank_texture, msg, true);
         }
 
-        // Upload the row data to the GPU
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.active_texture.texture,
-                mip_level: 0,
-                origin: Origin3d {
-                    x: 0,
-                    y: self.active_texture.current_row as u32,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&msg.waterfall_row),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(msg.waterfall_row.len() as u32 * 4), // 4 bytes per f32
-                rows_per_image: Some(1),
-            },
-            Extent3d {
-                width: msg.waterfall_row.len() as u32,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        // Update info
+        self.active_texture.add_row(queue, &msg.waterfall_row);
         self.active_texture.end_time = msg.end_time;
-        self.active_texture.current_row += 1;
     }
 
     // Returns true if there are still chunks
@@ -221,15 +265,16 @@ impl TextureGroup {
             // If partial, copy this texture into an appropriately sized one
             // to free up space
 
-            let smaller_size = Extent3d {
+            let mut smaller_size = Extent3d {
                 width: self.active_texture.texture.width(),
                 height: self.active_texture.current_row as u32,
                 depth_or_array_layers: 1,
             };
+            let mip_level_count = self.active_texture.current_row.ilog2().max(1);
             let smaller_texture = device.create_texture(&TextureDescriptor {
                 label: Some("Waterfall Texture"),
                 size: smaller_size,
-                mip_level_count: 1,
+                mip_level_count,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: TextureFormat::R32Float,
@@ -241,21 +286,29 @@ impl TextureGroup {
                 label: Some("Texture copy command encoder"),
             });
 
-            encoder.copy_texture_to_texture(
-                TexelCopyTextureInfo {
-                    texture: &self.active_texture.texture,
-                    mip_level: 0,
-                    origin: Origin3d::ZERO,
-                    aspect: TextureAspect::All,
-                },
-                TexelCopyTextureInfo {
-                    texture: &smaller_texture,
-                    mip_level: 0,
-                    origin: Origin3d::ZERO,
-                    aspect: TextureAspect::All,
-                },
-                smaller_size,
-            );
+            for mip_level in 0..mip_level_count {
+                encoder.copy_texture_to_texture(
+                    TexelCopyTextureInfo {
+                        texture: &self.active_texture.texture,
+                        mip_level,
+                        origin: Origin3d::ZERO,
+                        aspect: TextureAspect::All,
+                    },
+                    TexelCopyTextureInfo {
+                        texture: &smaller_texture,
+                        mip_level,
+                        origin: Origin3d::ZERO,
+                        aspect: TextureAspect::All,
+                    },
+                    smaller_size,
+                );
+
+                smaller_size = Extent3d {
+                    width: (smaller_size.width / 2).max(1),
+                    height: smaller_size.height / 2,
+                    depth_or_array_layers: 1,
+                };
+            }
 
             queue.submit(Some(encoder.finish()));
 
