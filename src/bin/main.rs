@@ -134,81 +134,99 @@ impl eframe::App for SdrApp {
                             self.hardware_params.devices.get_mut(device_id).unwrap();
 
                         ui.group(|ui| {
-                            ui.label(format!("Device: {}", device_id));
-                            ui.checkbox(&mut device_params.active, "Active");
+                            ui.push_id(device_id, |ui| {
+                                ui.label(format!("Device: {}", device_id));
+                                ui.checkbox(&mut device_params.active, "Active");
 
-                            if device_params.active {
-                                ui.separator();
+                                if device_params.active {
+                                    ui.separator();
 
-                                for (channel_idx, rx_channel) in
-                                    device_params.rx_channels.iter_mut().enumerate()
-                                {
-                                    ui.collapsing(format!("RX Channel {}", channel_idx), |ui| {
-                                        ui.checkbox(&mut rx_channel.active, "Active");
+                                    for (channel_idx, rx_channel) in
+                                        device_params.rx_channels.iter_mut().enumerate()
+                                    {
+                                        ui.collapsing(
+                                            format!("RX Channel {}", channel_idx),
+                                            |ui| {
+                                                ui.checkbox(&mut rx_channel.active, "Active");
 
-                                        if let Some(frequency) = &mut rx_channel.frequency {
-                                            ui.add(
-                                                egui::Slider::new(
-                                                    frequency,
-                                                    rx_channel.frequency_min
-                                                        ..=rx_channel.frequency_max,
-                                                )
-                                                .text("Frequency (Hz)"),
-                                            );
-                                            ui.label(format!("{:.3} MHz", *frequency / 1e6));
-                                        }
+                                                if let Some(frequency) = &mut rx_channel.frequency {
+                                                    ui.add(
+                                                        egui::Slider::new(
+                                                            frequency,
+                                                            rx_channel.frequency_min
+                                                                ..=rx_channel.frequency_max,
+                                                        )
+                                                        .text("Frequency (Hz)"),
+                                                    );
+                                                    ui.label(format!(
+                                                        "{:.3} MHz",
+                                                        *frequency / 1e6
+                                                    ));
+                                                }
 
-                                        if let Some(sample_rate) = &mut rx_channel.sample_rate {
-                                            ui.add(
-                                                egui::Slider::new(
-                                                    sample_rate,
-                                                    rx_channel.sample_rate_min
-                                                        ..=rx_channel.sample_rate_max,
-                                                )
-                                                .text("Sample Rate (Hz)")
-                                                .logarithmic(true),
-                                            );
-                                            ui.label(format!("{:.3} Msps", *sample_rate / 1e6));
-                                        }
+                                                if let Some(sample_rate) =
+                                                    &mut rx_channel.sample_rate
+                                                {
+                                                    ui.add(
+                                                        egui::Slider::new(
+                                                            sample_rate,
+                                                            rx_channel.sample_rate_min
+                                                                ..=rx_channel.sample_rate_max,
+                                                        )
+                                                        .text("Sample Rate (Hz)")
+                                                        .logarithmic(true),
+                                                    );
+                                                    ui.label(format!(
+                                                        "{:.3} Msps",
+                                                        *sample_rate / 1e6
+                                                    ));
+                                                }
 
-                                        if let Some(bandwidth) = &mut rx_channel.bandwidth {
-                                            ui.add(
-                                                egui::Slider::new(
-                                                    bandwidth,
-                                                    rx_channel.bandwidth_min
-                                                        ..=rx_channel.bandwidth_max,
-                                                )
-                                                .text("Bandwidth (Hz)")
-                                                .logarithmic(true),
-                                            );
-                                            ui.label(format!("{:.3} MHz", *bandwidth / 1e6));
-                                        }
+                                                if let Some(bandwidth) = &mut rx_channel.bandwidth {
+                                                    ui.add(
+                                                        egui::Slider::new(
+                                                            bandwidth,
+                                                            rx_channel.bandwidth_min
+                                                                ..=rx_channel.bandwidth_max,
+                                                        )
+                                                        .text("Bandwidth (Hz)")
+                                                        .logarithmic(true),
+                                                    );
+                                                    ui.label(format!(
+                                                        "{:.3} MHz",
+                                                        *bandwidth / 1e6
+                                                    ));
+                                                }
 
-                                        // Gain controls
-                                        if !rx_channel.gains.is_empty() {
-                                            ui.separator();
-                                            ui.label("Gains:");
+                                                // Gain controls
+                                                if !rx_channel.gains.is_empty() {
+                                                    ui.separator();
+                                                    ui.label("Gains:");
 
-                                            let mut gain_names: Vec<String> =
-                                                rx_channel.gains.keys().cloned().collect();
-                                            gain_names.sort();
+                                                    let mut gain_names: Vec<String> =
+                                                        rx_channel.gains.keys().cloned().collect();
+                                                    gain_names.sort();
 
-                                            for gain_name in gain_names {
-                                                let gain =
-                                                    rx_channel.gains.get_mut(&gain_name).unwrap();
-                                                ui.add(
-                                                    egui::Slider::new(
-                                                        &mut gain.value,
-                                                        gain.min..=gain.max,
-                                                    )
-                                                    .text(&gain_name),
-                                                );
-                                                ui.label(format!("{:.1} dB", gain.value));
-                                            }
-                                        }
-                                    });
+                                                    for gain_name in gain_names {
+                                                        let gain = rx_channel
+                                                            .gains
+                                                            .get_mut(&gain_name)
+                                                            .unwrap();
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                &mut gain.value,
+                                                                gain.min..=gain.max,
+                                                            )
+                                                            .text(&gain_name),
+                                                        );
+                                                        ui.label(format!("{:.1} dB", gain.value));
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    }
                                 }
-                            }
+                            });
                         });
 
                         ui.add_space(10.0);

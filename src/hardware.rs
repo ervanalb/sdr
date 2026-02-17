@@ -389,6 +389,7 @@ enum HardwareDeviceRxChannelControlMessage {
     Shutdown,
 }
 
+#[derive(Clone, Debug)]
 struct HardwareGain {
     value: f64,
     range: soapysdr::Range,
@@ -529,6 +530,7 @@ impl HardwareDeviceRxChannel {
                     let sample_rate = self.sample_rate;
                     let frequency = self.frequency;
                     let bandwidth = self.bandwidth;
+                    let gains = self.gains.clone();
                     let join_handle = spawn(move || {
                         Self::process(
                             device_id,
@@ -539,6 +541,7 @@ impl HardwareDeviceRxChannel {
                             sample_rate,
                             frequency,
                             bandwidth,
+                            gains,
                         );
                     });
 
@@ -715,15 +718,30 @@ impl HardwareDeviceRxChannel {
         mut sample_rate: f64,
         mut frequency: f64,
         mut bandwidth: f64,
+        gains: HashMap<String, HardwareGain>,
     ) {
         info!("Started thread for RX channel {channel_index:?} on device {device_id:?}");
+
+        // Apply current parameters
+        device
+            .set_frequency(soapysdr::Direction::Rx, channel_index, frequency, ())
+            .unwrap();
+
+        for (gain_name, gain) in &gains {
+            device
+                .set_gain_element(
+                    soapysdr::Direction::Rx,
+                    channel_index,
+                    gain_name.as_str(),
+                    gain.value,
+                )
+                .unwrap();
+        }
+
         'outer: loop {
             // Apply current parameters
             device
                 .set_sample_rate(soapysdr::Direction::Rx, channel_index, sample_rate)
-                .unwrap();
-            device
-                .set_frequency(soapysdr::Direction::Rx, channel_index, frequency, ())
                 .unwrap();
             device
                 .set_bandwidth(soapysdr::Direction::Rx, channel_index, bandwidth)
@@ -751,23 +769,29 @@ impl HardwareDeviceRxChannel {
             // Inner loop for data reading
             'inner: loop {
                 // Check for parameter changes
-                let mut new_parameters = false;
+                let mut restart_stream = false;
                 while let Ok(msg) = control_receiver.try_recv() {
                     match msg {
                         HardwareDeviceRxChannelControlMessage::SetSampleRate(x) => {
                             sample_rate = x;
-                            new_parameters = true;
+                            restart_stream = true;
                         }
                         HardwareDeviceRxChannelControlMessage::SetFrequency(x) => {
                             frequency = x;
-                            new_parameters = true;
+                            device
+                                .set_frequency(
+                                    soapysdr::Direction::Rx,
+                                    channel_index,
+                                    frequency,
+                                    (),
+                                )
+                                .unwrap();
                         }
                         HardwareDeviceRxChannelControlMessage::SetBandwidth(x) => {
                             bandwidth = x;
-                            new_parameters = true;
+                            restart_stream = true;
                         }
                         HardwareDeviceRxChannelControlMessage::SetGain(gain_name, gain_value) => {
-                            // Apply gain immediately without restarting the stream
                             device
                                 .set_gain_element(
                                     soapysdr::Direction::Rx,
@@ -775,14 +799,14 @@ impl HardwareDeviceRxChannel {
                                     gain_name.as_str(),
                                     gain_value,
                                 )
-                                .ok();
+                                .unwrap();
                         }
                         HardwareDeviceRxChannelControlMessage::Shutdown => {
                             break 'outer;
                         }
                     }
                 }
-                if new_parameters {
+                if restart_stream {
                     break 'inner;
                 }
 
