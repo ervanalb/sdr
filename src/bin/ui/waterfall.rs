@@ -7,9 +7,9 @@ const BUFFER_LEN: usize = 512;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct WaterfallVertex {
-    position: [f32; 2],  // x = frequency, y = time
-    uv: [f32; 2],        // in texel coordinates (u=0..width, v=0..height)
-    texture_height: f32, // should be a uniform but its less overhead to pass it here
+    position: [f32; 2],    // x = frequency, y = time
+    uv: [f32; 2],          // in texel coordinates (u=0..width, v=0..height)
+    color_range: [f32; 2], // should be a uniform but its less overhead to pass it here
 }
 
 pub struct WaterfallRenderer {
@@ -113,11 +113,11 @@ impl WaterfallRenderer {
                             shader_location: 1,
                             format: wgpu::VertexFormat::Float32x2,
                         },
-                        // texture_height
+                        // color_range
                         wgpu::VertexAttribute {
                             offset: 16,
                             shader_location: 2,
-                            format: wgpu::VertexFormat::Float32,
+                            format: wgpu::VertexFormat::Float32x2,
                         },
                     ],
                 }],
@@ -209,40 +209,40 @@ impl WaterfallRenderer {
             let x_right = (chunk.center_frequency + 0.5 * chunk.width) as f32;
 
             // Calculate the V coordinate of one texel
-            let texture_height = chunk.texture.height() as f32;
+            let color_range = [chunk.min, chunk.max];
 
             // Create quad as two triangles
             let vertices_start = self.vertices.len();
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_start],
                 uv: [0., chunk.v_end],
-                texture_height,
+                color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_right, y_start],
                 uv: [1., chunk.v_end],
-                texture_height,
+                color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_end],
                 uv: [0., 0.],
-                texture_height,
+                color_range,
             });
 
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_end],
                 uv: [0., 0.],
-                texture_height,
+                color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_right, y_start],
                 uv: [1., chunk.v_end],
-                texture_height,
+                color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_right, y_end],
                 uv: [1., 0.],
-                texture_height,
+                color_range,
             });
 
             // Create texture view

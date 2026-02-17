@@ -15,7 +15,19 @@ const WATERFALL_TARGET_BIN_SIZE: f64 = 5_000.0; // 5 KHz
 const WATERFALL_OUTPUT_PERIOD: f64 = 0.005; // 200 waterfall rows per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 
-fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
+fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
+    // Snap to the nearest discrete step if stepsize is non-zero
+    if range.step > 0.0 {
+        let steps_from_min = (value - range.minimum) / range.step;
+        let rounded_steps = steps_from_min.round();
+        value = range.minimum + (rounded_steps * range.step);
+    }
+
+    // Clamp to the desired range
+    value.clamp(range.minimum, range.maximum)
+}
+
+fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
     if ranges.is_empty() {
         return value;
     }
@@ -39,15 +51,7 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], mut value: f64) -> f64 {
         .min_by(|(_, dist_a), (_, dist_b)| dist_a.partial_cmp(dist_b).unwrap())
         .unwrap();
 
-    // Snap to the nearest discrete step if stepsize is non-zero
-    if closest_range.step > 0.0 {
-        let steps_from_min = (value - closest_range.minimum) / closest_range.step;
-        let rounded_steps = steps_from_min.round();
-        value = closest_range.minimum + (rounded_steps * closest_range.step);
-    }
-
-    // Clamp to the desired range
-    value.clamp(closest_range.minimum, closest_range.maximum)
+    snap_to_range(closest_range, value)
 }
 
 pub struct WaterfallMessage {
@@ -63,11 +67,21 @@ pub struct WaterfallMessage {
 
 type HardwareDeviceId = String;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HardwareParams {
     pub run: bool,
     pub devices: HashMap<HardwareDeviceId, HardwareDeviceParams>,
     pub enumerate: bool,
+}
+
+impl Default for HardwareParams {
+    fn default() -> Self {
+        Self {
+            run: false,
+            devices: Default::default(),
+            enumerate: true,
+        }
+    }
 }
 
 pub struct Hardware {
@@ -128,15 +142,23 @@ impl Hardware {
     }
 
     pub fn shutdown(mut self) {
-        let polling_period = Duration::from_micros((SHUTDOWN_POLLING_PERIOD * 1e9) as u64);
-        let mut params = Default::default();
+        let polling_period = Duration::from_micros((SHUTDOWN_POLLING_PERIOD * 1e6) as u64);
+        let mut params = HardwareParams {
+            enumerate: false,
+            ..Default::default()
+        };
+        self.update(&mut params);
+        for device in &mut params.devices.values_mut() {
+            device.active = false;
+        }
+        self.update(&mut params);
         while !self
             .devices
             .values()
             .all(|device| matches!(device.active, HardwareState::Inactive))
         {
-            self.update(&mut params);
             thread::sleep(polling_period);
+            self.update(&mut params);
         }
     }
 
@@ -178,11 +200,21 @@ struct ActiveHardwareDevice {
     tx_channels: Vec<HardwareDeviceTxChannel>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct HardwareDeviceParams {
     pub active: bool,
     pub rx_channels: Vec<HardwareDeviceRxChannelParams>,
     pub tx_channels: Vec<HardwareDeviceTxChannelParams>,
+}
+
+impl Default for HardwareDeviceParams {
+    fn default() -> Self {
+        Self {
+            active: true,
+            rx_channels: Default::default(),
+            tx_channels: Default::default(),
+        }
+    }
 }
 
 impl HardwareDevice {
@@ -305,17 +337,43 @@ impl HardwareDevice {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct GainParams {
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct HardwareDeviceRxChannelParams {
     pub active: bool,
     pub sample_rate: Option<f64>,
     pub frequency: Option<f64>,
     pub bandwidth: Option<f64>,
+    pub gains: HashMap<String, GainParams>,
     pub sample_rate_min: f64,
     pub sample_rate_max: f64,
     pub frequency_min: f64,
     pub frequency_max: f64,
     pub bandwidth_min: f64,
     pub bandwidth_max: f64,
+}
+
+impl Default for HardwareDeviceRxChannelParams {
+    fn default() -> Self {
+        Self {
+            active: true,
+            sample_rate: None,
+            frequency: None,
+            bandwidth: None,
+            gains: Default::default(),
+            sample_rate_min: 0.,
+            sample_rate_max: 0.,
+            frequency_min: 0.,
+            frequency_max: 0.,
+            bandwidth_min: 0.,
+            bandwidth_max: 0.,
+        }
+    }
 }
 
 struct ActiveHardwareDeviceRxChannel {
@@ -327,7 +385,13 @@ enum HardwareDeviceRxChannelControlMessage {
     SetSampleRate(f64),
     SetFrequency(f64),
     SetBandwidth(f64),
+    SetGain(String, f64),
     Shutdown,
+}
+
+struct HardwareGain {
+    value: f64,
+    range: soapysdr::Range,
 }
 
 struct HardwareDeviceRxChannel {
@@ -339,6 +403,7 @@ struct HardwareDeviceRxChannel {
     sample_rate_range: Vec<soapysdr::Range>,
     frequency_range: Vec<soapysdr::Range>,
     bandwidth_range: Vec<soapysdr::Range>,
+    gains: HashMap<String, HardwareGain>,
     sample_rate_min: f64,
     sample_rate_max: f64,
     frequency_min: f64,
@@ -350,9 +415,9 @@ struct HardwareDeviceRxChannel {
     bandwidth: f64,
 }
 
-fn compute_range_min_max(ranges: &[soapysdr::Range]) -> (f64, f64) {
+fn compute_range_min_max(ranges: &[soapysdr::Range]) -> Option<(f64, f64)> {
     if ranges.is_empty() {
-        return (0.0, 0.0);
+        return None;
     }
     let min = ranges
         .iter()
@@ -362,7 +427,7 @@ fn compute_range_min_max(ranges: &[soapysdr::Range]) -> (f64, f64) {
         .iter()
         .map(|r| r.maximum)
         .fold(f64::NEG_INFINITY, f64::max);
-    (min, max)
+    Some((min, max))
 }
 
 impl HardwareDeviceRxChannel {
@@ -374,17 +439,36 @@ impl HardwareDeviceRxChannel {
     ) -> Self {
         let sample_rate_range = device
             .get_sample_rate_range(soapysdr::Direction::Rx, channel_index)
-            .unwrap_or_default();
+            .unwrap();
         let frequency_range = device
             .frequency_range(soapysdr::Direction::Rx, channel_index)
-            .unwrap_or_default();
+            .unwrap();
         let bandwidth_range = device
             .bandwidth_range(soapysdr::Direction::Rx, channel_index)
+            .unwrap();
+
+        let (sample_rate_min, sample_rate_max) = compute_range_min_max(&sample_rate_range).unwrap();
+        let (frequency_min, frequency_max) = compute_range_min_max(&frequency_range).unwrap();
+        let (bandwidth_min, bandwidth_max) = compute_range_min_max(&bandwidth_range).unwrap();
+
+        // List available gain elements
+        let gain_elements = device
+            .list_gains(soapysdr::Direction::Rx, channel_index)
             .unwrap_or_default();
 
-        let (sample_rate_min, sample_rate_max) = compute_range_min_max(&sample_rate_range);
-        let (frequency_min, frequency_max) = compute_range_min_max(&frequency_range);
-        let (bandwidth_min, bandwidth_max) = compute_range_min_max(&bandwidth_range);
+        // Get gain ranges for each element
+        let gains: HashMap<_, _> = gain_elements
+            .into_iter()
+            .map(|gain_name| {
+                let range = device
+                    .gain_element_range(soapysdr::Direction::Rx, channel_index, gain_name.as_str())
+                    .unwrap();
+                let gain = device
+                    .gain_element(soapysdr::Direction::Rx, channel_index, gain_name.as_str())
+                    .unwrap();
+                (gain_name, HardwareGain { value: gain, range })
+            })
+            .collect();
 
         // Set sample_rate and bandwidth to max values
         device
@@ -422,6 +506,7 @@ impl HardwareDeviceRxChannel {
             sample_rate,
             frequency,
             bandwidth,
+            gains,
             waterfall_sender,
         }
     }
@@ -579,6 +664,46 @@ impl HardwareDeviceRxChannel {
                     .unwrap();
             }
         }
+
+        // Retain only gain elements in params that are present in the hardware
+        params.gains.retain(|k, _| self.gains.contains_key(k));
+        // Update gains in params & populate any missing ones
+        for (gain_name, hw_gain) in &mut self.gains {
+            match params.gains.entry(gain_name.to_string()) {
+                Entry::Occupied(mut e) => {
+                    let params = e.get_mut();
+                    // Always set min & max
+                    params.min = hw_gain.range.minimum;
+                    params.max = hw_gain.range.maximum;
+                    // If value has changed, snap it
+                    if params.value != hw_gain.value {
+                        let snapped_value = snap_to_range(&hw_gain.range, params.value);
+                        params.value = snapped_value;
+
+                        // After snapping, if value has changed, send message to the hardware
+                        if params.value != hw_gain.value {
+                            hw_gain.value = params.value;
+                            if let HardwareState::Active(active) = &self.active {
+                                active
+                                    .control_sender
+                                    .send(HardwareDeviceRxChannelControlMessage::SetGain(
+                                        gain_name.to_string(),
+                                        hw_gain.value,
+                                    ))
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
+                Entry::Vacant(e) => {
+                    e.insert(GainParams {
+                        value: hw_gain.value,
+                        min: hw_gain.range.minimum,
+                        max: hw_gain.range.maximum,
+                    });
+                }
+            }
+        }
     }
 
     fn process(
@@ -640,6 +765,17 @@ impl HardwareDeviceRxChannel {
                         HardwareDeviceRxChannelControlMessage::SetBandwidth(x) => {
                             bandwidth = x;
                             new_parameters = true;
+                        }
+                        HardwareDeviceRxChannelControlMessage::SetGain(gain_name, gain_value) => {
+                            // Apply gain immediately without restarting the stream
+                            device
+                                .set_gain_element(
+                                    soapysdr::Direction::Rx,
+                                    channel_index,
+                                    gain_name.as_str(),
+                                    gain_value,
+                                )
+                                .ok();
                         }
                         HardwareDeviceRxChannelControlMessage::Shutdown => {
                             break 'outer;

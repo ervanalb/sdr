@@ -8,6 +8,8 @@ use sdr::waterfall_gpu::WaterfallGpu;
 
 mod ui;
 
+const WATERFALL_AUTO_COLOR_TIME_CONSTANT: f64 = 1.;
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -85,7 +87,12 @@ impl eframe::App for SdrApp {
                 let queue = &wgpu_render_state.queue;
 
                 while let Some(msg) = hardware.waterfall_try_recv() {
-                    self.waterfall_gpu.add_row(&msg, device, queue);
+                    self.waterfall_gpu.add_row(
+                        &msg,
+                        device,
+                        queue,
+                        WATERFALL_AUTO_COLOR_TIME_CONSTANT,
+                    );
                 }
             }
         }
@@ -175,6 +182,29 @@ impl eframe::App for SdrApp {
                                                 .logarithmic(true),
                                             );
                                             ui.label(format!("{:.3} MHz", *bandwidth / 1e6));
+                                        }
+
+                                        // Gain controls
+                                        if !rx_channel.gains.is_empty() {
+                                            ui.separator();
+                                            ui.label("Gains:");
+
+                                            let mut gain_names: Vec<String> =
+                                                rx_channel.gains.keys().cloned().collect();
+                                            gain_names.sort();
+
+                                            for gain_name in gain_names {
+                                                let gain =
+                                                    rx_channel.gains.get_mut(&gain_name).unwrap();
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut gain.value,
+                                                        gain.min..=gain.max,
+                                                    )
+                                                    .text(&gain_name),
+                                                );
+                                                ui.label(format!("{:.1} dB", gain.value));
+                                            }
                                         }
                                     });
                                 }
