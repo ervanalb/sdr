@@ -15,6 +15,9 @@ const TARGET_GRIDLINE_SEPARATION: f32 = 80.;
 const AVAILABLE_FREQUENCY_GRIDLINES: [f64; 15] = [
     1e2, 5e2, 1e3, 5e3, 1e4, 5e4, 1e5, 5e5, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8, 1e9,
 ];
+const AVAILABLE_TIME_GRIDLINES: [f64; 15] = [
+    1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1., 5., 10., 30., 60., 300., 600., 1800., 3600.,
+];
 
 pub struct StaticResources {
     target_format: wgpu::TextureFormat,
@@ -170,6 +173,7 @@ pub fn ui(
     viewport: &mut Viewport,
     waterfall_chunks: Vec<ChunkDrawInfo>,
     reference_time: Instant,
+    temp_random_instant: Instant,
     //band_info: BandInfo,
 ) {
     let id = ui.id().with(&id_source);
@@ -252,39 +256,61 @@ pub fn ui(
 
     let painter = ui.painter().with_clip_rect(ui_rect);
 
-    let left = viewport.canvas_x(0.);
-    let right = viewport.canvas_x(figure_rect.width());
-    let target_gridline_period = TARGET_GRIDLINE_SEPARATION / viewport.scale.x;
-    let i = AVAILABLE_FREQUENCY_GRIDLINES
-        .partition_point(|&period| period < target_gridline_period as f64);
-    let i = i.min(AVAILABLE_FREQUENCY_GRIDLINES.len() - 1);
-    let period = AVAILABLE_FREQUENCY_GRIDLINES[i];
-    let precision = period.log10() as usize;
+    // Vertical gridlines
+    {
+        let target_gridline_period = TARGET_GRIDLINE_SEPARATION / viewport.scale.x;
+        let i = AVAILABLE_FREQUENCY_GRIDLINES
+            .partition_point(|&period| period < target_gridline_period as f64);
+        let i = i.min(AVAILABLE_FREQUENCY_GRIDLINES.len() - 1);
+        let period = AVAILABLE_FREQUENCY_GRIDLINES[i];
+        let precision = period.log10() as i32;
+        let left = (viewport.canvas_x(0.) as f64 / period).ceil() as i32;
+        let right = (viewport.canvas_x(figure_rect.width()) as f64 / period).floor() as i32;
 
-    let left = (left as f64 / period).ceil() as i32;
-    let right = (right as f64 / period).floor() as i32;
+        for i in left..right {
+            let val = i as f64 * period;
+            let x = figure_rect.left() + viewport.screen_space_x(val as f32);
 
-    for i in left..right {
-        let val = i as f64 * period;
-        let x = figure_rect.left() + viewport.screen_space_x(val as f32);
+            painter.text(
+                egui::pos2(x, figure_rect.top()),
+                egui::Align2::CENTER_BOTTOM,
+                format_freq(val, precision),
+                egui::FontId::proportional(12.),
+                egui::Color32::WHITE,
+            );
 
-        painter.text(
-            egui::pos2(x, figure_rect.top()),
-            egui::Align2::CENTER_BOTTOM,
-            format_freq(val, precision),
-            egui::FontId::proportional(12.),
-            egui::Color32::WHITE,
-        );
-
-        painter.vline(x, figure_rect.y_range(), (1., egui::Color32::WHITE));
+            painter.vline(x, figure_rect.y_range(), (1., egui::Color32::WHITE));
+        }
     }
+    // Horizontal gridlines
+    {
+        let target_gridline_period = TARGET_GRIDLINE_SEPARATION / viewport.scale.y;
+        let i = AVAILABLE_TIME_GRIDLINES
+            .partition_point(|&period| period < target_gridline_period as f64);
+        let i = i.min(AVAILABLE_TIME_GRIDLINES.len() - 1);
+        let period = AVAILABLE_TIME_GRIDLINES[i];
+        // TODO: Reference everything from day or hour start instead of this random instant
+        let offset = reference_time
+            .duration_since(temp_random_instant)
+            .as_secs_f64();
+        let top = ((offset - viewport.canvas_y(0.) as f64) / period).ceil() as i32;
+        let bottom =
+            ((offset - viewport.canvas_y(figure_rect.height()) as f64) / period).floor() as i32;
 
-    for i in 0..120 {
-        painter.hline(
-            figure_rect.x_range(),
-            figure_rect.top() + viewport.screen_space_y(i as f32),
-            (1., egui::Color32::WHITE),
-        );
+        for i in bottom..top {
+            let val = i as f64 * period;
+            let y = figure_rect.top() + viewport.screen_space_y((offset - val) as f32);
+
+            painter.text(
+                egui::pos2(figure_rect.left(), y),
+                egui::Align2::RIGHT_CENTER,
+                format!("{:.3}", val),
+                egui::FontId::proportional(12.),
+                egui::Color32::WHITE,
+            );
+
+            painter.hline(figure_rect.x_range(), y, (1., egui::Color32::WHITE));
+        }
     }
 
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -300,21 +326,17 @@ pub fn ui(
     ));
 }
 
-fn format_freq(freq: f64, precision: usize) -> String {
+fn format_freq(freq: f64, precision: i32) -> String {
     if freq < 0. {
         format!("XXX Hz")
     } else if freq < 1e3 {
-        format!("{:.0} Hz", freq)
+        format!("{:.*} Hz", (0 - precision).max(0) as usize, freq)
     } else if freq < 1e6 {
-        format!("{:.*} kHz", 3_usize.saturating_sub(precision), freq * 1e-3)
+        format!("{:.*} kHz", (3 - precision).max(0) as usize, freq * 1e-3)
     } else if freq < 1e9 {
-        format!("{:.*} MHz", 6_usize.saturating_sub(precision), freq * 1e-6)
+        format!("{:.*} MHz", (6 - precision).max(0) as usize, freq * 1e-6)
     } else if freq < 1e12 {
-        format!(
-            "{:.*} GHz",
-            12_usize.saturating_sub(precision),
-            freq * 1e-12
-        )
+        format!("{:.*} GHz", (12 - precision).max(0) as usize, freq * 1e-12)
     } else {
         format!("XXX Hz")
     }

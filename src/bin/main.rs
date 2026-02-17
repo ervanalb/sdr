@@ -47,6 +47,7 @@ struct SdrApp {
     viewport_state: ui::canvas::Viewport,
     waterfall_gpu: WaterfallGpu,
     reference_time: Instant,
+    temp_random_instant: Instant,
 }
 
 impl SdrApp {
@@ -60,6 +61,7 @@ impl SdrApp {
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
             reference_time: Instant::now(),
+            temp_random_instant: Instant::now(),
         }
     }
 }
@@ -254,6 +256,7 @@ impl eframe::App for SdrApp {
                 &mut self.viewport_state,
                 waterfall_chunks,
                 self.reference_time,
+                self.temp_random_instant,
             );
         });
     }
