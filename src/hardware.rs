@@ -65,6 +65,7 @@ type HardwareDeviceId = String;
 
 #[derive(Clone, Debug, Default)]
 pub struct HardwareParams {
+    pub run: bool,
     pub devices: HashMap<HardwareDeviceId, HardwareDeviceParams>,
     pub enumerate: bool,
 }
@@ -122,7 +123,7 @@ impl Hardware {
         // Call update on each device
         for (id, device_params) in params.devices.iter_mut() {
             let device = self.devices.get_mut(id).unwrap();
-            device.update(device_params);
+            device.update(device_params, params.run);
         }
     }
 
@@ -198,7 +199,7 @@ impl HardwareDevice {
         }
     }
 
-    fn update(&mut self, params: &mut HardwareDeviceParams) {
+    fn update(&mut self, params: &mut HardwareDeviceParams, run: bool) {
         match &self.active {
             // Handle state transitions
             HardwareState::Inactive => {
@@ -285,7 +286,7 @@ impl HardwareDevice {
                     if shutting_down {
                         channel_params.active = false;
                     }
-                    channel.update(channel_params);
+                    channel.update(channel_params, run);
                 }
 
                 for (channel, channel_params) in active
@@ -425,11 +426,14 @@ impl HardwareDeviceRxChannel {
         }
     }
 
-    fn update(&mut self, params: &mut HardwareDeviceRxChannelParams) {
+    fn update(&mut self, params: &mut HardwareDeviceRxChannelParams, run: bool) {
+        // Effectively AND the run flag with the channel's active flag
+        let should_be_active = params.active && run;
+
         match &self.active {
             // Handle state transitions
             HardwareState::Inactive => {
-                if params.active {
+                if should_be_active {
                     // Start new thread
                     let device_id = self.device_id.clone();
                     let channel_index = self.channel_index;
@@ -460,7 +464,7 @@ impl HardwareDeviceRxChannel {
                 }
             }
             HardwareState::Active(active) => {
-                if !params.active {
+                if !should_be_active {
                     active
                         .control_sender
                         .send(HardwareDeviceRxChannelControlMessage::Shutdown)
@@ -513,7 +517,9 @@ impl HardwareDeviceRxChannel {
         if matches!(self.active, HardwareState::ShuttingDown(_)) {
             // It is not valid for active = true
             // while we are shutting down
-            params.active = false;
+            if run {
+                params.active = false;
+            }
         }
 
         // Snap any values in parameters to the nearest valid option

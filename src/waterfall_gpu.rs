@@ -53,12 +53,10 @@ impl WaterfallGpu {
         group.add_row(device, queue, self.blank_texture.clone(), msg);
     }
 
-    pub fn draw_list(&mut self) -> impl Iterator<Item = ChunkDrawInfo> {
-        let now = Instant::now();
-
+    pub fn draw_list(&mut self, reference_time: Instant) -> impl Iterator<Item = ChunkDrawInfo> {
         // Prune old textures across all groups
         self.texture_groups
-            .retain(|_, group| group.prune_old_textures(now));
+            .retain(|_, group| group.prune_old_textures(reference_time));
 
         // Collect all chunks into a draw list
         self.texture_groups

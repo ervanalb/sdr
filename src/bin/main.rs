@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::time::Instant;
+
 use eframe::egui;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::waterfall_gpu::WaterfallGpu;
@@ -41,6 +43,7 @@ struct SdrApp {
     hardware_params: HardwareParams,
     viewport_state: ui::canvas::Viewport,
     waterfall_gpu: WaterfallGpu,
+    reference_time: Instant,
 }
 
 impl SdrApp {
@@ -53,6 +56,7 @@ impl SdrApp {
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
+            reference_time: Instant::now(),
         }
     }
 }
@@ -67,6 +71,9 @@ impl eframe::App for SdrApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
+        if self.hardware_params.run {
+            self.reference_time = Instant::now();
+        }
 
         // Update hardware every frame
         if let Some(hardware) = &mut self.hardware {
@@ -101,6 +108,8 @@ impl eframe::App for SdrApp {
             .show(ctx, |ui| {
                 ui.heading("Hardware Control");
                 ui.separator();
+
+                ui.checkbox(&mut self.hardware_params.run, "Run");
 
                 if ui.button("Enumerate Devices").clicked() {
                     self.hardware_params.enumerate = true;
@@ -186,9 +195,15 @@ impl eframe::App for SdrApp {
             ui.separator();
 
             // Get draw list from waterfall GPU
-            let waterfall_chunks = self.waterfall_gpu.draw_list().collect();
+            let waterfall_chunks = self.waterfall_gpu.draw_list(self.reference_time).collect();
 
-            self::ui::canvas::ui(ui, "canvas", &mut self.viewport_state, waterfall_chunks);
+            self::ui::canvas::ui(
+                ui,
+                "canvas",
+                &mut self.viewport_state,
+                waterfall_chunks,
+                self.reference_time,
+            );
         });
     }
 }

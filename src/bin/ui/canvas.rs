@@ -8,7 +8,8 @@ use sdr::waterfall_gpu::ChunkDrawInfo;
 use super::waterfall::WaterfallRenderer;
 
 const SCROLL_SPEED: f32 = 1.0;
-const ZOOM_SPEED: f32 = 1.0;
+const WHEEL_ZOOM_SPEED: f32 = 1.0;
+const DRAG_ZOOM_SPEED: f32 = 1.01;
 
 pub struct StaticResources {
     target_format: wgpu::TextureFormat,
@@ -53,7 +54,7 @@ struct Callback {
     translation: egui::Vec2,
     scale: egui::Vec2,
     waterfall_chunks: Vec<ChunkDrawInfo>,
-    current_time: Instant,
+    reference_time: Instant,
 }
 
 impl egui_wgpu::CallbackTrait for Callback {
@@ -230,7 +231,7 @@ impl egui_wgpu::CallbackTrait for Callback {
             device,
             queue,
             &resources.uniform_buffer,
-            self.current_time,
+            self.reference_time,
         );
 
         Vec::new()
@@ -282,6 +283,7 @@ pub fn ui(
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
     waterfall_chunks: Vec<ChunkDrawInfo>,
+    reference_time: Instant,
 ) {
     let id = ui.id().with(&id_source);
     let size = ui.available_size();
@@ -294,24 +296,38 @@ pub fn ui(
         // Ctrl + scroll wheel: zoom
         if zoom_delta != 1.0 {
             let old_scale = viewport.scale;
-            viewport.scale = clamp_scale(old_scale * zoom_delta.powf(ZOOM_SPEED));
+            viewport.scale = clamp_scale(viewport.scale * zoom_delta.powf(WHEEL_ZOOM_SPEED));
 
             // Keep pointer position stationary
             if let Some(pointer_pos) = response.hover_pos() {
                 let pointer_canvas = pointer_pos - rect.center();
-                let pointer_canvas = egui::vec2(pointer_canvas.x, -pointer_canvas.y);
                 viewport.translation = pointer_canvas
                     - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
             }
         }
         // Regular scroll: pan the canvas
-        viewport.translation += egui::vec2(scroll_delta.x, -scroll_delta.y) * SCROLL_SPEED;
+        viewport.translation += scroll_delta * SCROLL_SPEED;
     }
 
-    // Handle middle mouse button drag for panning
-    if response.dragged_by(egui::PointerButton::Middle) {
+    // Handle mouse button drag for panning
+    if response.dragged_by(egui::PointerButton::Primary) {
         let drag = response.drag_delta();
-        viewport.translation += egui::vec2(drag.x, -drag.y);
+        viewport.translation += drag;
+    }
+
+    // Handle right mouse button drag for zooming
+    if response.dragged_by(egui::PointerButton::Secondary) {
+        let drag = response.drag_delta();
+        let old_scale = viewport.scale;
+        viewport.scale = clamp_scale(
+            old_scale * egui::vec2(DRAG_ZOOM_SPEED.powf(drag.x), DRAG_ZOOM_SPEED.powf(drag.y)),
+        );
+        // Keep pointer position stationary
+        if let Some(pointer_pos) = response.hover_pos() {
+            let pointer_canvas = pointer_pos - rect.center();
+            viewport.translation = pointer_canvas
+                - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
+        }
     }
 
     // Handle multi-touch gestures
@@ -322,16 +338,12 @@ pub fn ui(
             viewport.scale = clamp_scale(old_scale * multi_touch.zoom_delta);
 
             let gesture_center = multi_touch.translation_delta + rect.center().to_vec2();
-            let gesture_center = egui::vec2(gesture_center.x, -gesture_center.y);
             viewport.translation = gesture_center
                 - (gesture_center - viewport.translation) * (viewport.scale / old_scale);
         }
 
         // Two-finger pan
-        viewport.translation += egui::vec2(
-            multi_touch.translation_delta.x,
-            -multi_touch.translation_delta.y,
-        );
+        viewport.translation += multi_touch.translation_delta;
     }
 
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -342,7 +354,7 @@ pub fn ui(
             translation: viewport.translation,
             scale: viewport.scale,
             waterfall_chunks,
-            current_time: Instant::now(),
+            reference_time,
         },
     ));
 }
