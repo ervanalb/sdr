@@ -83,9 +83,9 @@ impl Waterfall {
                     // Normalize and convert to dB
                     let normalization_factor =
                         1.0 / (self.accumulations_count as f32 * self.fft_size as f32);
-                    let output: Vec<f32> = self
-                        .accumulator
+                    let output: Vec<f32> = self.accumulator[self.fft_size / 2..]
                         .iter()
+                        .chain(self.accumulator[..self.fft_size / 2].iter())
                         .map(|&power| power * normalization_factor)
                         .collect();
 
