@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use sdr::band_info::{BandInfo, BandsInfo};
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::waterfall_gpu::WaterfallGpu;
 
@@ -49,6 +50,7 @@ struct SdrApp {
     reference_time: Instant,
     prev_reference_time: Instant,
     temp_random_instant: Instant,
+    bands_info: BandsInfo,
 }
 
 impl SdrApp {
@@ -57,6 +59,19 @@ impl SdrApp {
         ui::canvas::init(cc);
         let device = &cc.wgpu_render_state.as_ref().unwrap().device;
         let now = Instant::now();
+        let bands_info = BandsInfo {
+            bands: vec![BandInfo {
+                min: 10e6,
+                max: 100e6,
+                description: "Custom band".to_string(),
+            }],
+            allocations: vec![BandInfo {
+                min: 20e6,
+                max: 30e6,
+                description: "Custom allocation".to_string(),
+            }],
+            channels: vec![],
+        };
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
@@ -65,6 +80,7 @@ impl SdrApp {
             reference_time: now,
             prev_reference_time: now,
             temp_random_instant: now,
+            bands_info,
         }
     }
 }
@@ -266,6 +282,7 @@ impl eframe::App for SdrApp {
                 self.temp_random_instant,
                 force_live,
                 &mut self.hardware_params,
+                &self.bands_info,
             );
         });
     }

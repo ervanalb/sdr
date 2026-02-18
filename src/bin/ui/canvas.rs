@@ -3,6 +3,7 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use eframe::wgpu;
+use sdr::band_info::BandsInfo;
 use sdr::hardware::HardwareParams;
 use sdr::waterfall_gpu::ChunkDrawInfo;
 
@@ -38,7 +39,8 @@ fn paint_elided_text(
         if available_width > 0.0 {
             let mut truncated_text = text.clone();
             while !truncated_text.is_empty() {
-                let test_galley = painter.layout_no_wrap(truncated_text.clone(), font_id.clone(), color);
+                let test_galley =
+                    painter.layout_no_wrap(truncated_text.clone(), font_id.clone(), color);
                 if test_galley.rect.width() <= available_width {
                     break;
                 }
@@ -47,13 +49,18 @@ fn paint_elided_text(
             let combined = format!("{}...", truncated_text);
             let final_galley = painter.layout_no_wrap(combined, font_id, color);
             painter.galley(
-                rect.center() - egui::vec2(final_galley.rect.width() / 2.0, final_galley.rect.height() / 2.0),
+                rect.center()
+                    - egui::vec2(
+                        final_galley.rect.width() / 2.0,
+                        final_galley.rect.height() / 2.0,
+                    ),
                 final_galley,
                 color,
             );
         } else {
             painter.galley(
-                rect.center() - egui::vec2(ellipsis.rect.width() / 2.0, ellipsis.rect.height() / 2.0),
+                rect.center()
+                    - egui::vec2(ellipsis.rect.width() / 2.0, ellipsis.rect.height() / 2.0),
                 ellipsis,
                 color,
             );
@@ -225,6 +232,7 @@ pub fn ui(
     temp_random_instant: Instant,
     force_live: bool,
     hardware_params: &mut HardwareParams,
+    bands_info: &BandsInfo,
 ) {
     let id = ui.id().with(&id_source);
     let ui_size = ui.available_size();
@@ -232,7 +240,7 @@ pub fn ui(
     let figure_rect = ui_rect
         .clone()
         .with_min_x(ui_rect.min.x + 48.)
-        .with_min_y(ui_rect.min.y + 48.);
+        .with_min_y(ui_rect.min.y + 100.);
     let figure_size = figure_rect.size();
 
     let overall_size = egui::vec2(1e9, 120.);
@@ -428,6 +436,37 @@ pub fn ui(
                 egui::FontId::proportional(12.),
                 visuals.fg_stroke.color,
             );
+        }
+    }
+
+    // Bands
+    let visuals = ui.visuals().widgets.noninteractive;
+    for (bands_or_allocations, offset) in [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)] {
+        for band in bands_or_allocations {
+            let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
+            let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
+            let rect_bottom = figure_rect.top() - offset;
+            let rect_top = figure_rect.top() - offset - 14.;
+            let rect = egui::Rect {
+                min: egui::pos2(rect_left, rect_top),
+                max: egui::pos2(rect_right, rect_bottom),
+            };
+            if rect.intersects(ui_rect) {
+                painter.rect(
+                    rect,
+                    visuals.corner_radius,
+                    visuals.bg_fill,
+                    visuals.fg_stroke,
+                    egui::StrokeKind::Outside,
+                );
+                paint_elided_text(
+                    &painter,
+                    rect.intersect(ui_rect),
+                    band.description.clone(),
+                    egui::FontId::proportional(12.),
+                    visuals.fg_stroke.color,
+                );
+            }
         }
     }
 
