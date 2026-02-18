@@ -2,7 +2,7 @@ use eframe::wgpu;
 use sdr::waterfall_gpu::ChunkDrawInfo;
 use std::{ops::Range, time::Instant};
 
-const BUFFER_LEN: usize = 512;
+const BUFFER_LEN: usize = 4096;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

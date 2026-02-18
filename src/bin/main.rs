@@ -265,6 +265,7 @@ impl eframe::App for SdrApp {
                 self.reference_time.duration_since(self.prev_reference_time),
                 self.temp_random_instant,
                 force_live,
+                &mut self.hardware_params,
             );
         });
     }

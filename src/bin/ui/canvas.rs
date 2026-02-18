@@ -3,6 +3,7 @@ use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 use eframe::wgpu;
+use sdr::hardware::HardwareParams;
 use sdr::waterfall_gpu::ChunkDrawInfo;
 
 use super::waterfall::WaterfallRenderer;
@@ -18,6 +19,53 @@ const AVAILABLE_FREQUENCY_GRIDLINES: [f64; 15] = [
 const AVAILABLE_TIME_GRIDLINES: [f64; 15] = [
     1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1., 5., 10., 30., 60., 300., 600., 1800., 3600.,
 ];
+
+fn paint_elided_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: String,
+    font_id: egui::FontId,
+    color: egui::Color32,
+) {
+    let galley = painter.layout_no_wrap(text.clone(), font_id.clone(), color);
+    let text_width = galley.rect.width();
+
+    if text_width > rect.width() {
+        let ellipsis = painter.layout_no_wrap("...".to_string(), font_id.clone(), color);
+        let ellipsis_width = ellipsis.rect.width();
+        let available_width = rect.width() - ellipsis_width;
+
+        if available_width > 0.0 {
+            let mut truncated_text = text.clone();
+            while !truncated_text.is_empty() {
+                let test_galley = painter.layout_no_wrap(truncated_text.clone(), font_id.clone(), color);
+                if test_galley.rect.width() <= available_width {
+                    break;
+                }
+                truncated_text.pop();
+            }
+            let combined = format!("{}...", truncated_text);
+            let final_galley = painter.layout_no_wrap(combined, font_id, color);
+            painter.galley(
+                rect.center() - egui::vec2(final_galley.rect.width() / 2.0, final_galley.rect.height() / 2.0),
+                final_galley,
+                color,
+            );
+        } else {
+            painter.galley(
+                rect.center() - egui::vec2(ellipsis.rect.width() / 2.0, ellipsis.rect.height() / 2.0),
+                ellipsis,
+                color,
+            );
+        }
+    } else {
+        painter.galley(
+            rect.center() - egui::vec2(galley.rect.width() / 2.0, galley.rect.height() / 2.0),
+            galley,
+            color,
+        );
+    }
+}
 
 pub struct StaticResources {
     target_format: wgpu::TextureFormat,
@@ -176,7 +224,7 @@ pub fn ui(
     dt: Duration,
     temp_random_instant: Instant,
     force_live: bool,
-    //band_info: BandInfo,
+    hardware_params: &mut HardwareParams,
 ) {
     let id = ui.id().with(&id_source);
     let ui_size = ui.available_size();
@@ -211,9 +259,13 @@ pub fn ui(
 
             // Keep pointer position stationary
             if let Some(pointer_pos) = response.hover_pos() {
+                let old_translation = viewport.translation;
                 let pointer_canvas = pointer_pos - figure_rect.min;
                 viewport.translation = pointer_canvas
                     - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
+                if old_translation.y >= 0. {
+                    viewport.translation.y = old_translation.y;
+                }
             }
         }
         // Regular scroll: pan the canvas
@@ -235,9 +287,13 @@ pub fn ui(
         viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
         // Keep pointer position stationary
         if let Some(pointer_pos) = response.hover_pos() {
+            let old_translation = viewport.translation;
             let pointer_canvas = pointer_pos - figure_rect.min;
             viewport.translation = pointer_canvas
                 - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
+            if old_translation.y >= 0. {
+                viewport.translation.y = old_translation.y;
+            }
         }
     }
 
@@ -265,6 +321,8 @@ pub fn ui(
         .clamp(-max_translation, egui::Vec2::ZERO);
 
     let painter = ui.painter().with_clip_rect(ui_rect);
+    let gridline_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+    let gridline_text_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
 
     // Vertical gridlines
     {
@@ -286,13 +344,13 @@ pub fn ui(
                 egui::Align2::CENTER_BOTTOM,
                 format_freq(val, precision),
                 egui::FontId::proportional(12.),
-                egui::Color32::WHITE,
+                gridline_text_color,
             );
 
             painter.vline(
                 x,
                 (figure_rect.top() - 4.)..=figure_rect.bottom(),
-                (1., egui::Color32::WHITE),
+                gridline_stroke,
             );
         }
     }
@@ -321,13 +379,54 @@ pub fn ui(
                 egui::Align2::RIGHT_CENTER,
                 format_time(val, precision),
                 egui::FontId::proportional(12.),
-                egui::Color32::WHITE,
+                gridline_text_color,
             );
 
             painter.hline(
                 (figure_rect.left() - 4.)..=figure_rect.right(),
                 y,
-                (1., egui::Color32::WHITE),
+                gridline_stroke,
+            );
+        }
+    }
+
+    // RX Channels
+    for (device_id, device_params) in &mut hardware_params.devices {
+        for (channel_idx, rx_channel_params) in device_params.rx_channels.iter_mut().enumerate() {
+            let channel_left_freq =
+                rx_channel_params.frequency.unwrap() - 0.5 * rx_channel_params.sample_rate.unwrap();
+            let channel_right_freq =
+                rx_channel_params.frequency.unwrap() + 0.5 * rx_channel_params.sample_rate.unwrap();
+
+            let rect_left = figure_rect.left() + viewport.screen_space_x(channel_left_freq as f32);
+            let rect_right =
+                figure_rect.left() + viewport.screen_space_x(channel_right_freq as f32);
+            let rect_bottom = figure_rect.top() - 26.;
+            let rect_top = figure_rect.top() - 42.;
+            let rect = egui::Rect {
+                min: egui::pos2(rect_left, rect_top),
+                max: egui::pos2(rect_right, rect_bottom),
+            };
+            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            let visuals = ui.visuals().widgets.style(&response);
+            painter.rect(
+                rect,
+                visuals.corner_radius,
+                visuals.bg_fill,
+                visuals.fg_stroke,
+                egui::StrokeKind::Outside,
+            );
+            if response.dragged_by(egui::PointerButton::Primary) {
+                let drag = response.drag_delta();
+                *rx_channel_params.frequency.as_mut().unwrap() +=
+                    (drag.x / viewport.scale.x) as f64;
+            }
+            paint_elided_text(
+                &painter,
+                rect.intersect(ui_rect),
+                format!("{} RX channel {}", device_id, channel_idx),
+                egui::FontId::proportional(12.),
+                visuals.fg_stroke.color,
             );
         }
     }
