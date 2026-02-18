@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::wgpu;
 use sdr::waterfall_gpu::ChunkDrawInfo;
@@ -173,7 +173,9 @@ pub fn ui(
     viewport: &mut Viewport,
     waterfall_chunks: Vec<ChunkDrawInfo>,
     reference_time: Instant,
+    dt: Duration,
     temp_random_instant: Instant,
+    force_live: bool,
     //band_info: BandInfo,
 ) {
     let id = ui.id().with(&id_source);
@@ -181,13 +183,21 @@ pub fn ui(
     let (ui_rect, response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
     let figure_rect = ui_rect
         .clone()
-        .with_min_x(ui_rect.min.x + 50.)
-        .with_min_y(ui_rect.min.y + 12.);
+        .with_min_x(ui_rect.min.x + 48.)
+        .with_min_y(ui_rect.min.y + 48.);
     let figure_size = figure_rect.size();
 
     let overall_size = egui::vec2(1e9, 120.);
     let min_scale = figure_size / overall_size;
     let max_zoom = 1e9;
+
+    if force_live {
+        viewport.translation.y = 0.
+    }
+    if viewport.translation.y < 0. {
+        // Auto-scroll to keep viewport stationary
+        viewport.translation.y -= (viewport.scale.y as f64 * dt.as_secs_f64()) as f32;
+    }
 
     // Handle scroll and zoom
     if response.hovered() {
@@ -272,14 +282,18 @@ pub fn ui(
             let x = figure_rect.left() + viewport.screen_space_x(val as f32);
 
             painter.text(
-                egui::pos2(x, figure_rect.top()),
+                egui::pos2(x, figure_rect.top() - 6.),
                 egui::Align2::CENTER_BOTTOM,
                 format_freq(val, precision),
                 egui::FontId::proportional(12.),
                 egui::Color32::WHITE,
             );
 
-            painter.vline(x, figure_rect.y_range(), (1., egui::Color32::WHITE));
+            painter.vline(
+                x,
+                (figure_rect.top() - 4.)..=figure_rect.bottom(),
+                (1., egui::Color32::WHITE),
+            );
         }
     }
     // Horizontal gridlines
@@ -289,6 +303,7 @@ pub fn ui(
             .partition_point(|&period| period < target_gridline_period as f64);
         let i = i.min(AVAILABLE_TIME_GRIDLINES.len() - 1);
         let period = AVAILABLE_TIME_GRIDLINES[i];
+        let precision = period.log10() as i32;
         // TODO: Reference everything from day or hour start instead of this random instant
         let offset = reference_time
             .duration_since(temp_random_instant)
@@ -302,14 +317,18 @@ pub fn ui(
             let y = figure_rect.top() + viewport.screen_space_y((offset - val) as f32);
 
             painter.text(
-                egui::pos2(figure_rect.left(), y),
+                egui::pos2(figure_rect.left() - 6., y),
                 egui::Align2::RIGHT_CENTER,
-                format!("{:.3}", val),
+                format_time(val, precision),
                 egui::FontId::proportional(12.),
                 egui::Color32::WHITE,
             );
 
-            painter.hline(figure_rect.x_range(), y, (1., egui::Color32::WHITE));
+            painter.hline(
+                (figure_rect.left() - 4.)..=figure_rect.right(),
+                y,
+                (1., egui::Color32::WHITE),
+            );
         }
     }
 
@@ -340,4 +359,8 @@ fn format_freq(freq: f64, precision: i32) -> String {
     } else {
         format!("XXX Hz")
     }
+}
+
+fn format_time(time: f64, precision: i32) -> String {
+    format!("{:.*} s", (-precision).max(0) as usize, time)
 }

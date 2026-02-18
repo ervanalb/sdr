@@ -47,6 +47,7 @@ struct SdrApp {
     viewport_state: ui::canvas::Viewport,
     waterfall_gpu: WaterfallGpu,
     reference_time: Instant,
+    prev_reference_time: Instant,
     temp_random_instant: Instant,
 }
 
@@ -55,13 +56,15 @@ impl SdrApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         ui::canvas::init(cc);
         let device = &cc.wgpu_render_state.as_ref().unwrap().device;
+        let now = Instant::now();
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
-            reference_time: Instant::now(),
-            temp_random_instant: Instant::now(),
+            reference_time: now,
+            prev_reference_time: now,
+            temp_random_instant: now,
         }
     }
 }
@@ -76,6 +79,7 @@ impl eframe::App for SdrApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
+        self.prev_reference_time = self.reference_time;
         if self.hardware_params.run {
             self.reference_time = Instant::now();
         }
@@ -102,6 +106,7 @@ impl eframe::App for SdrApp {
                 .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
         }
 
+        let prev_run = self.hardware_params.run;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -250,13 +255,16 @@ impl eframe::App for SdrApp {
             // Get draw list from waterfall GPU
             let waterfall_chunks = self.waterfall_gpu.draw_list().collect();
 
+            let force_live = self.hardware_params.run && !prev_run;
             self::ui::canvas::ui(
                 ui,
                 "canvas",
                 &mut self.viewport_state,
                 waterfall_chunks,
                 self.reference_time,
+                self.reference_time.duration_since(self.prev_reference_time),
                 self.temp_random_instant,
+                force_live,
             );
         });
     }
