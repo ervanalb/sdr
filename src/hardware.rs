@@ -1,4 +1,4 @@
-use crate::waterfall::Waterfall;
+use crate::waterfall::{ChannelConvertParams, ChannelParams, ChannelProbeParams, Waterfall};
 use log::{info, warn};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -14,6 +14,8 @@ const STREAM_BUFFER_DURATION: f64 = 0.001;
 const WATERFALL_TARGET_BIN_SIZE: f64 = 5_000.0; // 5 KHz
 const WATERFALL_OUTPUT_PERIOD: f64 = 0.005; // 200 waterfall rows per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
+const WATERFALL_MIN_MAX_TIME_CONSTANT: f64 = 1.;
+const WATERFALL_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
 
 fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
     // Snap to the nearest discrete step if stepsize is non-zero
@@ -63,6 +65,8 @@ pub struct WaterfallMessage {
     pub center_frequency: f64,
     pub width: f64,
     pub waterfall_row: Vec<f32>,
+    pub min: f64,
+    pub max: f64,
 }
 
 type HardwareDeviceId = String;
@@ -750,7 +754,7 @@ impl HardwareDeviceRxChannel {
             let buffer_size = (STREAM_BUFFER_DURATION * sample_rate) as usize;
             let buffer_size = buffer_size.next_power_of_two();
             info!(
-                "Channel parameters: sample_rate={sample_rate:?}, frequency={frequency:?}, bandwidth={bandwidth:?}, buffer_size={buffer_size:?}"
+                "Hardware channel parameters: sample_rate={sample_rate:?}, frequency={frequency:?}, bandwidth={bandwidth:?}, buffer_size={buffer_size:?}"
             );
 
             let mut buffer = vec![num_complex::Complex::<i8>::new(0, 0); buffer_size];
@@ -758,6 +762,27 @@ impl HardwareDeviceRxChannel {
                 sample_rate,
                 WATERFALL_TARGET_BIN_SIZE,
                 WATERFALL_OUTPUT_PERIOD,
+                WATERFALL_MIN_MAX_TIME_CONSTANT,
+                WATERFALL_OFFSET_REJECT_TIME_CONSTANT,
+            );
+            waterfall.set_channels(
+                frequency,
+                [ChannelParams {
+                    probe: ChannelProbeParams {
+                        center_frequency: 88.1e6,
+                        bandwidth: 30e3,
+                        squelch_time_constant: 1.,
+                        squelch_threshold_db: 6.,
+                        squelch_hysteresis_db: 3.,
+                    },
+                    convert: ChannelConvertParams {
+                        center_frequency: 88.1e6,
+                        bandwidth: 200e3,
+                        target_chunk_period: 1e-3,
+                        target_sample_rate: 200e3,
+                    },
+                }]
+                .into_iter(),
             );
             info!("Opening stream");
             let mut stream = device
@@ -818,7 +843,7 @@ impl HardwareDeviceRxChannel {
                         let width = sample_rate;
                         let period = waterfall.period();
 
-                        waterfall.process(&buffer[..len], |waterfall_row| {
+                        waterfall.process(&buffer[..len], |waterfall_row, min, max| {
                             let msg = WaterfallMessage {
                                 device_id: device_id.clone(),
                                 channel_index,
@@ -828,6 +853,8 @@ impl HardwareDeviceRxChannel {
                                 center_frequency,
                                 width,
                                 waterfall_row,
+                                min,
+                                max,
                             };
                             waterfall_sender_clone
                                 .try_send(msg)

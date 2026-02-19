@@ -3,13 +3,12 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use sdr::band_info::{BandInfo, BandsInfo};
+use sdr::band_info::BandsInfo;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::waterfall_gpu::WaterfallGpu;
 
 mod ui;
 
-const WATERFALL_AUTO_COLOR_TIME_CONSTANT: f64 = 1.;
 const CANVAS_DURATION: f64 = 120.;
 
 fn main() -> eframe::Result<()> {
@@ -59,19 +58,11 @@ impl SdrApp {
         ui::canvas::init(cc);
         let device = &cc.wgpu_render_state.as_ref().unwrap().device;
         let now = Instant::now();
-        let bands_info = BandsInfo {
-            bands: vec![BandInfo {
-                min: 10e6,
-                max: 100e6,
-                description: "Custom band".to_string(),
-            }],
-            allocations: vec![BandInfo {
-                min: 20e6,
-                max: 30e6,
-                description: "Custom allocation".to_string(),
-            }],
-            channels: vec![],
-        };
+
+        // Load bands info from JSON file included at compile time
+        const BANDS_JSON: &str = include_str!("../../bands.json");
+        let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
+
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
@@ -110,12 +101,7 @@ impl eframe::App for SdrApp {
                 let queue = &wgpu_render_state.queue;
 
                 while let Some(msg) = hardware.waterfall_try_recv() {
-                    self.waterfall_gpu.add_row(
-                        &msg,
-                        device,
-                        queue,
-                        WATERFALL_AUTO_COLOR_TIME_CONSTANT,
-                    );
+                    self.waterfall_gpu.add_row(&msg, device, queue);
                 }
             }
             self.waterfall_gpu

@@ -57,13 +57,6 @@ fn paint_elided_text(
                 final_galley,
                 color,
             );
-        } else {
-            painter.galley(
-                rect.center()
-                    - egui::vec2(ellipsis.rect.width() / 2.0, ellipsis.rect.height() / 2.0),
-                ellipsis,
-                color,
-            );
         }
     } else {
         painter.galley(
@@ -243,7 +236,7 @@ pub fn ui(
         .with_min_y(ui_rect.min.y + 100.);
     let figure_size = figure_rect.size();
 
-    let overall_size = egui::vec2(1e9, 120.);
+    let overall_size = egui::vec2(bands_info.highest_freq as f32, 120.);
     let min_scale = figure_size / overall_size;
     let max_zoom = 1e9;
 
@@ -441,7 +434,8 @@ pub fn ui(
 
     // Bands
     let visuals = ui.visuals().widgets.noninteractive;
-    for (bands_or_allocations, offset) in [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)] {
+    for (bands_or_allocations, offset) in [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
+    {
         for band in bands_or_allocations {
             let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
             let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
@@ -493,7 +487,7 @@ fn format_freq(freq: f64, precision: i32) -> String {
     } else if freq < 1e9 {
         format!("{:.*} MHz", (6 - precision).max(0) as usize, freq * 1e-6)
     } else if freq < 1e12 {
-        format!("{:.*} GHz", (12 - precision).max(0) as usize, freq * 1e-12)
+        format!("{:.*} GHz", (9 - precision).max(0) as usize, freq * 1e-9)
     } else {
         format!("XXX Hz")
     }

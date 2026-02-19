@@ -1,5 +1,4 @@
 use crate::hardware::WaterfallMessage;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Instant;
 use wgpu::{
@@ -41,13 +40,7 @@ impl WaterfallGpu {
         }
     }
 
-    pub fn add_row(
-        &mut self,
-        msg: &WaterfallMessage,
-        device: &Device,
-        queue: &Queue,
-        min_max_time_constant: f64,
-    ) {
+    pub fn add_row(&mut self, msg: &WaterfallMessage, device: &Device, queue: &Queue) {
         let key = (msg.device_id.clone(), msg.channel_index);
 
         let group = self
@@ -56,24 +49,10 @@ impl WaterfallGpu {
             .or_insert_with(|| TextureGroup {
                 active_texture: ActiveTexture::new(device, msg, self.blank_texture.clone()),
                 finished_textures: vec![],
-                min: *msg
-                    .waterfall_row
-                    .iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                    .unwrap() as f64,
-                max: *msg
-                    .waterfall_row
-                    .iter()
-                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                    .unwrap() as f64,
+                min: msg.min,
+                max: msg.max,
             });
-        group.add_row(
-            device,
-            queue,
-            self.blank_texture.clone(),
-            min_max_time_constant,
-            msg,
-        );
+        group.add_row(device, queue, self.blank_texture.clone(), msg);
     }
 
     pub fn prune_old_textures(&mut self, time: Instant) {
@@ -250,7 +229,6 @@ impl TextureGroup {
         device: &Device,
         queue: &Queue,
         blank_texture: Texture,
-        min_max_time_constant: f64,
         msg: &WaterfallMessage,
     ) {
         if self.active_texture.period != msg.period
@@ -266,10 +244,8 @@ impl TextureGroup {
 
         self.active_texture.add_row(queue, &msg.waterfall_row);
         self.active_texture.end_time = msg.end_time;
-        self.update_min_max(
-            &msg.waterfall_row,
-            msg.period / (min_max_time_constant + msg.period),
-        );
+        self.min = msg.min;
+        self.max = msg.max;
     }
 
     // Returns true if there are still chunks
@@ -374,29 +350,6 @@ impl TextureGroup {
             start_time: old_active_texture.start_time,
             end_time: old_active_texture.end_time,
         });
-    }
-
-    fn update_min_max(&mut self, msg: &[f32], alpha: f64) {
-        let new_min = (*msg
-            .iter()
-            .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-            .unwrap())
-        .max(1e-10) as f64;
-        let new_max = (*msg
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-            .unwrap())
-        .max(1e-10) as f64;
-
-        //self.min = self.min.min(new_min);
-        //self.max = self.max.max(new_max);
-
-        //self.min = (self.min.ln() + alpha * (new_min.ln() - self.min.ln()) as f64).exp();
-        //self.max = (self.max.ln() + alpha * (new_max.ln() - self.max.ln()) as f64).exp();
-
-        // LPF in log space
-        self.min = self.min * (new_min / self.min).powf(alpha);
-        self.max = self.max * (new_max / self.max).powf(alpha);
     }
 }
 
