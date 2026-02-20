@@ -1,0 +1,183 @@
+{
+  "bands": [
+    {
+      "min": 30e3,
+      "max": 300e3,
+      "description": "LF"
+    },
+    {
+      "min": 300e3,
+      "max": 3e6,
+      "description": "MF"
+    },
+    {
+      "min": 3e6,
+      "max": 30e6,
+      "description": "HF"
+    },
+    {
+      "min": 30e6,
+      "max": 300e6,
+      "description": "VHF"
+    },
+    {
+      "min": 300e6,
+      "max": 1e9,
+      "description": "UHF"
+    },
+    {
+      "min": 1e9,
+      "max": 2e9,
+      "description": "L"
+    },
+    {
+      "min": 2e9,
+      "max": 4e9,
+      "description": "S"
+    },
+    {
+      "min": 4e9,
+      "max": 8e9,
+      "description": "C"
+    },
+    {
+      "min": 8e9,
+      "max": 12e9,
+      "description": "X"
+    }
+  ],
+  "allocations": [
+    {
+      "min": 535e3,
+      "max": 1.705e6,
+      "description": "Broadcast AM"
+    },
+    {
+      "min": 88e6,
+      "max": 108e6,
+      "description": "Broadcast FM"
+    },
+    {
+      "min": 1.8e6,
+      "max": 2e6,
+      "description": "HAM 160m"
+    },
+    {
+      "min": 3.5e6,
+      "max": 4e6,
+      "description": "HAM 80m"
+    },
+    {
+      "min": 7e6,
+      "max": 7.3e6,
+      "description": "HAM 40m"
+    },
+    {
+      "min": 10.1e6,
+      "max": 10.15e6,
+      "description": "HAM 30m"
+    },
+    {
+      "min": 14e6,
+      "max": 14.35e6,
+      "description": "HAM 20m"
+    },
+    {
+      "min": 18.068e6,
+      "max": 18.168e6,
+      "description": "HAM 17m"
+    },
+    {
+      "min": 21e6,
+      "max": 21.45e6,
+      "description": "HAM 15m"
+    },
+    {
+      "min": 24.89e6,
+      "max": 24.99e6,
+      "description": "HAM 12m"
+    },
+    {
+      "min": 28e6,
+      "max": 29.7e6,
+      "description": "HAM 10m"
+    },
+    {
+      "min": 50e6,
+      "max": 54e6,
+      "description": "HAM 6m"
+    },
+    {
+      "min": 144e6,
+      "max": 148e6,
+      "description": "HAM 2m"
+    },
+    {
+      "min": 420e6,
+      "max": 450e6,
+      "description": "HAM 70cm"
+    },
+    {
+      "min": 54e6,
+      "max": 72e6,
+      "description": "Broadcast TV Ch 2-4"
+    },
+    {
+      "min": 76e6,
+      "max": 88e6,
+      "description": "Broadcast TV Ch 5-6"
+    },
+    {
+      "min": 174e6,
+      "max": 216e6,
+      "description": "Broadcast TV Ch 7-13"
+    },
+    {
+      "min": 470e6,
+      "max": 608e6,
+      "description": "Broadcast TV Ch 14-36"
+    },
+    {
+      "min": 6.765e6,
+      "max": 6.795e6,
+      "description": "ISM 6.78 MHz"
+    },
+    {
+      "min": 13.553e6,
+      "max": 13.567e6,
+      "description": "ISM 13.56 MHz"
+    },
+    {
+      "min": 26.957e6,
+      "max": 27.283e6,
+      "description": "ISM 27 MHz"
+    },
+    {
+      "min": 40.66e6,
+      "max": 40.7e6,
+      "description": "ISM 40 MHz"
+    },
+    {
+      "min": 433.05e6,
+      "max": 434.79e6,
+      "description": "ISM 433 MHz"
+    },
+    {
+      "min": 902e6,
+      "max": 928e6,
+      "description": "ISM 915 MHz"
+    },
+    {
+      "min": 2.4e9,
+      "max": 2.5e9,
+      "description": "ISM 2.4 GHz"
+    },
+    {
+      "min": 5.725e9,
+      "max": 5.875e9,
+      "description": "ISM 5.8 GHz"
+    }
+  ],
+  "channels": [],
+  "highest_freq": 12e9
+}

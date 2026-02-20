@@ -769,15 +769,15 @@ impl HardwareDeviceRxChannel {
                 frequency,
                 [ChannelParams {
                     probe: ChannelProbeParams {
-                        center_frequency: 88.1e6,
-                        bandwidth: 30e3,
+                        center_frequency: 100.7e6,
+                        bandwidth: 150e3,
                         squelch_time_constant: 1.,
                         squelch_threshold_db: 6.,
                         squelch_hysteresis_db: 3.,
                     },
                     convert: ChannelConvertParams {
-                        center_frequency: 88.1e6,
-                        bandwidth: 200e3,
+                        center_frequency: 100.7e6,
+                        bandwidth: 150e3,
                         target_chunk_period: 1e-3,
                         target_sample_rate: 200e3,
                     },

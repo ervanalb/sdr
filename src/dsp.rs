@@ -56,14 +56,17 @@ impl<T: Clone> Decimator<T> {
     }
 
     pub fn process(&mut self, data: &[T], mut emit: impl FnMut(&mut [T])) {
-        for sample in data[self.counter..].iter().step_by(self.factor) {
-            self.buffer.push(sample.clone());
-            if self.buffer.len() == self.chunk_size {
-                emit(&mut self.buffer);
-                self.buffer.clear();
+        let offset = (self.factor - self.counter) % self.factor;
+        if offset < data.len() {
+            for sample in data[offset..].iter().step_by(self.factor) {
+                self.buffer.push(sample.clone());
+                if self.buffer.len() == self.chunk_size {
+                    emit(&mut self.buffer);
+                    self.buffer.clear();
+                }
             }
-            self.counter = (self.counter + data.len()) % self.factor;
         }
+        self.counter = (self.counter + data.len()) % self.factor;
     }
 }
 
@@ -157,7 +160,8 @@ impl FirFilter {
                 // Emit the valid range
                 emit(&mut self.fft_buffer[self.overlap..]);
 
-                // Shift overlap samples to beginning of buffer for next chunk
+                // Discard the valid samples from the beginning of the buffer
+                // (shift overlap samples to beginning for the next chunk)
                 self.buffer.drain(..valid_output_size);
             }
         }

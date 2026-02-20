@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 use num_complex::Complex;
 
@@ -119,10 +121,10 @@ impl Waterfall {
                 );
 
                 let converter_frequency =
-                    (params.convert.center_frequency - center_frequency) / self.sample_rate;
+                    -(params.convert.center_frequency - center_frequency) / self.sample_rate;
                 let lpf_impulse_response = windowed_sinc(
-                    params.convert.bandwidth / self.sample_rate,
-                    1 + (3. * self.sample_rate / params.convert.bandwidth).round() as usize,
+                    0.5 * params.convert.bandwidth / self.sample_rate,
+                    1 + 2 * (5. * self.sample_rate / params.convert.bandwidth).round() as usize,
                 );
 
                 let fast_chunk_size =
@@ -132,6 +134,14 @@ impl Waterfall {
                 let decimation_factor =
                     (self.sample_rate / params.convert.target_sample_rate).round() as usize;
                 let slow_chunk_size = fast_chunk_size / decimation_factor;
+                println!(
+                    "Output sample rate: {}",
+                    self.sample_rate / decimation_factor as f64
+                );
+
+                // Write LPF impulse response to file
+                let file = File::create("iq_samples.raw").expect("Failed to create iq_samples.raw");
+                let iq_writer = BufWriter::new(file);
 
                 Some(Channel {
                     probe_left_bin: left_bin,
@@ -146,6 +156,7 @@ impl Waterfall {
                     converter: Converter::new(converter_frequency),
                     filter: FirFilter::new_from_impulse_response(&lpf_impulse_response, fft_size),
                     decimator: Decimator::new(decimation_factor, slow_chunk_size),
+                    iq_writer,
                 })
             })
             .collect();
@@ -313,6 +324,7 @@ struct Channel {
     converter: Converter,
     filter: FirFilter,
     decimator: Decimator<Complex<f32>>,
+    iq_writer: BufWriter<File>,
 }
 
 impl Channel {
@@ -343,7 +355,12 @@ impl Channel {
         self.filter.process(samples, |samples| {
             // Decimate signal to lower data rate
             self.decimator.process(samples, |samples| {
-                dbg!(samples);
+                // Write samples as raw complex f32 (interleaved real, imag pairs)
+                for sample in samples.iter() {
+                    self.iq_writer.write_all(&sample.re.to_le_bytes()).ok();
+                    self.iq_writer.write_all(&sample.im.to_le_bytes()).ok();
+                }
+                self.iq_writer.flush().ok();
             });
         });
     }
