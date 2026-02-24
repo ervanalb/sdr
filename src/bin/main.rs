@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::fs::File;
+use std::io::BufWriter;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -50,6 +53,7 @@ struct SdrApp {
     prev_reference_time: Instant,
     temp_random_instant: Instant,
     bands_info: BandsInfo,
+    iq_writer: BufWriter<File>,
 }
 
 impl SdrApp {
@@ -63,6 +67,10 @@ impl SdrApp {
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
 
+        // TEMP: write IQ samples to a file
+        let file = File::create("iq_samples.raw").expect("Failed to create iq_samples.raw");
+        let iq_writer = BufWriter::new(file);
+
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
@@ -72,6 +80,7 @@ impl SdrApp {
             prev_reference_time: now,
             temp_random_instant: now,
             bands_info,
+            iq_writer,
         }
     }
 }
@@ -103,6 +112,14 @@ impl eframe::App for SdrApp {
                 while let Some(msg) = hardware.stream_try_recv() {
                     self.waterfall_gpu.add_row(&msg, device, queue);
                 }
+
+                while let Some(msg) = hardware.channel_try_recv() {
+                    for sample in msg.iq_data.iter() {
+                        self.iq_writer.write_all(&sample.re.to_le_bytes()).ok();
+                        self.iq_writer.write_all(&sample.im.to_le_bytes()).ok();
+                    }
+                }
+                self.iq_writer.flush().ok();
             }
             self.waterfall_gpu
                 .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
@@ -176,9 +193,7 @@ impl eframe::App for SdrApp {
                                                     ));
                                                 }
 
-                                                if let Some(sample_rate) =
-                                                    &mut stream.sample_rate
-                                                {
+                                                if let Some(sample_rate) = &mut stream.sample_rate {
                                                     ui.add(
                                                         egui::Slider::new(
                                                             sample_rate,

@@ -1,16 +1,22 @@
 use std::cmp::Ordering;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::sync::Mutex;
+use std::sync::mpsc::SyncSender;
+use std::time::Instant;
 
 use num_complex::Complex;
 
 use crate::dsp::Owner;
+use crate::hardware::{
+    ChannelMessage, HardwareDeviceId, ReceiveChannelDescriptor, ReceiveChannelDescriptorPtr,
+    ReceiveStreamDescriptor, ReceiveStreamDescriptorPtr, StreamMessage,
+}; // TODO Move to this module
 use crate::{
     dsp::{Converter, Decimator, FirFilter, Rechunker, windowed_sinc},
     hardware::IntoComplexF32,
 };
 
 pub struct Waterfall {
+    receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     rechunker: Rechunker<Complex<f32>>,
     buffer: Vec<Complex<f32>>,
@@ -28,15 +34,21 @@ pub struct Waterfall {
     offset: Complex<f64>,
     offset_reject_alpha: f64,
     channels: Vec<Channel>,
+    stream_last_t: Instant,
+    channel_last_t: Instant,
 }
 
 impl Waterfall {
     pub fn new(
+        device_id: HardwareDeviceId,
+        stream_index: usize,
+        frequency: f64,
         sample_rate: f64,
         target_bin_size: f64,
         output_period: f64,
         min_max_time_constant: f64,
         offset_reject_time_constant: f64,
+        time: Instant,
     ) -> Self {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (sample_rate / target_bin_size).ceil() as usize;
@@ -59,7 +71,16 @@ impl Waterfall {
         let min_max_alpha = period / (min_max_time_constant + period);
         let offset_reject_alpha = period / (offset_reject_time_constant + period);
 
+        let receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr = ReceiveStreamDescriptor {
+            device_id,
+            stream_index,
+            frequency,
+            sample_rate,
+        }
+        .into();
+
         Self {
+            receive_stream_descriptor_ptr,
             fft,
             rechunker: Rechunker::new(fft_size),
             buffer: vec![Default::default(); fft_size],
@@ -77,6 +98,8 @@ impl Waterfall {
             offset: Default::default(),
             offset_reject_alpha,
             channels: vec![],
+            stream_last_t: time,
+            channel_last_t: time,
         }
     }
 
@@ -135,16 +158,15 @@ impl Waterfall {
                 let decimation_factor =
                     (self.sample_rate / params.convert.target_sample_rate).round() as usize;
                 let slow_chunk_size = fast_chunk_size / decimation_factor;
-                println!(
-                    "Output sample rate: {}",
-                    self.sample_rate / decimation_factor as f64
-                );
 
-                // Write LPF impulse response to file
-                let file = File::create("iq_samples.raw").expect("Failed to create iq_samples.raw");
-                let iq_writer = BufWriter::new(file);
+                let receive_channel_descriptor_ptr = ReceiveChannelDescriptor {
+                    receive_stream_descriptor_ptr: self.receive_stream_descriptor_ptr.clone(),
+                    sample_rate: self.sample_rate / decimation_factor as f64,
+                }
+                .into();
 
                 Some(Channel {
+                    receive_channel_descriptor_ptr,
                     probe_left_bin: left_bin,
                     probe_right_bin: right_bin,
                     squelch_alpha,
@@ -158,7 +180,6 @@ impl Waterfall {
                     converter: Converter::new(converter_frequency),
                     filter: FirFilter::new_from_impulse_response(&lpf_impulse_response, fft_size),
                     decimator: Decimator::new(decimation_factor, slow_chunk_size),
-                    iq_writer,
                 })
             })
             .collect();
@@ -167,18 +188,27 @@ impl Waterfall {
     pub fn process<T: IntoComplexF32 + Copy + std::fmt::Debug>(
         &mut self,
         samples: &[T],
-        mut emit: impl FnMut(Vec<f32>, f64, f64),
-    ) {
+        time: Instant,
+        stream_sender: &SyncSender<StreamMessage>,
+        channel_sender: &SyncSender<ChannelMessage>,
+    ) -> Result<(), String> {
+        // TODO custom error type
         let offset = Complex::<f32> {
             re: self.offset.re as f32,
             im: self.offset.im as f32,
         };
+
+        let mut result = Ok(());
 
         self.rechunker.process_iter(
             samples
                 .iter()
                 .map(|sample| sample.into_complex_f32() - offset),
             |incoming_buffer| {
+                if result.is_err() {
+                    return;
+                }
+
                 self.buffer.clone_from_slice(incoming_buffer);
                 self.fft.process(&mut self.buffer);
 
@@ -271,25 +301,53 @@ impl Waterfall {
                             self.offset + self.offset_reject_alpha * (new_offset - self.offset);
                     }
 
-                    emit(output, self.min, self.max);
+                    result = stream_sender
+                        .try_send(StreamMessage {
+                            receive_stream_descriptor_ptr: self
+                                .receive_stream_descriptor_ptr
+                                .clone(),
+                            waterfall_row: output,
+                            start_time: self.stream_last_t,
+                            end_time: time,
+                            min: self.min,
+                            max: self.max,
+                        })
+                        .map_err(|e| e.to_string());
 
                     // Clear accumulator
                     self.accumulator.fill(0.0);
                     self.accumulations_count = 0;
+                    self.stream_last_t = time;
                 }
 
+                if result.is_err() {
+                    return;
+                }
+
+                let channel_result = Mutex::new(Ok(()));
                 rayon::scope(|s| {
                     for channel in self.channels.iter_mut() {
                         if !channel.active {
                             continue;
                         }
                         s.spawn(|_| {
-                            channel.process(incoming_buffer);
+                            let r = channel.process(
+                                incoming_buffer,
+                                self.channel_last_t,
+                                time,
+                                channel_sender.clone(),
+                            );
+                            if r.is_err() {
+                                *(channel_result.lock().unwrap()) = r;
+                            }
                         });
                     }
                 });
+                result = channel_result.into_inner().unwrap();
+                self.channel_last_t = time;
             },
         );
+        result
     }
 }
 
@@ -317,6 +375,7 @@ pub struct ChannelConvertParams {
 }
 
 struct Channel {
+    receive_channel_descriptor_ptr: ReceiveChannelDescriptorPtr,
     probe_left_bin: u32,
     probe_right_bin: u32,
     squelch_alpha: f32,
@@ -330,7 +389,6 @@ struct Channel {
     converter: Converter,
     filter: FirFilter,
     decimator: Decimator<Complex<f32>>,
-    iq_writer: BufWriter<File>,
 }
 
 impl Channel {
@@ -351,9 +409,16 @@ impl Channel {
         }
     }
 
-    fn process(&mut self, samples: &[Complex<f32>]) {
+    fn process(
+        &mut self,
+        samples: &[Complex<f32>],
+        start_time: Instant,
+        end_time: Instant,
+        channel_sender: SyncSender<ChannelMessage>,
+    ) -> Result<(), String> {
+        let mut result = Ok(());
         if !self.active {
-            return;
+            return result;
         }
         let samples = self.owner.process(samples);
         // Shift frequency of interest to baseband
@@ -362,14 +427,20 @@ impl Channel {
         self.filter.process(samples, |samples| {
             // Decimate signal to lower data rate
             self.decimator.process(samples, |samples| {
-                // Write samples as raw complex f32 (interleaved real, imag pairs)
-                for sample in samples.iter() {
-                    self.iq_writer.write_all(&sample.re.to_le_bytes()).ok();
-                    self.iq_writer.write_all(&sample.im.to_le_bytes()).ok();
+                if result.is_err() {
+                    return;
                 }
-                self.iq_writer.flush().ok();
+                result = channel_sender
+                    .try_send(ChannelMessage {
+                        receive_channel_descriptor_ptr: self.receive_channel_descriptor_ptr.clone(),
+                        iq_data: samples.to_vec(),
+                        start_time,
+                        end_time,
+                    })
+                    .map_err(|e| e.to_string());
             });
         });
+        result
     }
 }
 

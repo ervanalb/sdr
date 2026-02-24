@@ -126,7 +126,7 @@ impl ActiveTexture {
             texture,
             current_row: 0,
             start_time: msg.start_time,
-            end_time: msg.start_time, // since we aren't yet loading in this message
+            end_time: msg.start_time, // Haven't actually pushed the row yet
             mip_level_count,
             // Allocate some extra space in the mip_buffer
             // in case waterfall_row.len() is very small

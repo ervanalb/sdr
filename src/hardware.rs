@@ -93,7 +93,7 @@ pub struct ReceiveChannelDescriptor {
 
 pub type ReceiveChannelDescriptorPtr = ByPtr<ReceiveChannelDescriptor>;
 
-type HardwareDeviceId = String;
+pub type HardwareDeviceId = String;
 
 #[derive(Clone, Debug)]
 pub struct HardwareParams {
@@ -762,7 +762,7 @@ impl HardwareDeviceRxStream {
         device: soapysdr::Device,
         control_receiver: Receiver<HardwareDeviceRxStreamControlMessage>,
         stream_sender: SyncSender<StreamMessage>,
-        _channel_sender: SyncSender<ChannelMessage>,
+        channel_sender: SyncSender<ChannelMessage>,
         mut sample_rate: f64,
         mut frequency: f64,
         mut bandwidth: f64,
@@ -811,24 +811,28 @@ impl HardwareDeviceRxStream {
 
             'middle: loop {
                 let mut waterfall = Waterfall::new(
+                    device_id.clone(),
+                    stream_index,
+                    frequency,
                     sample_rate,
                     WATERFALL_TARGET_BIN_SIZE,
                     STREAM_OUTPUT_PERIOD,
                     STREAM_MIN_MAX_TIME_CONSTANT,
                     STREAM_OFFSET_REJECT_TIME_CONSTANT,
+                    Instant::now(),
                 );
                 waterfall.set_channels(
                     frequency,
                     [ChannelParams {
                         probe: ChannelProbeParams {
-                            center_frequency: 100.7e6,
+                            center_frequency: 93.9e6,
                             bandwidth: 150e3,
                             squelch_time_constant: 1.,
                             squelch_threshold_db: 6.,
                             squelch_hysteresis_db: 3.,
                         },
                         convert: ChannelConvertParams {
-                            center_frequency: 100.7e6,
+                            center_frequency: 93.9e6,
                             bandwidth: 150e3,
                             target_chunk_period: 1e-3,
                             target_sample_rate: 200e3,
@@ -836,17 +840,6 @@ impl HardwareDeviceRxStream {
                     }]
                     .into_iter(),
                 );
-
-                let receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr =
-                    ReceiveStreamDescriptor {
-                        device_id: device_id.clone(),
-                        stream_index,
-                        frequency,
-                        sample_rate,
-                    }
-                    .into();
-
-                let mut last_t = Instant::now();
 
                 // Inner loop for data reading
                 'inner: loop {
@@ -905,34 +898,28 @@ impl HardwareDeviceRxStream {
 
                     match stream.read(&mut [&mut buffer], (STREAM_READ_TIMEOUT * 1e6) as i64) {
                         Ok(len) => {
-                            let t = Instant::now();
-                            let stream_sender_clone = stream_sender.clone();
+                            let r = waterfall.process(
+                                &buffer[..len],
+                                Instant::now(),
+                                &stream_sender,
+                                &channel_sender,
+                            );
 
-                            waterfall.process(&buffer[..len], |waterfall_row, min, max| {
-                                let msg = StreamMessage {
-                                    receive_stream_descriptor_ptr: receive_stream_descriptor_ptr
-                                        .clone(),
-                                    waterfall_row,
-                                    start_time: last_t,
-                                    end_time: t,
-                                    min,
-                                    max,
-                                };
-                                stream_sender_clone
-                                    .try_send(msg)
-                                    .unwrap_or_else(|e| warn!("Dropped stream message: {e:?}"));
-                                last_t = t;
-                            });
+                            if let Err(e) = r {
+                                warn!("Stream processing error: {e:?}");
+                                break 'inner; // Create a discontinuity in the stream messages
+                            }
                         }
                         Err(e) => {
                             warn!("Error reading from stream: {e:?}");
+                            break 'middle; // Reboot the stream
                         }
                     }
-                }
-            }
+                } // 'inner
+            } // 'middle
             info!("Closing stream");
             stream.deactivate(None).ok();
-        }
+        } // 'outer
 
         info!("Stopping thread for RX stream {stream_index:?} on device {device_id:?}");
     }
