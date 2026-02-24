@@ -393,7 +393,7 @@ pub fn ui(
 
     // RX Channels
     for (device_id, device_params) in &mut hardware_params.devices {
-        for (channel_idx, rx_channel_params) in device_params.rx_channels.iter_mut().enumerate() {
+        for (channel_idx, rx_channel_params) in device_params.rx_streams.iter_mut().enumerate() {
             let channel_left_freq =
                 rx_channel_params.frequency.unwrap() - 0.5 * rx_channel_params.sample_rate.unwrap();
             let channel_right_freq =

@@ -196,3 +196,40 @@ pub fn windowed_sinc(cutoff: f64, len: usize) -> Vec<Complex<f32>> {
         })
         .collect()
 }
+
+pub struct Owner<T> {
+    buffer: Vec<T>,
+}
+
+impl<T: Clone> Owner<T> {
+    pub fn new() -> Self {
+        Owner { buffer: vec![] }
+    }
+
+    pub fn process(&mut self, data: &[T]) -> &mut [T] {
+        if self.buffer.len() != data.len() {
+            self.buffer = data.to_vec();
+        } else {
+            self.buffer.clone_from_slice(data);
+        }
+        &mut self.buffer
+    }
+}
+
+// From https://math.stackexchange.com/a/1105038
+pub fn atan2_approx(y: f32, x: f32) -> f32 {
+    let a = x.abs().min(y.abs()) / x.abs().max(y.abs());
+    let s = a * a;
+    // Horner evaluation of Remez polynomial approximation
+    let mut r = ((-0.0464964749 * s + 0.15931422) * s - 0.327622764) * s * a + a;
+    if y.abs() > x.abs() {
+        r = std::f32::consts::FRAC_PI_2 - r;
+    }
+    if x < 0. {
+        r = std::f32::consts::PI - r;
+    }
+    if y < 0. {
+        r = -r;
+    }
+    r
+}

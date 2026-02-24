@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 
 use num_complex::Complex;
 
+use crate::dsp::Owner;
 use crate::{
     dsp::{Converter, Decimator, FirFilter, Rechunker, windowed_sinc},
     hardware::IntoComplexF32,
@@ -153,6 +154,7 @@ impl Waterfall {
                     probe_threshold_off: std::f32::INFINITY,
                     probe_level: 1e-10,
                     active: false,
+                    owner: Owner::new(),
                     converter: Converter::new(converter_frequency),
                     filter: FirFilter::new_from_impulse_response(&lpf_impulse_response, fft_size),
                     decimator: Decimator::new(decimation_factor, slow_chunk_size),
@@ -276,13 +278,16 @@ impl Waterfall {
                     self.accumulations_count = 0;
                 }
 
-                for channel in self.channels.iter_mut() {
-                    if !channel.active {
-                        continue;
+                rayon::scope(|s| {
+                    for channel in self.channels.iter_mut() {
+                        if !channel.active {
+                            continue;
+                        }
+                        s.spawn(|_| {
+                            channel.process(incoming_buffer);
+                        });
                     }
-                    self.buffer.clone_from_slice(incoming_buffer);
-                    channel.process(&mut self.buffer);
-                }
+                });
             },
         );
     }
@@ -321,6 +326,7 @@ struct Channel {
     probe_threshold_off: f32,
     probe_level: f32,
     active: bool,
+    owner: Owner<Complex<f32>>,
     converter: Converter,
     filter: FirFilter,
     decimator: Decimator<Complex<f32>>,
@@ -345,10 +351,11 @@ impl Channel {
         }
     }
 
-    fn process(&mut self, samples: &mut [Complex<f32>]) {
+    fn process(&mut self, samples: &[Complex<f32>]) {
         if !self.active {
             return;
         }
+        let samples = self.owner.process(samples);
         // Shift frequency of interest to baseband
         self.converter.process(samples);
         // LPF signal to avoid aliasing

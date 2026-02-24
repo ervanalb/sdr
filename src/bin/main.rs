@@ -100,7 +100,7 @@ impl eframe::App for SdrApp {
                 let device = &wgpu_render_state.device;
                 let queue = &wgpu_render_state.queue;
 
-                while let Some(msg) = hardware.waterfall_try_recv() {
+                while let Some(msg) = hardware.stream_try_recv() {
                     self.waterfall_gpu.add_row(&msg, device, queue);
                 }
             }
@@ -153,20 +153,20 @@ impl eframe::App for SdrApp {
                                 if device_params.active {
                                     ui.separator();
 
-                                    for (channel_idx, rx_channel) in
-                                        device_params.rx_channels.iter_mut().enumerate()
+                                    for (stream_index, stream) in
+                                        device_params.rx_streams.iter_mut().enumerate()
                                     {
                                         ui.collapsing(
-                                            format!("RX Channel {}", channel_idx),
+                                            format!("RX Stream {}", stream_index),
                                             |ui| {
-                                                ui.checkbox(&mut rx_channel.active, "Active");
+                                                ui.checkbox(&mut stream.active, "Active");
 
-                                                if let Some(frequency) = &mut rx_channel.frequency {
+                                                if let Some(frequency) = &mut stream.frequency {
                                                     ui.add(
                                                         egui::Slider::new(
                                                             frequency,
-                                                            rx_channel.frequency_min
-                                                                ..=rx_channel.frequency_max,
+                                                            stream.frequency_min
+                                                                ..=stream.frequency_max,
                                                         )
                                                         .text("Frequency (Hz)"),
                                                     );
@@ -177,13 +177,13 @@ impl eframe::App for SdrApp {
                                                 }
 
                                                 if let Some(sample_rate) =
-                                                    &mut rx_channel.sample_rate
+                                                    &mut stream.sample_rate
                                                 {
                                                     ui.add(
                                                         egui::Slider::new(
                                                             sample_rate,
-                                                            rx_channel.sample_rate_min
-                                                                ..=rx_channel.sample_rate_max,
+                                                            stream.sample_rate_min
+                                                                ..=stream.sample_rate_max,
                                                         )
                                                         .text("Sample Rate (Hz)")
                                                         .logarithmic(true),
@@ -194,12 +194,12 @@ impl eframe::App for SdrApp {
                                                     ));
                                                 }
 
-                                                if let Some(bandwidth) = &mut rx_channel.bandwidth {
+                                                if let Some(bandwidth) = &mut stream.bandwidth {
                                                     ui.add(
                                                         egui::Slider::new(
                                                             bandwidth,
-                                                            rx_channel.bandwidth_min
-                                                                ..=rx_channel.bandwidth_max,
+                                                            stream.bandwidth_min
+                                                                ..=stream.bandwidth_max,
                                                         )
                                                         .text("Bandwidth (Hz)")
                                                         .logarithmic(true),
@@ -211,16 +211,16 @@ impl eframe::App for SdrApp {
                                                 }
 
                                                 // Gain controls
-                                                if !rx_channel.gains.is_empty() {
+                                                if !stream.gains.is_empty() {
                                                     ui.separator();
                                                     ui.label("Gains:");
 
                                                     let mut gain_names: Vec<String> =
-                                                        rx_channel.gains.keys().cloned().collect();
+                                                        stream.gains.keys().cloned().collect();
                                                     gain_names.sort();
 
                                                     for gain_name in gain_names {
-                                                        let gain = rx_channel
+                                                        let gain = stream
                                                             .gains
                                                             .get_mut(&gain_name)
                                                             .unwrap();
