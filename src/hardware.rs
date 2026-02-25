@@ -16,7 +16,7 @@ const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
 const STREAM_BUFFER_DURATION: f64 = 0.001;
 const WATERFALL_TARGET_BIN_SIZE: f64 = 5_000.0; // 5 KHz
-const STREAM_OUTPUT_PERIOD: f64 = 0.005; // 200 waterfall rows per second
+const STREAM_OUTPUT_PERIOD: f64 = 0.01; // 100 waterfall rows per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
@@ -66,8 +66,8 @@ pub struct StreamMessage {
     pub waterfall_row: Vec<f32>,
     pub start_time: Instant,
     pub end_time: Instant,
-    pub min: f64,
-    pub max: f64,
+    pub min: f32,
+    pub max: f32,
 }
 
 pub struct ChannelMessage {
@@ -87,7 +87,7 @@ pub struct ReceiveStreamDescriptor {
 
 pub type ReceiveStreamDescriptorPtr = ByPtr<ReceiveStreamDescriptor>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReceiveChannelDescriptor {
     pub receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
     pub sample_rate: f64,

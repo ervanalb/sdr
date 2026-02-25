@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use num_complex::Complex;
 
 pub struct Rechunker<T> {
@@ -88,12 +90,13 @@ impl Converter {
     }
 }
 
+#[derive(Clone)]
 pub struct FirFilter {
-    impulse_response_fft: Vec<Complex<f32>>,
+    impulse_response_fft: Arc<Vec<Complex<f32>>>,
     overlap: usize,
+    fft_plan: Arc<dyn rustfft::Fft<f32>>,
+    ifft_plan: Arc<dyn rustfft::Fft<f32>>,
     buffer: Vec<Complex<f32>>,
-    fft_plan: std::sync::Arc<dyn rustfft::Fft<f32>>,
-    ifft_plan: std::sync::Arc<dyn rustfft::Fft<f32>>,
     fft_buffer: Vec<Complex<f32>>,
 }
 
@@ -112,7 +115,7 @@ impl FirFilter {
         let overlap = impulse_response.len() - 1;
 
         FirFilter {
-            impulse_response_fft,
+            impulse_response_fft: Arc::new(impulse_response_fft),
             overlap,
             buffer: Vec::with_capacity(fft_size),
             fft_plan,
@@ -144,7 +147,11 @@ impl FirFilter {
                 self.fft_plan.process(&mut self.fft_buffer);
 
                 // Element-wise multiply by impulse_response_fft
-                for (sample, h) in self.fft_buffer.iter_mut().zip(&self.impulse_response_fft) {
+                for (sample, h) in self
+                    .fft_buffer
+                    .iter_mut()
+                    .zip(self.impulse_response_fft.iter())
+                {
                     *sample *= h;
                 }
 
@@ -232,4 +239,8 @@ pub fn atan2_approx(y: f32, x: f32) -> f32 {
         r = -r;
     }
     r
+}
+
+pub fn powf_approx(base: f32, exponent: f32) -> f32 {
+    1. + (base - 1.) * exponent
 }

@@ -6,7 +6,7 @@ use crate::format::format_freq;
 pub struct BandsInfo {
     pub bands: Vec<BandInfo>,
     pub allocations: Vec<BandInfo>,
-    pub channels: Vec<ChannelsInfo>,
+    pub channels: Vec<ChannelGroupInfo>,
     pub highest_freq: f64,
 }
 
@@ -45,7 +45,7 @@ pub struct ChannelConvertParams {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ChannelsInfo {
+pub struct ChannelGroupInfo {
     pub name: String,
     pub min: f64,
     pub max: f64,
@@ -55,29 +55,29 @@ pub struct ChannelsInfo {
     pub convert: ChannelConvertParams,
 }
 
-impl ChannelsInfo {
-    pub fn iter(&self) -> ChannelsInfoIter {
+impl ChannelGroupInfo {
+    pub fn iter(&self) -> ChannelInfoIter {
         let num_channels = if self.step == 0.0 {
             1
         } else {
             ((self.max - self.min) / self.step).round().max(0.) as usize + 1
         };
 
-        ChannelsInfoIter {
-            channels_info: self,
+        ChannelInfoIter {
+            channel_group_info: self,
             current_index: 0,
             num_channels,
         }
     }
 }
 
-pub struct ChannelsInfoIter<'a> {
-    channels_info: &'a ChannelsInfo,
+pub struct ChannelInfoIter<'a> {
+    channel_group_info: &'a ChannelGroupInfo,
     current_index: usize,
     num_channels: usize,
 }
 
-impl<'a> Iterator for ChannelsInfoIter<'a> {
+impl<'a> Iterator for ChannelInfoIter<'a> {
     type Item = ChannelInfo;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -85,15 +85,23 @@ impl<'a> Iterator for ChannelsInfoIter<'a> {
             return None;
         }
 
-        let center_frequency =
-            self.channels_info.min + (self.current_index as f64 * self.channels_info.step);
+        let center_frequency = self.channel_group_info.min
+            + (self.current_index as f64 * self.channel_group_info.step);
 
-        let name = match self.channels_info.naming {
+        let name = match self.channel_group_info.naming {
             NamingConvention::Number => {
-                format!("{} {}", self.channels_info.name, self.current_index + 1)
+                format!(
+                    "{} {}",
+                    self.channel_group_info.name,
+                    self.current_index + 1
+                )
             }
             NamingConvention::Frequency(precision) => {
-                format!("{} {}", self.channels_info.name, format_freq(center_frequency, precision))
+                format!(
+                    "{} {}",
+                    self.channel_group_info.name,
+                    format_freq(center_frequency, precision)
+                )
             }
         };
 

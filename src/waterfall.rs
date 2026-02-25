@@ -1,20 +1,21 @@
 use std::cmp::Ordering;
-use std::sync::Mutex;
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use num_complex::Complex;
 
-use crate::band_info::{ChannelConvertParams, ChannelInfo, ChannelProbeParams, ChannelsInfo};
-use crate::dsp::Owner;
+use crate::band_info::{ChannelConvertParams, ChannelGroupInfo, ChannelInfo, ChannelProbeParams};
 use crate::hardware::{
     ChannelMessage, HardwareDeviceId, ReceiveChannelDescriptor, ReceiveChannelDescriptorPtr,
     ReceiveStreamDescriptor, ReceiveStreamDescriptorPtr, StreamMessage,
 }; // TODO Move to this module
 use crate::{
-    dsp::{Converter, Decimator, FirFilter, Rechunker, windowed_sinc},
+    dsp::{Converter, Decimator, FirFilter, Owner, Rechunker, windowed_sinc},
     hardware::IntoComplexF32,
 };
+
+const AA_FILTER_LENGTH_FACTOR: f64 = 3.;
 
 pub struct Waterfall {
     receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
@@ -29,9 +30,9 @@ pub struct Waterfall {
     accumulations_target: usize,
     accumulations_count: usize,
     period: f64,
-    min: f64,
-    max: f64,
-    min_max_alpha: f64,
+    min: f32,
+    max: f32,
+    min_max_alpha: f32,
     offset: Complex<f64>,
     offset_reject_alpha: f64,
     channels: Vec<Channel>,
@@ -50,7 +51,7 @@ impl Waterfall {
         min_max_time_constant: f64,
         offset_reject_time_constant: f64,
         time: Instant,
-        channels_info: &[ChannelsInfo],
+        channel_group_info: &[ChannelGroupInfo],
     ) -> Self {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (sample_rate / target_bin_size).ceil() as usize;
@@ -70,7 +71,7 @@ impl Waterfall {
 
         let period = accumulations_target as f64 * fft_size as f64 / sample_rate;
 
-        let min_max_alpha = period / (min_max_time_constant + period);
+        let min_max_alpha = (period / (min_max_time_constant + period)) as f32;
         let offset_reject_alpha = period / (offset_reject_time_constant + period);
 
         let receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr = ReceiveStreamDescriptor {
@@ -81,35 +82,30 @@ impl Waterfall {
         }
         .into();
 
-        // Build channels from ChannelsInfo
+        // Build channels from ChannelGroupInfo
         let min_freq = frequency - 0.5 * sample_rate;
         let max_freq = frequency + 0.5 * sample_rate;
 
-        let channels: Vec<_> = channels_info
+        let channels: Vec<_> = channel_group_info
             .iter()
-            .filter(|channels_info| channels_info.max > min_freq && channels_info.min < max_freq)
-            .flat_map(|channels_info| {
-                channels_info.iter().filter_map(|channel_info| {
-                    // Check if channel is fully contained within receive range
-                    let left_freq =
-                        channel_info.center_frequency - 0.5 * channels_info.probe.bandwidth;
-                    let right_freq =
-                        channel_info.center_frequency + 0.5 * channels_info.probe.bandwidth;
-
-                    if left_freq >= min_freq && right_freq <= max_freq {
-                        Self::create_channel(
-                            &receive_stream_descriptor_ptr,
-                            &channel_info,
-                            frequency,
-                            sample_rate,
-                            fft_size,
-                            period,
-                            &channels_info.probe,
-                            &channels_info.convert,
-                        )
-                    } else {
-                        None
-                    }
+            .filter(|channel_group_info| {
+                channel_group_info.max > min_freq && channel_group_info.min < max_freq
+            })
+            .flat_map(|channel_group_info| {
+                let mut channel_group = None;
+                let receive_stream_descriptor_ptr = &receive_stream_descriptor_ptr;
+                channel_group_info.iter().filter_map(move |channel_info| {
+                    Self::maybe_create_channel(
+                        &mut channel_group,
+                        receive_stream_descriptor_ptr,
+                        &channel_info,
+                        frequency,
+                        sample_rate,
+                        fft_size,
+                        period,
+                        &channel_group_info.probe,
+                        &channel_group_info.convert,
+                    )
                 })
             })
             .collect();
@@ -127,8 +123,8 @@ impl Waterfall {
             accumulations_target,
             accumulations_count: 0,
             period,
-            min: std::f64::NAN,
-            max: std::f64::NAN,
+            min: std::f32::NAN,
+            max: std::f32::NAN,
             min_max_alpha,
             offset: Default::default(),
             offset_reject_alpha,
@@ -138,7 +134,8 @@ impl Waterfall {
         }
     }
 
-    fn create_channel(
+    fn maybe_create_channel(
+        channel_group: &mut Option<Arc<ChannelGroup>>,
         receive_stream_descriptor_ptr: &ReceiveStreamDescriptorPtr,
         channel_info: &ChannelInfo,
         waterfall_center_frequency: f64,
@@ -170,19 +167,25 @@ impl Waterfall {
             center_frequency - waterfall_center_frequency + 0.5 * probe_params.bandwidth,
         );
 
+        let n_bins = (right_bin - left_bin + 1) as f32;
+        let squelch_threshold_on = 10_f32.powf(
+            (probe_params.squelch_threshold_db as f32
+                + 0.5 * probe_params.squelch_hysteresis_db as f32)
+                / 10.,
+        ) * n_bins;
+        let squelch_threshold_off = 10_f32.powf(
+            (probe_params.squelch_threshold_db as f32
+                - 0.5 * probe_params.squelch_hysteresis_db as f32)
+                / 10.,
+        ) * n_bins;
         let squelch_alpha = (period / (probe_params.squelch_time_constant + period)) as f32;
-
-        let squelch_threshold_on = 10_f64.powf(
-            (probe_params.squelch_threshold_db + 0.5 * probe_params.squelch_hysteresis_db) / 10.,
-        );
-        let squelch_threshold_off = 10_f64.powf(
-            (probe_params.squelch_threshold_db - 0.5 * probe_params.squelch_hysteresis_db) / 10.,
-        );
 
         let converter_frequency = -(center_frequency - waterfall_center_frequency) / sample_rate;
         let lpf_impulse_response = windowed_sinc(
             0.5 * convert_params.bandwidth / sample_rate,
-            1 + 2 * (5. * sample_rate / convert_params.bandwidth).round() as usize,
+            1 + 2
+                * (0.5 * AA_FILTER_LENGTH_FACTOR * sample_rate / convert_params.bandwidth).round()
+                    as usize,
         );
 
         let fast_chunk_size = (convert_params.target_chunk_period * sample_rate).ceil() as usize;
@@ -192,31 +195,36 @@ impl Waterfall {
         let decimation_factor = (sample_rate / convert_params.target_sample_rate).round() as usize;
         let slow_chunk_size = fast_chunk_size / decimation_factor;
 
-        let receive_channel_descriptor_ptr = ReceiveChannelDescriptor {
+        let receive_channel_descriptor = ReceiveChannelDescriptor {
             receive_stream_descriptor_ptr: receive_stream_descriptor_ptr.clone(),
             sample_rate: sample_rate / decimation_factor as f64,
             name: channel_info.name.clone(),
             center_frequency: channel_info.center_frequency,
-        }
-        .into();
+        };
+
+        // Only construct the filter once per channel group
+        let channel_group = channel_group
+            .get_or_insert_with(|| {
+                let filter = FirFilter::new_from_impulse_response(
+                    &lpf_impulse_response,
+                    fft_size_for_filter,
+                );
+                Arc::new(ChannelGroup { filter })
+            })
+            .clone();
 
         Some(Channel {
-            receive_channel_descriptor_ptr,
+            receive_channel_descriptor,
             probe_left_bin: left_bin,
             probe_right_bin: right_bin,
-            squelch_alpha,
             squelch_threshold_on,
             squelch_threshold_off,
-            probe_threshold_on: std::f32::INFINITY,
-            probe_threshold_off: std::f32::INFINITY,
+            squelch_alpha,
             probe_level: 1e-10,
-            active: false,
+            active: None,
             owner: Owner::new(),
             converter: Converter::new(converter_frequency),
-            filter: FirFilter::new_from_impulse_response(
-                &lpf_impulse_response,
-                fft_size_for_filter,
-            ),
+            filter: channel_group.filter.clone(),
             decimator: Decimator::new(decimation_factor, slow_chunk_size),
         })
     }
@@ -268,20 +276,6 @@ impl Waterfall {
 
                 self.accumulations_count += 1;
 
-                if self.min <= self.max {
-                    // Search for active channels
-                    for channel in self.channels.iter_mut() {
-                        // Check power within this channel
-                        let new_level: f32 = self.power_buffer
-                            [channel.probe_left_bin as usize..=channel.probe_right_bin as usize]
-                            .iter()
-                            .sum();
-                        channel.probe_level =
-                            log_mix_f32(channel.probe_level, new_level, channel.squelch_alpha);
-                        channel.update_activation();
-                    }
-                }
-
                 // Check if we should emit a waterfall row
                 if self.accumulations_count >= self.accumulations_target {
                     // Normalize and convert to dB
@@ -304,36 +298,56 @@ impl Waterfall {
                         .copied()
                         .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
                         .unwrap()
-                        .max(1e-10) as f64;
+                        .max(1e-10);
                     let new_max = output
                         .iter()
                         .copied()
                         .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
                         .unwrap()
-                        .max(1e-10) as f64;
+                        .max(1e-10);
 
                     // Compute min/max with LPF
                     if self.min <= self.max {
                         // Normal case:
 
                         // LPF in log space
-                        self.min = log_mix_f64(self.min, new_min, self.min_max_alpha);
-                        self.max = log_mix_f64(self.max, new_max, self.min_max_alpha);
+                        self.min = log_mix_f32(self.min, new_min, self.min_max_alpha);
+                        self.max = log_mix_f32(self.max, new_max, self.min_max_alpha);
                     } else {
                         // On startup, or if something goes wrong:
                         self.min = new_min;
                         self.max = new_max;
                     }
 
-                    // Update relative squelch thresholds for each channel
+                    // Check each channel for squelch
                     for channel in self.channels.iter_mut() {
-                        let normalize = (channel.probe_right_bin - channel.probe_left_bin + 1)
-                            as f64
-                            * self.fft_size as f64;
-                        channel.probe_threshold_on =
-                            (self.min * channel.squelch_threshold_on * normalize) as f32;
-                        channel.probe_threshold_off =
-                            (self.min * channel.squelch_threshold_off * normalize) as f32;
+                        let probe_threshold_on = self.min * channel.squelch_threshold_on;
+                        let probe_threshold_off = self.min * channel.squelch_threshold_off;
+
+                        // Check power within this channel
+                        let new_probe_level = output
+                            [channel.probe_left_bin as usize..=channel.probe_right_bin as usize]
+                            .iter()
+                            .sum::<f32>();
+                        channel.probe_level = log_mix_f32(
+                            channel.probe_level,
+                            new_probe_level,
+                            channel.squelch_alpha,
+                        );
+
+                        match channel.active {
+                            None => {
+                                if channel.probe_level > probe_threshold_on {
+                                    channel.active =
+                                        Some(channel.receive_channel_descriptor.clone().into());
+                                }
+                            }
+                            Some(_) => {
+                                if channel.probe_level < probe_threshold_off {
+                                    channel.active = None;
+                                }
+                            }
+                        }
                     }
 
                     if self.offset_reject_alpha.is_finite() {
@@ -367,7 +381,7 @@ impl Waterfall {
                 let channel_result = Mutex::new(Ok(()));
                 rayon::scope(|s| {
                     for channel in self.channels.iter_mut() {
-                        if !channel.active {
+                        if channel.active.is_none() {
                             continue;
                         }
                         s.spawn(|_| {
@@ -391,17 +405,19 @@ impl Waterfall {
     }
 }
 
+struct ChannelGroup {
+    filter: FirFilter,
+}
+
 struct Channel {
-    receive_channel_descriptor_ptr: ReceiveChannelDescriptorPtr,
+    receive_channel_descriptor: ReceiveChannelDescriptor,
     probe_left_bin: u32,
     probe_right_bin: u32,
+    squelch_threshold_on: f32,
+    squelch_threshold_off: f32,
     squelch_alpha: f32,
-    squelch_threshold_on: f64,
-    squelch_threshold_off: f64,
-    probe_threshold_on: f32,
-    probe_threshold_off: f32,
     probe_level: f32,
-    active: bool,
+    active: Option<ReceiveChannelDescriptorPtr>, // TODO move more stuff inside this Option
     owner: Owner<Complex<f32>>,
     converter: Converter,
     filter: FirFilter,
@@ -409,21 +425,6 @@ struct Channel {
 }
 
 impl Channel {
-    fn update_activation(&mut self) {
-        match self.active {
-            false => {
-                if self.probe_level > self.probe_threshold_on {
-                    self.active = true;
-                }
-            }
-            true => {
-                if self.probe_level < self.probe_threshold_off {
-                    self.active = false;
-                }
-            }
-        }
-    }
-
     fn process(
         &mut self,
         samples: &[Complex<f32>],
@@ -432,9 +433,9 @@ impl Channel {
         channel_sender: SyncSender<ChannelMessage>,
     ) -> Result<(), String> {
         let mut result = Ok(());
-        if !self.active {
+        let Some(receive_channel_descriptor_ptr) = self.active.as_ref() else {
             return result;
-        }
+        };
         let samples = self.owner.process(samples);
         // Shift frequency of interest to baseband
         self.converter.process(samples);
@@ -447,7 +448,7 @@ impl Channel {
                 }
                 result = channel_sender
                     .try_send(ChannelMessage {
-                        receive_channel_descriptor_ptr: self.receive_channel_descriptor_ptr.clone(),
+                        receive_channel_descriptor_ptr: receive_channel_descriptor_ptr.clone(),
                         iq_data: samples.to_vec(),
                         start_time,
                         end_time,
@@ -459,10 +460,7 @@ impl Channel {
     }
 }
 
-fn log_mix_f64(x: f64, y: f64, a: f64) -> f64 {
-    (x * (y / x).powf(a)).max(1e-10)
-}
-
 fn log_mix_f32(x: f32, y: f32, a: f32) -> f32 {
     (x * (y / x).powf(a)).max(1e-10)
+    //(x * powf_approx(y / x, a)).max(1e-10)
 }

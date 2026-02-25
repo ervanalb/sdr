@@ -69,8 +69,8 @@ impl WaterfallGpu {
                         texture: texture_info.texture.clone(),
                         prev_texture: texture_info.prev_texture.clone(),
                         next_texture: texture_info.next_texture.clone(),
-                        min: group.min as f32,
-                        max: group.max as f32,
+                        min: group.min,
+                        max: group.max,
                         v_end: 1.,
                         start_time: texture_info.start_time,
                         end_time: texture_info.end_time,
@@ -80,8 +80,8 @@ impl WaterfallGpu {
                         texture: group.active_texture.texture.clone(),
                         prev_texture: group.active_texture.prev_texture.clone(),
                         next_texture: self.blank_texture.clone(),
-                        min: group.min as f32,
-                        max: group.max as f32,
+                        min: group.min,
+                        max: group.max,
                         v_end: group.active_texture.current_row as f32 / TEXTURE_HEIGHT as f32,
                         start_time: group.active_texture.start_time,
                         end_time: group.active_texture.end_time,
@@ -201,8 +201,8 @@ impl ActiveTexture {
 struct TextureGroup {
     active_texture: ActiveTexture,
     finished_textures: Vec<TextureInfo>,
-    min: f64,
-    max: f64,
+    min: f32,
+    max: f32,
 }
 
 impl TextureGroup {
