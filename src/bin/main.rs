@@ -264,16 +264,12 @@ impl eframe::App for SdrApp {
             ui.separator();
 
             // Get draw list from waterfall GPU
-            let waterfall_chunks = self.waterfall_gpu.draw_list().collect();
-            let channel_chunks = self.channels_gpu.draw_list().collect();
-
             let force_live = self.hardware_params.run && !prev_run;
             self::ui::canvas::ui(
                 ui,
                 "canvas",
                 &mut self.viewport_state,
-                waterfall_chunks,
-                channel_chunks,
+                &self.waterfall_gpu,
                 &self.channels_gpu,
                 self.reference_time,
                 self.reference_time.duration_since(self.prev_reference_time),

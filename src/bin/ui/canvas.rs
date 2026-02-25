@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
-use sdr::channels_gpu::{ChannelDrawInfo, ChannelsGpu};
+use sdr::channels_gpu::ChannelsGpu;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
-use sdr::waterfall_gpu::ChunkDrawInfo;
+use sdr::waterfall_gpu::{ChunkDrawInfo, WaterfallGpu};
 
 use super::waterfall::WaterfallRenderer;
 
@@ -222,8 +222,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
-    waterfall_chunks: Vec<ChunkDrawInfo>,
-    channel_chunks: Vec<ChannelDrawInfo>,
+    waterfall_gpu: &WaterfallGpu,
     channels_gpu: &ChannelsGpu,
     reference_time: Instant,
     dt: Duration,
@@ -257,7 +256,13 @@ pub fn ui(
 
     // Handle scroll and zoom
     if ui.rect_contains_pointer(ui_rect) {
-        let (scroll_delta, zoom_delta) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+        let (scroll_delta, zoom_delta, pointer_pos) = ui.input(|i| {
+            (
+                i.smooth_scroll_delta,
+                i.zoom_delta(),
+                i.pointer.latest_pos(),
+            )
+        });
 
         // Ctrl + scroll wheel: zoom
         if zoom_delta != 1.0 {
@@ -266,7 +271,7 @@ pub fn ui(
             viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
 
             // Keep pointer position stationary
-            if let Some(pointer_pos) = response.hover_pos() {
+            if let Some(pointer_pos) = pointer_pos {
                 let old_translation = viewport.translation;
                 let pointer_canvas = pointer_pos - figure_rect.min;
                 viewport.translation = pointer_canvas
@@ -288,13 +293,14 @@ pub fn ui(
 
     // Handle right mouse button drag for zooming
     if response.dragged_by(egui::PointerButton::Secondary) {
+        let pointer_pos = ui.input(|i| i.pointer.latest_pos());
         let drag = response.drag_delta();
         let old_scale = viewport.scale;
         viewport.scale =
             old_scale * egui::vec2(DRAG_ZOOM_SPEED.powf(drag.x), DRAG_ZOOM_SPEED.powf(drag.y));
         viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
         // Keep pointer position stationary
-        if let Some(pointer_pos) = response.hover_pos() {
+        if let Some(pointer_pos) = pointer_pos {
             let old_translation = viewport.translation;
             let pointer_canvas = pointer_pos - figure_rect.min;
             viewport.translation = pointer_canvas
@@ -439,6 +445,44 @@ pub fn ui(
         }
     }
 
+    // Bands
+    {
+        let bands_info = bands_info.lock().unwrap();
+        let visuals = ui.visuals().widgets.noninteractive;
+        for (bands_or_allocations, offset) in
+            [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
+        {
+            for band in bands_or_allocations {
+                let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
+                let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
+                let rect_bottom = figure_rect.top() - offset;
+                let rect_top = figure_rect.top() - offset - 14.;
+                let rect = egui::Rect {
+                    min: egui::pos2(rect_left, rect_top),
+                    max: egui::pos2(rect_right, rect_bottom),
+                };
+                if rect.intersects(ui_rect) {
+                    painter.rect(
+                        rect,
+                        visuals.corner_radius,
+                        visuals.bg_fill,
+                        visuals.fg_stroke,
+                        egui::StrokeKind::Outside,
+                    );
+                    paint_elided_text(
+                        &painter,
+                        rect.intersect(ui_rect),
+                        band.description.clone(),
+                        egui::FontId::proportional(12.),
+                        visuals.fg_stroke.color,
+                    );
+                }
+            }
+        }
+    }
+
+    let painter = ui.painter().with_clip_rect(figure_rect);
+
     // Waterfall
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(
         figure_rect,
@@ -447,7 +491,7 @@ pub fn ui(
             viewport_size: figure_size,
             translation: viewport.translation,
             scale: viewport.scale,
-            waterfall_chunks,
+            waterfall_chunks: waterfall_gpu.draw_list().collect(),
             reference_time,
         },
     ));
@@ -458,7 +502,7 @@ pub fn ui(
             .duration_since(temp_random_instant)
             .as_secs_f64();
 
-        for channel in &channel_chunks {
+        for channel in channels_gpu.draw_list() {
             let descriptor = &channel.receive_channel_descriptor_ptr;
             let center_frequency = descriptor.center_frequency;
             let width = descriptor.sample_rate;
@@ -527,42 +571,6 @@ pub fn ui(
                         }
                     });
                 response.on_hover_text(descriptor.name.clone());
-            }
-        }
-    }
-
-    // Bands
-    {
-        let bands_info = bands_info.lock().unwrap();
-        let visuals = ui.visuals().widgets.noninteractive;
-        for (bands_or_allocations, offset) in
-            [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
-        {
-            for band in bands_or_allocations {
-                let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
-                let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
-                let rect_bottom = figure_rect.top() - offset;
-                let rect_top = figure_rect.top() - offset - 14.;
-                let rect = egui::Rect {
-                    min: egui::pos2(rect_left, rect_top),
-                    max: egui::pos2(rect_right, rect_bottom),
-                };
-                if rect.intersects(ui_rect) {
-                    painter.rect(
-                        rect,
-                        visuals.corner_radius,
-                        visuals.bg_fill,
-                        visuals.fg_stroke,
-                        egui::StrokeKind::Outside,
-                    );
-                    paint_elided_text(
-                        &painter,
-                        rect.intersect(ui_rect),
-                        band.description.clone(),
-                        egui::FontId::proportional(12.),
-                        visuals.fg_stroke.color,
-                    );
-                }
             }
         }
     }

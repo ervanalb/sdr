@@ -85,40 +85,32 @@ impl Waterfall {
         let min_freq = frequency - 0.5 * sample_rate;
         let max_freq = frequency + 0.5 * sample_rate;
 
-        let channels = channels_info
+        let channels: Vec<_> = channels_info
             .iter()
+            .filter(|channels_info| channels_info.max > min_freq && channels_info.min < max_freq)
             .flat_map(|channels_info| {
-                // Check if this ChannelsInfo overlaps with the receive range
-                if channels_info.max < min_freq || channels_info.min > max_freq {
-                    return Vec::new();
-                }
+                channels_info.iter().filter_map(|channel_info| {
+                    // Check if channel is fully contained within receive range
+                    let left_freq =
+                        channel_info.center_frequency - 0.5 * channels_info.probe.bandwidth;
+                    let right_freq =
+                        channel_info.center_frequency + 0.5 * channels_info.probe.bandwidth;
 
-                // Iterate over individual channels
-                channels_info
-                    .iter()
-                    .filter_map(|channel_info| {
-                        // Check if channel is fully contained within receive range
-                        let left_freq =
-                            channel_info.center_frequency - 0.5 * channels_info.probe.bandwidth;
-                        let right_freq =
-                            channel_info.center_frequency + 0.5 * channels_info.probe.bandwidth;
-
-                        if left_freq >= min_freq && right_freq <= max_freq {
-                            Self::create_channel(
-                                &receive_stream_descriptor_ptr,
-                                &channel_info,
-                                frequency,
-                                sample_rate,
-                                fft_size,
-                                period,
-                                &channels_info.probe,
-                                &channels_info.convert,
-                            )
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                    if left_freq >= min_freq && right_freq <= max_freq {
+                        Self::create_channel(
+                            &receive_stream_descriptor_ptr,
+                            &channel_info,
+                            frequency,
+                            sample_rate,
+                            fft_size,
+                            period,
+                            &channels_info.probe,
+                            &channels_info.convert,
+                        )
+                    } else {
+                        None
+                    }
+                })
             })
             .collect();
 
@@ -311,12 +303,14 @@ impl Waterfall {
                         .iter()
                         .copied()
                         .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                        .unwrap() as f64;
+                        .unwrap()
+                        .max(1e-10) as f64;
                     let new_max = output
                         .iter()
                         .copied()
                         .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                        .unwrap() as f64;
+                        .unwrap()
+                        .max(1e-10) as f64;
 
                     // Compute min/max with LPF
                     if self.min <= self.max {
@@ -330,8 +324,6 @@ impl Waterfall {
                         self.min = new_min;
                         self.max = new_max;
                     }
-                    self.min = self.min.max(1e-10);
-                    self.max = self.max.max(1e-10);
 
                     // Update relative squelch thresholds for each channel
                     for channel in self.channels.iter_mut() {
@@ -421,13 +413,11 @@ impl Channel {
         match self.active {
             false => {
                 if self.probe_level > self.probe_threshold_on {
-                    println!("TURN ON CHANNEL");
                     self.active = true;
                 }
             }
             true => {
                 if self.probe_level < self.probe_threshold_off {
-                    println!("TURN OFF CHANNEL");
                     self.active = false;
                 }
             }
@@ -470,9 +460,9 @@ impl Channel {
 }
 
 fn log_mix_f64(x: f64, y: f64, a: f64) -> f64 {
-    x * (y / x).powf(a)
+    (x * (y / x).powf(a)).max(1e-10)
 }
 
 fn log_mix_f32(x: f32, y: f32, a: f32) -> f32 {
-    x * (y / x).powf(a)
+    (x * (y / x).powf(a)).max(1e-10)
 }
