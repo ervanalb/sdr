@@ -1,10 +1,12 @@
+use crate::band_info::BandsInfo;
 use crate::by_ptr::ByPtr;
-use crate::waterfall::{ChannelConvertParams, ChannelParams, ChannelProbeParams, Waterfall};
+use crate::waterfall::Waterfall;
 use log::{info, warn};
 use num_complex::Complex;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
@@ -89,6 +91,8 @@ pub type ReceiveStreamDescriptorPtr = ByPtr<ReceiveStreamDescriptor>;
 pub struct ReceiveChannelDescriptor {
     pub receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
     pub sample_rate: f64,
+    pub name: String,
+    pub center_frequency: f64,
 }
 
 pub type ReceiveChannelDescriptorPtr = ByPtr<ReceiveChannelDescriptor>;
@@ -118,10 +122,11 @@ pub struct Hardware {
     stream_receiver: Receiver<StreamMessage>,
     channel_sender: SyncSender<ChannelMessage>,
     channel_receiver: Receiver<ChannelMessage>,
+    bands_info: Arc<Mutex<BandsInfo>>,
 }
 
 impl Hardware {
-    pub fn new() -> Self {
+    pub fn new(bands_info: Arc<Mutex<BandsInfo>>) -> Self {
         let (stream_sender, stream_receiver) = mpsc::sync_channel(STREAM_MESSAGE_CAPACITY);
         let (channel_sender, channel_receiver) = mpsc::sync_channel(CHANNEL_MESSAGE_CAPACITY);
         Hardware {
@@ -130,6 +135,7 @@ impl Hardware {
             stream_receiver,
             channel_sender,
             channel_receiver,
+            bands_info,
         }
     }
 
@@ -151,6 +157,7 @@ impl Hardware {
                         enumerated_args,
                         self.stream_sender.clone(),
                         self.channel_sender.clone(),
+                        self.bands_info.clone(),
                     ),
                 );
             }
@@ -211,6 +218,7 @@ struct HardwareDevice {
     active: HardwareState<ActiveHardwareDevice>,
     stream_sender: SyncSender<StreamMessage>,
     channel_sender: SyncSender<ChannelMessage>,
+    bands_info: Arc<Mutex<BandsInfo>>,
 }
 
 enum HardwareState<T> {
@@ -262,6 +270,7 @@ impl HardwareDevice {
         args: soapysdr::Args,
         stream_sender: SyncSender<StreamMessage>,
         channel_sender: SyncSender<ChannelMessage>,
+        bands_info: Arc<Mutex<BandsInfo>>,
     ) -> Self {
         HardwareDevice {
             device_id,
@@ -269,6 +278,7 @@ impl HardwareDevice {
             active: HardwareState::Inactive,
             stream_sender,
             channel_sender,
+            bands_info,
         }
     }
 
@@ -290,6 +300,7 @@ impl HardwareDevice {
                                 i,
                                 self.stream_sender.clone(),
                                 self.channel_sender.clone(),
+                                self.bands_info.clone(),
                             )
                         })
                         .collect();
@@ -457,6 +468,7 @@ struct HardwareDeviceRxStream {
     sample_rate: f64,
     frequency: f64,
     bandwidth: f64,
+    bands_info: Arc<Mutex<BandsInfo>>,
 }
 
 fn compute_range_min_max(ranges: &[soapysdr::Range]) -> Option<(f64, f64)> {
@@ -481,6 +493,7 @@ impl HardwareDeviceRxStream {
         stream_index: usize,
         stream_sender: SyncSender<StreamMessage>,
         channel_sender: SyncSender<ChannelMessage>,
+        bands_info: Arc<Mutex<BandsInfo>>,
     ) -> Self {
         let sample_rate_range = device
             .get_sample_rate_range(soapysdr::Direction::Rx, stream_index)
@@ -554,6 +567,7 @@ impl HardwareDeviceRxStream {
             gains,
             stream_sender,
             channel_sender,
+            bands_info,
         }
     }
 
@@ -577,6 +591,7 @@ impl HardwareDeviceRxStream {
                     let frequency = self.frequency;
                     let bandwidth = self.bandwidth;
                     let gains = self.gains.clone();
+                    let bands_info = self.bands_info.clone();
                     let join_handle = spawn(move || {
                         Self::process(
                             device_id,
@@ -589,6 +604,7 @@ impl HardwareDeviceRxStream {
                             frequency,
                             bandwidth,
                             gains,
+                            bands_info,
                         );
                     });
 
@@ -767,6 +783,7 @@ impl HardwareDeviceRxStream {
         mut frequency: f64,
         mut bandwidth: f64,
         gains: HashMap<String, HardwareGain>,
+        bands_info: Arc<Mutex<BandsInfo>>,
     ) {
         info!("Started thread for RX stream {stream_index:?} on device {device_id:?}");
 
@@ -810,36 +827,22 @@ impl HardwareDeviceRxStream {
             stream.activate(None).unwrap();
 
             'middle: loop {
-                let mut waterfall = Waterfall::new(
-                    device_id.clone(),
-                    stream_index,
-                    frequency,
-                    sample_rate,
-                    WATERFALL_TARGET_BIN_SIZE,
-                    STREAM_OUTPUT_PERIOD,
-                    STREAM_MIN_MAX_TIME_CONSTANT,
-                    STREAM_OFFSET_REJECT_TIME_CONSTANT,
-                    Instant::now(),
-                );
-                waterfall.set_channels(
-                    frequency,
-                    [ChannelParams {
-                        probe: ChannelProbeParams {
-                            center_frequency: 93.9e6,
-                            bandwidth: 150e3,
-                            squelch_time_constant: 1.,
-                            squelch_threshold_db: 6.,
-                            squelch_hysteresis_db: 3.,
-                        },
-                        convert: ChannelConvertParams {
-                            center_frequency: 93.9e6,
-                            bandwidth: 150e3,
-                            target_chunk_period: 1e-3,
-                            target_sample_rate: 200e3,
-                        },
-                    }]
-                    .into_iter(),
-                );
+                let mut waterfall = {
+                    let bands_info_guard = bands_info.lock().unwrap();
+                    let channels_info = &bands_info_guard.channels[..];
+                    Waterfall::new(
+                        device_id.clone(),
+                        stream_index,
+                        frequency,
+                        sample_rate,
+                        WATERFALL_TARGET_BIN_SIZE,
+                        STREAM_OUTPUT_PERIOD,
+                        STREAM_MIN_MAX_TIME_CONSTANT,
+                        STREAM_OFFSET_REJECT_TIME_CONSTANT,
+                        Instant::now(),
+                        channels_info,
+                    )
+                };
 
                 // Inner loop for data reading
                 'inner: loop {

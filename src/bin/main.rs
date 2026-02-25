@@ -1,14 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::fs::File;
-use std::io::BufWriter;
-use std::io::Write;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use sdr::band_info::BandsInfo;
+use sdr::channels_gpu::ChannelsGpu;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::waterfall_gpu::WaterfallGpu;
+use std::sync::{Arc, Mutex};
 
 mod ui;
 
@@ -49,11 +48,11 @@ struct SdrApp {
     hardware_params: HardwareParams,
     viewport_state: ui::canvas::Viewport,
     waterfall_gpu: WaterfallGpu,
+    channels_gpu: ChannelsGpu,
     reference_time: Instant,
     prev_reference_time: Instant,
     temp_random_instant: Instant,
-    bands_info: BandsInfo,
-    iq_writer: BufWriter<File>,
+    bands_info: Arc<Mutex<BandsInfo>>,
 }
 
 impl SdrApp {
@@ -66,21 +65,18 @@ impl SdrApp {
         // Load bands info from JSON file included at compile time
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
-
-        // TEMP: write IQ samples to a file
-        let file = File::create("iq_samples.raw").expect("Failed to create iq_samples.raw");
-        let iq_writer = BufWriter::new(file);
+        let bands_info = Arc::new(Mutex::new(bands_info));
 
         Self {
-            hardware: Some(Hardware::new()),
+            hardware: Some(Hardware::new(bands_info.clone())),
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
+            channels_gpu: ChannelsGpu::new(),
             reference_time: now,
             prev_reference_time: now,
             temp_random_instant: now,
             bands_info,
-            iq_writer,
         }
     }
 }
@@ -114,15 +110,13 @@ impl eframe::App for SdrApp {
                 }
 
                 while let Some(msg) = hardware.channel_try_recv() {
-                    for sample in msg.iq_data.iter() {
-                        self.iq_writer.write_all(&sample.re.to_le_bytes()).ok();
-                        self.iq_writer.write_all(&sample.im.to_le_bytes()).ok();
-                    }
+                    self.channels_gpu.add_chunk(msg);
                 }
-                self.iq_writer.flush().ok();
             }
             self.waterfall_gpu
                 .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+            self.channels_gpu
+                .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
         }
 
         let prev_run = self.hardware_params.run;
@@ -271,6 +265,7 @@ impl eframe::App for SdrApp {
 
             // Get draw list from waterfall GPU
             let waterfall_chunks = self.waterfall_gpu.draw_list().collect();
+            let channel_chunks = self.channels_gpu.draw_list().collect();
 
             let force_live = self.hardware_params.run && !prev_run;
             self::ui::canvas::ui(
@@ -278,6 +273,7 @@ impl eframe::App for SdrApp {
                 "canvas",
                 &mut self.viewport_state,
                 waterfall_chunks,
+                channel_chunks,
                 self.reference_time,
                 self.reference_time.duration_since(self.prev_reference_time),
                 self.temp_random_instant,

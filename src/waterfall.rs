@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use num_complex::Complex;
 
+use crate::band_info::{ChannelConvertParams, ChannelInfo, ChannelProbeParams, ChannelsInfo};
 use crate::dsp::Owner;
 use crate::hardware::{
     ChannelMessage, HardwareDeviceId, ReceiveChannelDescriptor, ReceiveChannelDescriptorPtr,
@@ -49,6 +50,7 @@ impl Waterfall {
         min_max_time_constant: f64,
         offset_reject_time_constant: f64,
         time: Instant,
+        channels_info: &[ChannelsInfo],
     ) -> Self {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (sample_rate / target_bin_size).ceil() as usize;
@@ -79,6 +81,47 @@ impl Waterfall {
         }
         .into();
 
+        // Build channels from ChannelsInfo
+        let min_freq = frequency - 0.5 * sample_rate;
+        let max_freq = frequency + 0.5 * sample_rate;
+
+        let channels = channels_info
+            .iter()
+            .flat_map(|channels_info| {
+                // Check if this ChannelsInfo overlaps with the receive range
+                if channels_info.max < min_freq || channels_info.min > max_freq {
+                    return Vec::new();
+                }
+
+                // Iterate over individual channels
+                channels_info
+                    .iter()
+                    .filter_map(|channel_info| {
+                        // Check if channel is fully contained within receive range
+                        let left_freq =
+                            channel_info.center_frequency - 0.5 * channels_info.probe.bandwidth;
+                        let right_freq =
+                            channel_info.center_frequency + 0.5 * channels_info.probe.bandwidth;
+
+                        if left_freq >= min_freq && right_freq <= max_freq {
+                            Self::create_channel(
+                                &receive_stream_descriptor_ptr,
+                                &channel_info,
+                                frequency,
+                                sample_rate,
+                                fft_size,
+                                period,
+                                &channels_info.probe,
+                                &channels_info.convert,
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
         Self {
             receive_stream_descriptor_ptr,
             fft,
@@ -97,92 +140,97 @@ impl Waterfall {
             min_max_alpha,
             offset: Default::default(),
             offset_reject_alpha,
-            channels: vec![],
+            channels,
             stream_last_t: time,
             channel_last_t: time,
         }
     }
 
+    fn create_channel(
+        receive_stream_descriptor_ptr: &ReceiveStreamDescriptorPtr,
+        channel_info: &ChannelInfo,
+        waterfall_center_frequency: f64,
+        sample_rate: f64,
+        fft_size: usize,
+        period: f64,
+        probe_params: &ChannelProbeParams,
+        convert_params: &ChannelConvertParams,
+    ) -> Option<Channel> {
+        let center_frequency = channel_info.center_frequency;
+        let left_freq =
+            center_frequency - waterfall_center_frequency - 0.5 * probe_params.bandwidth;
+        let right_freq =
+            center_frequency - waterfall_center_frequency + 0.5 * probe_params.bandwidth;
+
+        if left_freq < -0.5 * sample_rate || right_freq > 0.5 * sample_rate {
+            return None;
+        }
+
+        let freq_to_bin = |freq: f64| -> u32 {
+            let bin = (((freq / sample_rate) + 0.5) * fft_size as f64).round();
+            bin.clamp(0., fft_size as f64) as u32
+        };
+
+        let left_bin = freq_to_bin(
+            center_frequency - waterfall_center_frequency - 0.5 * probe_params.bandwidth,
+        );
+        let right_bin = freq_to_bin(
+            center_frequency - waterfall_center_frequency + 0.5 * probe_params.bandwidth,
+        );
+
+        let squelch_alpha = (period / (probe_params.squelch_time_constant + period)) as f32;
+
+        let squelch_threshold_on = 10_f64.powf(
+            (probe_params.squelch_threshold_db + 0.5 * probe_params.squelch_hysteresis_db) / 10.,
+        );
+        let squelch_threshold_off = 10_f64.powf(
+            (probe_params.squelch_threshold_db - 0.5 * probe_params.squelch_hysteresis_db) / 10.,
+        );
+
+        let converter_frequency = -(center_frequency - waterfall_center_frequency) / sample_rate;
+        let lpf_impulse_response = windowed_sinc(
+            0.5 * convert_params.bandwidth / sample_rate,
+            1 + 2 * (5. * sample_rate / convert_params.bandwidth).round() as usize,
+        );
+
+        let fast_chunk_size = (convert_params.target_chunk_period * sample_rate).ceil() as usize;
+        let fft_size_for_filter =
+            (fast_chunk_size + lpf_impulse_response.len()).next_power_of_two();
+
+        let decimation_factor = (sample_rate / convert_params.target_sample_rate).round() as usize;
+        let slow_chunk_size = fast_chunk_size / decimation_factor;
+
+        let receive_channel_descriptor_ptr = ReceiveChannelDescriptor {
+            receive_stream_descriptor_ptr: receive_stream_descriptor_ptr.clone(),
+            sample_rate: sample_rate / decimation_factor as f64,
+            name: channel_info.name.clone(),
+            center_frequency: channel_info.center_frequency,
+        }
+        .into();
+
+        Some(Channel {
+            receive_channel_descriptor_ptr,
+            probe_left_bin: left_bin,
+            probe_right_bin: right_bin,
+            squelch_alpha,
+            squelch_threshold_on,
+            squelch_threshold_off,
+            probe_threshold_on: std::f32::INFINITY,
+            probe_threshold_off: std::f32::INFINITY,
+            probe_level: 1e-10,
+            active: false,
+            owner: Owner::new(),
+            converter: Converter::new(converter_frequency),
+            filter: FirFilter::new_from_impulse_response(
+                &lpf_impulse_response,
+                fft_size_for_filter,
+            ),
+            decimator: Decimator::new(decimation_factor, slow_chunk_size),
+        })
+    }
+
     pub fn period(&self) -> f64 {
         self.period
-    }
-
-    fn freq_to_bin(&self, freq: f64) -> usize {
-        let bin = (((freq / self.sample_rate) + 0.5) * self.fft_size as f64).round();
-        bin.clamp(0., self.fft_size as f64) as usize
-    }
-
-    pub fn set_channels(
-        &mut self,
-        center_frequency: f64,
-        channel_params: impl Iterator<Item = ChannelParams>,
-    ) {
-        self.channels = channel_params
-            .filter_map(|params| {
-                let left_freq =
-                    params.probe.center_frequency - center_frequency - 0.5 * params.probe.bandwidth;
-                let right_freq =
-                    params.probe.center_frequency - center_frequency + 0.5 * params.probe.bandwidth;
-                if left_freq < -0.5 * self.sample_rate || right_freq > 0.5 * self.sample_rate {
-                    return None;
-                }
-                let left_bin = self.freq_to_bin(
-                    params.probe.center_frequency - center_frequency - 0.5 * params.probe.bandwidth,
-                ) as u32;
-                let right_bin = self.freq_to_bin(
-                    params.probe.center_frequency - center_frequency + 0.5 * params.probe.bandwidth,
-                ) as u32;
-                let squelch_alpha =
-                    (self.period / (params.probe.squelch_time_constant + self.period)) as f32;
-
-                let squelch_threshold_on = 10_f64.powf(
-                    (params.probe.squelch_threshold_db + 0.5 * params.probe.squelch_hysteresis_db)
-                        / 10.,
-                );
-                let squelch_threshold_off = 10_f64.powf(
-                    (params.probe.squelch_threshold_db - 0.5 * params.probe.squelch_hysteresis_db)
-                        / 10.,
-                );
-
-                let converter_frequency =
-                    -(params.convert.center_frequency - center_frequency) / self.sample_rate;
-                let lpf_impulse_response = windowed_sinc(
-                    0.5 * params.convert.bandwidth / self.sample_rate,
-                    1 + 2 * (5. * self.sample_rate / params.convert.bandwidth).round() as usize,
-                );
-
-                let fast_chunk_size =
-                    (params.convert.target_chunk_period * self.sample_rate).ceil() as usize;
-                let fft_size = (fast_chunk_size + lpf_impulse_response.len()).next_power_of_two();
-
-                let decimation_factor =
-                    (self.sample_rate / params.convert.target_sample_rate).round() as usize;
-                let slow_chunk_size = fast_chunk_size / decimation_factor;
-
-                let receive_channel_descriptor_ptr = ReceiveChannelDescriptor {
-                    receive_stream_descriptor_ptr: self.receive_stream_descriptor_ptr.clone(),
-                    sample_rate: self.sample_rate / decimation_factor as f64,
-                }
-                .into();
-
-                Some(Channel {
-                    receive_channel_descriptor_ptr,
-                    probe_left_bin: left_bin,
-                    probe_right_bin: right_bin,
-                    squelch_alpha,
-                    squelch_threshold_on,
-                    squelch_threshold_off,
-                    probe_threshold_on: std::f32::INFINITY,
-                    probe_threshold_off: std::f32::INFINITY,
-                    probe_level: 1e-10,
-                    active: false,
-                    owner: Owner::new(),
-                    converter: Converter::new(converter_frequency),
-                    filter: FirFilter::new_from_impulse_response(&lpf_impulse_response, fft_size),
-                    decimator: Decimator::new(decimation_factor, slow_chunk_size),
-                })
-            })
-            .collect();
     }
 
     pub fn process<T: IntoComplexF32 + Copy + std::fmt::Debug>(
@@ -349,29 +397,6 @@ impl Waterfall {
         );
         result
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelParams {
-    pub probe: ChannelProbeParams,
-    pub convert: ChannelConvertParams,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelProbeParams {
-    pub center_frequency: f64,
-    pub bandwidth: f64,
-    pub squelch_time_constant: f64,
-    pub squelch_threshold_db: f64,
-    pub squelch_hysteresis_db: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelConvertParams {
-    pub center_frequency: f64,
-    pub bandwidth: f64,
-    pub target_sample_rate: f64,
-    pub target_chunk_period: f64,
 }
 
 struct Channel {

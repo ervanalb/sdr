@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
+use sdr::channels_gpu::ChannelDrawInfo;
+use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::waterfall_gpu::ChunkDrawInfo;
 
@@ -220,13 +223,16 @@ pub fn ui(
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
     waterfall_chunks: Vec<ChunkDrawInfo>,
+    channel_chunks: Vec<ChannelDrawInfo>,
     reference_time: Instant,
     dt: Duration,
     temp_random_instant: Instant,
     force_live: bool,
     hardware_params: &mut HardwareParams,
-    bands_info: &BandsInfo,
+    bands_info: &Arc<Mutex<BandsInfo>>,
 ) {
+    let highest_freq = { bands_info.lock().unwrap().highest_freq };
+
     let id = ui.id().with(&id_source);
     let ui_size = ui.available_size();
     let (ui_rect, response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
@@ -236,7 +242,7 @@ pub fn ui(
         .with_min_y(ui_rect.min.y + 100.);
     let figure_size = figure_rect.size();
 
-    let overall_size = egui::vec2(bands_info.highest_freq as f32, 120.);
+    let overall_size = egui::vec2(highest_freq as f32, 120.);
     let min_scale = figure_size / overall_size;
     let max_zoom = 1e9;
 
@@ -391,7 +397,7 @@ pub fn ui(
         }
     }
 
-    // RX Channels
+    // RX Streams
     for (device_id, device_params) in &mut hardware_params.devices {
         for (channel_idx, rx_channel_params) in device_params.rx_streams.iter_mut().enumerate() {
             let channel_left_freq =
@@ -432,19 +438,44 @@ pub fn ui(
         }
     }
 
-    // Bands
-    let visuals = ui.visuals().widgets.noninteractive;
-    for (bands_or_allocations, offset) in [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
+    // Active channels
     {
-        for band in bands_or_allocations {
-            let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
-            let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
-            let rect_bottom = figure_rect.top() - offset;
-            let rect_top = figure_rect.top() - offset - 14.;
+        let offset = reference_time
+            .duration_since(temp_random_instant)
+            .as_secs_f64();
+        let visuals = ui.visuals().widgets.noninteractive;
+
+        for channel in &channel_chunks {
+            let descriptor = &*channel.receive_channel_descriptor_ptr;
+            let center_frequency = descriptor.center_frequency;
+            let width = descriptor.sample_rate;
+
+            // Calculate time positions relative to temp_random_instant
+            let start_time = offset
+                - channel
+                    .start_time
+                    .duration_since(temp_random_instant)
+                    .as_secs_f64();
+            let end_time = offset
+                - channel
+                    .end_time
+                    .duration_since(temp_random_instant)
+                    .as_secs_f64();
+
+            // Convert to screen coordinates
+            let left = figure_rect.left()
+                + viewport.screen_space_x((center_frequency - 0.5 * width) as f32);
+            let right = figure_rect.left()
+                + viewport.screen_space_x((center_frequency + 0.5 * width) as f32);
+            let bottom = figure_rect.top() + viewport.screen_space_y(start_time as f32);
+            let top = figure_rect.top() + viewport.screen_space_y(end_time as f32);
+
+            // Draw a small rectangle around the channel center frequency
             let rect = egui::Rect {
-                min: egui::pos2(rect_left, rect_top),
-                max: egui::pos2(rect_right, rect_bottom),
+                min: egui::pos2(left, top),
+                max: egui::pos2(right, bottom),
             };
+
             if rect.intersects(ui_rect) {
                 painter.rect(
                     rect,
@@ -453,13 +484,42 @@ pub fn ui(
                     visuals.fg_stroke,
                     egui::StrokeKind::Outside,
                 );
-                paint_elided_text(
-                    &painter,
-                    rect.intersect(ui_rect),
-                    band.description.clone(),
-                    egui::FontId::proportional(12.),
-                    visuals.fg_stroke.color,
-                );
+            }
+        }
+    }
+
+    // Bands
+    {
+        let bands_info = bands_info.lock().unwrap();
+        let visuals = ui.visuals().widgets.noninteractive;
+        for (bands_or_allocations, offset) in
+            [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
+        {
+            for band in bands_or_allocations {
+                let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
+                let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
+                let rect_bottom = figure_rect.top() - offset;
+                let rect_top = figure_rect.top() - offset - 14.;
+                let rect = egui::Rect {
+                    min: egui::pos2(rect_left, rect_top),
+                    max: egui::pos2(rect_right, rect_bottom),
+                };
+                if rect.intersects(ui_rect) {
+                    painter.rect(
+                        rect,
+                        visuals.corner_radius,
+                        visuals.bg_fill,
+                        visuals.fg_stroke,
+                        egui::StrokeKind::Outside,
+                    );
+                    paint_elided_text(
+                        &painter,
+                        rect.intersect(ui_rect),
+                        band.description.clone(),
+                        egui::FontId::proportional(12.),
+                        visuals.fg_stroke.color,
+                    );
+                }
             }
         }
     }
@@ -475,24 +535,4 @@ pub fn ui(
             reference_time,
         },
     ));
-}
-
-fn format_freq(freq: f64, precision: i32) -> String {
-    if freq < 0. {
-        format!("XXX Hz")
-    } else if freq < 1e3 {
-        format!("{:.*} Hz", (0 - precision).max(0) as usize, freq)
-    } else if freq < 1e6 {
-        format!("{:.*} kHz", (3 - precision).max(0) as usize, freq * 1e-3)
-    } else if freq < 1e9 {
-        format!("{:.*} MHz", (6 - precision).max(0) as usize, freq * 1e-6)
-    } else if freq < 1e12 {
-        format!("{:.*} GHz", (9 - precision).max(0) as usize, freq * 1e-9)
-    } else {
-        format!("XXX Hz")
-    }
-}
-
-fn format_time(time: f64, precision: i32) -> String {
-    format!("{:.*} s", (-precision).max(0) as usize, time)
 }

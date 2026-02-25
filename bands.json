@@ -178,6 +178,27 @@
       "description": "ISM 5.8 GHz"
     }
   ],
-  "channels": [],
+  "channels": [
+    {
+      "name": "FM",
+      "min": 88.1e6,
+      "max": 107.9e6,
+      "step": 200e3,
+      "naming": {
+        "Frequency": 5
+      },
+      "probe": {
+        "bandwidth": 150e3,
+        "squelch_time_constant": 1.0,
+        "squelch_threshold_db": 6.0,
+        "squelch_hysteresis_db": 3.0
+      },
+      "convert": {
+        "bandwidth": 150e3,
+        "target_sample_rate": 200e3,
+        "target_chunk_period": 1e-3
+      }
+    }
+  ],
   "highest_freq": 12e9
 }
