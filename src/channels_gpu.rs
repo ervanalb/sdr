@@ -52,6 +52,29 @@ impl ChannelsGpu {
                 })
             })
     }
+
+    pub fn export_iq_data(
+        &self,
+        descriptor_ptr: &ReceiveChannelDescriptorPtr,
+        path: &std::path::Path,
+    ) -> Result<(), std::io::Error> {
+        use std::io::Write;
+
+        if let Some(history) = self.channels.get(descriptor_ptr) {
+            let mut file = std::fs::File::create(path)?;
+
+            for chunk in &history.chunks {
+                for sample in &chunk.iq_data {
+                    file.write_all(&sample.re.to_le_bytes())?;
+                    file.write_all(&sample.im.to_le_bytes())?;
+                }
+            }
+
+            file.flush()?;
+        }
+
+        Ok(())
+    }
 }
 
 pub struct ChannelHistory {

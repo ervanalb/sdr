@@ -274,6 +274,7 @@ impl eframe::App for SdrApp {
                 &mut self.viewport_state,
                 waterfall_chunks,
                 channel_chunks,
+                &self.channels_gpu,
                 self.reference_time,
                 self.reference_time.duration_since(self.prev_reference_time),
                 self.temp_random_instant,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
-use sdr::channels_gpu::ChannelDrawInfo;
+use sdr::channels_gpu::{ChannelDrawInfo, ChannelsGpu};
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::waterfall_gpu::ChunkDrawInfo;
@@ -224,6 +224,7 @@ pub fn ui(
     viewport: &mut Viewport,
     waterfall_chunks: Vec<ChunkDrawInfo>,
     channel_chunks: Vec<ChannelDrawInfo>,
+    channels_gpu: &ChannelsGpu,
     reference_time: Instant,
     dt: Duration,
     temp_random_instant: Instant,
@@ -255,7 +256,7 @@ pub fn ui(
     }
 
     // Handle scroll and zoom
-    if response.hovered() {
+    if ui.rect_contains_pointer(ui_rect) {
         let (scroll_delta, zoom_delta) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
 
         // Ctrl + scroll wheel: zoom
@@ -431,22 +432,34 @@ pub fn ui(
             paint_elided_text(
                 &painter,
                 rect.intersect(ui_rect),
-                format!("{} RX channel {}", device_id, channel_idx),
+                format!("{} RX stream {}", device_id, channel_idx),
                 egui::FontId::proportional(12.),
                 visuals.fg_stroke.color,
             );
         }
     }
 
+    // Waterfall
+    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+        figure_rect,
+        Callback {
+            id,
+            viewport_size: figure_size,
+            translation: viewport.translation,
+            scale: viewport.scale,
+            waterfall_chunks,
+            reference_time,
+        },
+    ));
+
     // Active channels
     {
         let offset = reference_time
             .duration_since(temp_random_instant)
             .as_secs_f64();
-        let visuals = ui.visuals().widgets.noninteractive;
 
         for channel in &channel_chunks {
-            let descriptor = &*channel.receive_channel_descriptor_ptr;
+            let descriptor = &channel.receive_channel_descriptor_ptr;
             let center_frequency = descriptor.center_frequency;
             let width = descriptor.sample_rate;
 
@@ -470,20 +483,50 @@ pub fn ui(
             let bottom = figure_rect.top() + viewport.screen_space_y(start_time as f32);
             let top = figure_rect.top() + viewport.screen_space_y(end_time as f32);
 
-            // Draw a small rectangle around the channel center frequency
+            // Draw a rectangle around the channel center frequency
             let rect = egui::Rect {
                 min: egui::pos2(left, top),
                 max: egui::pos2(right, bottom),
             };
 
             if rect.intersects(ui_rect) {
-                painter.rect(
+                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                let visuals = ui.visuals().widgets.style(&response);
+
+                painter.rect_stroke(
                     rect,
                     visuals.corner_radius,
-                    visuals.bg_fill,
                     visuals.fg_stroke,
                     egui::StrokeKind::Outside,
                 );
+
+                egui::Popup::context_menu(&response)
+                    .id(egui::Id::new(descriptor))
+                    .show(|ui| {
+                        if ui.button("Export IQ data...").clicked() {
+                            ui.close();
+
+                            // Sanitize the channel name for use as a filename
+                            let default_name = format!(
+                                "{}_{}sps.raw",
+                                descriptor.name,
+                                descriptor.sample_rate.round()
+                            )
+                            .replace(" ", "_")
+                            .replace("/", "_");
+
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name(&default_name)
+                                .add_filter("Raw (complex f32 samples)", &["raw"])
+                                .save_file()
+                            {
+                                if let Err(e) = channels_gpu.export_iq_data(descriptor, &path) {
+                                    eprintln!("Failed to export IQ data: {}", e);
+                                }
+                            }
+                        }
+                    });
+                response.on_hover_text(descriptor.name.clone());
             }
         }
     }
@@ -523,16 +566,4 @@ pub fn ui(
             }
         }
     }
-
-    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-        figure_rect,
-        Callback {
-            id,
-            viewport_size: figure_size,
-            translation: viewport.translation,
-            scale: viewport.scale,
-            waterfall_chunks,
-            reference_time,
-        },
-    ));
 }
