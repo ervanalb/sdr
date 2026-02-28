@@ -93,6 +93,7 @@ pub struct ReceiveChannelDescriptor {
     pub sample_rate: f64,
     pub name: String,
     pub center_frequency: f64,
+    pub tuning_error: f64,
 }
 
 pub type ReceiveChannelDescriptorPtr = ByPtr<ReceiveChannelDescriptor>;
@@ -846,60 +847,69 @@ impl HardwareDeviceRxStream {
 
                 // Inner loop for data reading
                 'inner: loop {
-                    // Check for parameter changes
-                    let mut restart_stream = false;
-                    let mut new_params = false; // Params change that doesn't require stream reboot
-                    while let Ok(msg) = control_receiver.try_recv() {
-                        match msg {
-                            HardwareDeviceRxStreamControlMessage::SetSampleRate(x) => {
-                                sample_rate = x;
-                                restart_stream = true;
-                            }
-                            HardwareDeviceRxStreamControlMessage::SetFrequency(x) => {
-                                frequency = x;
-                                device
-                                    .set_frequency(
-                                        soapysdr::Direction::Rx,
-                                        stream_index,
-                                        frequency,
-                                        (),
-                                    )
-                                    .unwrap();
-                                new_params = true;
-                            }
-                            HardwareDeviceRxStreamControlMessage::SetBandwidth(x) => {
-                                bandwidth = x;
-                                device
-                                    .set_bandwidth(soapysdr::Direction::Rx, stream_index, bandwidth)
-                                    .unwrap();
-                                new_params = true;
-                            }
-                            HardwareDeviceRxStreamControlMessage::SetGain(
-                                gain_name,
-                                gain_value,
-                            ) => {
-                                device
-                                    .set_gain_element(
-                                        soapysdr::Direction::Rx,
-                                        stream_index,
-                                        gain_name.as_str(),
-                                        gain_value,
-                                    )
-                                    .unwrap();
-                                new_params = true;
-                            }
-                            HardwareDeviceRxStreamControlMessage::Shutdown => {
-                                break 'outer;
+                    {
+                        // Check for parameter changes
+                        let mut restart_stream = false;
+                        let mut new_params = false; // Params change that doesn't require stream reboot
+                        while let Ok(msg) = control_receiver.try_recv() {
+                            match msg {
+                                HardwareDeviceRxStreamControlMessage::SetSampleRate(x) => {
+                                    sample_rate = x;
+                                    restart_stream = true;
+                                }
+                                HardwareDeviceRxStreamControlMessage::SetFrequency(x) => {
+                                    frequency = x;
+                                    device
+                                        .set_frequency(
+                                            soapysdr::Direction::Rx,
+                                            stream_index,
+                                            frequency,
+                                            (),
+                                        )
+                                        .unwrap();
+                                    new_params = true;
+                                }
+                                HardwareDeviceRxStreamControlMessage::SetBandwidth(x) => {
+                                    bandwidth = x;
+                                    device
+                                        .set_bandwidth(
+                                            soapysdr::Direction::Rx,
+                                            stream_index,
+                                            bandwidth,
+                                        )
+                                        .unwrap();
+                                    new_params = true;
+                                }
+                                HardwareDeviceRxStreamControlMessage::SetGain(
+                                    gain_name,
+                                    gain_value,
+                                ) => {
+                                    device
+                                        .set_gain_element(
+                                            soapysdr::Direction::Rx,
+                                            stream_index,
+                                            gain_name.as_str(),
+                                            gain_value,
+                                        )
+                                        .unwrap();
+                                    new_params = true;
+                                }
+                                HardwareDeviceRxStreamControlMessage::Shutdown => {
+                                    break 'outer;
+                                }
                             }
                         }
-                    }
-                    if restart_stream {
-                        break 'middle;
-                    } else if new_params {
-                        break 'inner;
+                        if restart_stream {
+                            break 'middle;
+                        } else if new_params {
+                            break 'inner;
+                        }
                     }
 
-                    match stream.read(&mut [&mut buffer], (STREAM_READ_TIMEOUT * 1e6) as i64) {
+                    let stream_read =
+                        { stream.read(&mut [&mut buffer], (STREAM_READ_TIMEOUT * 1e6) as i64) };
+
+                    match stream_read {
                         Ok(len) => {
                             let r = waterfall.process(
                                 &buffer[..len],

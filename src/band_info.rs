@@ -29,20 +29,17 @@ pub enum NamingConvention {
     Frequency(i32),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChannelProbeParams {
-    pub bandwidth: f64,
-    pub squelch_time_constant: f64,
-    pub squelch_threshold_db: f64,
-    pub squelch_hysteresis_db: f64,
-}
+//#[derive(Debug, Serialize, Deserialize)]
+//pub struct ChannelProbeParams {
+//    pub bandwidth: f64,
+//    pub squelch_time_constant: f64,
+//    pub squelch_threshold_db: f64,
+//    pub squelch_hysteresis_db: f64,
+//}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChannelConvertParams {
-    pub bandwidth: f64,
-    pub target_sample_rate: f64,
-    pub target_chunk_period: f64,
-}
+//#[derive(Debug, Serialize, Deserialize)]
+//pub struct ChannelConvertParams {
+//}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChannelGroupInfo {
@@ -51,8 +48,9 @@ pub struct ChannelGroupInfo {
     pub max: f64,
     pub step: f64,
     pub naming: NamingConvention,
-    pub probe: ChannelProbeParams,
-    pub convert: ChannelConvertParams,
+    //pub probe: ChannelProbeParams,
+    //pub convert: ChannelConvertParams,
+    pub bandwidth: f64,
 }
 
 impl ChannelGroupInfo {

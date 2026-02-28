@@ -36,11 +36,13 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "sdr-gui",
         native_options,
         Box::new(|cc| Ok(Box::new(SdrApp::new(cc)))),
-    )
+    );
+
+    result
 }
 
 struct SdrApp {
