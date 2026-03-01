@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 use num_complex::Complex;
 
 use crate::band_info::{ChannelGroupInfo, ChannelInfo};
-use crate::dsp::{Fft, Ifft, Overlap, Reassemble, Rechunker};
+use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker};
 use crate::hardware::IntoComplexF32;
 use crate::hardware::{
     ChannelMessage, HardwareDeviceId, ReceiveChannelDescriptor, ReceiveChannelDescriptorPtr,
@@ -15,15 +16,15 @@ use crate::hardware::{
 
 pub struct Waterfall {
     receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
-    overlap: Overlap,
+    rechunker: Rechunker<Complex<f32>>,
+    overlap_expand: OverlapExpand<Complex<f32>>,
+    buffer: Vec<Complex<f32>>,
     fft: Fft,
+    counter: u32,
     power_buffer: Vec<f32>,
     accumulator: Vec<f32>,
     offset_accumulator: Complex<f32>,
-    sample_rate: f64,
-    accumulations_target: usize,
-    accumulations_count: usize,
-    period: f64,
+    output_period: f64,
     min: f32,
     max: f32,
     min_max_alpha: f32,
@@ -41,7 +42,7 @@ impl Waterfall {
         frequency: f64,
         sample_rate: f64,
         target_bin_size: f64,
-        output_period: f64,
+        target_output_period: f64,
         min_max_time_constant: f64,
         offset_reject_time_constant: f64,
         time: Instant,
@@ -51,22 +52,18 @@ impl Waterfall {
         let min_fft_size = (sample_rate / target_bin_size).ceil() as usize;
         let fft_size = min_fft_size.next_power_of_two();
 
-        let overlap = Overlap::new(fft_size);
+        let chunk_size =
+            (sample_rate * target_output_period / fft_size as f64).round() as usize * fft_size;
+        let rechunker = Rechunker::new(chunk_size);
+
+        let output_period = sample_rate / chunk_size as f64;
+
+        let overlap_expand = OverlapExpand::new(fft_size);
         let fft = Fft::new(fft_size);
 
-        // Calculate how many FFT results to accumulate before emitting
-        // output_rate is how many waterfall rows per second we want
-        // Each FFT takes (fft_size / sample_rate) seconds
-        // So we need (sample_rate / (fft_size * output_rate)) FFTs per output
-        // We have 50% overlap so we need an additional factor of * 2
-        let accumulations_target =
-            (2. * sample_rate * output_period / (fft_size as f64)).ceil() as usize;
-        let accumulations_target = accumulations_target.max(1); // At least 1
-
-        let period = accumulations_target as f64 * fft_size as f64 / sample_rate;
-
-        let min_max_alpha = (period / (min_max_time_constant + period)) as f32;
-        let offset_reject_alpha = (period / (offset_reject_time_constant + period)) as f32;
+        let min_max_alpha = (output_period / (min_max_time_constant + output_period)) as f32;
+        let offset_reject_alpha =
+            (output_period / (offset_reject_time_constant + output_period)) as f32;
 
         let receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr = ReceiveStreamDescriptor {
             device_id,
@@ -98,7 +95,6 @@ impl Waterfall {
                         frequency,
                         sample_rate,
                         fft,
-                        period,
                     )
                 })
             })
@@ -106,15 +102,15 @@ impl Waterfall {
 
         Self {
             receive_stream_descriptor_ptr,
-            overlap,
+            rechunker,
+            overlap_expand,
+            buffer: Vec::new(),
             fft,
+            counter: 0,
             power_buffer: vec![0.0; fft_size],
             accumulator: vec![0.0; fft_size],
             offset_accumulator: Default::default(),
-            sample_rate,
-            accumulations_target,
-            accumulations_count: 0,
-            period,
+            output_period,
             min: std::f32::NAN,
             max: std::f32::NAN,
             min_max_alpha,
@@ -134,7 +130,6 @@ impl Waterfall {
         waterfall_center_frequency: f64,
         sample_rate: f64,
         fft: &Fft,
-        period: f64,
     ) -> Option<Channel> {
         let center_frequency = channel_info.center_frequency;
         let left_freq =
@@ -174,30 +169,8 @@ impl Waterfall {
         // Phasor to correct the phase shift caused by overlapping chunks.
         // General form: e^(j * f_shift * 2pi * t_overlap)
         let phasor: f32 = (-1_f32).powi((center_bin % 2) as i32);
+        // General form: [phasor^0, phasor^1, phasor^2, ...]
         let phasors = [1., phasor];
-
-        /*
-        let squelch_threshold_on = 10_f32.powf(
-            (probe_params.squelch_threshold_db as f32
-                + 0.5 * probe_params.squelch_hysteresis_db as f32)
-                / 10.,
-        ) * n_bins;
-        let squelch_threshold_off = 10_f32.powf(
-            (probe_params.squelch_threshold_db as f32
-                - 0.5 * probe_params.squelch_hysteresis_db as f32)
-                / 10.,
-        ) * n_bins;
-        let squelch_alpha = (period / (probe_params.squelch_time_constant + period)) as f32;
-
-        let converter_frequency =
-            (-(center_frequency - waterfall_center_frequency) / sample_rate) as f32;
-        let lpf_impulse_response = windowed_sinc(
-            0.5 * convert_params.bandwidth / sample_rate,
-            1 + 2
-                * (0.5 * AA_FILTER_LENGTH_FACTOR * sample_rate / convert_params.bandwidth).round()
-                    as usize,
-        );
-        */
 
         let output_sample_rate = sample_rate * channel_group.ifft.size() as f64 / fft.size() as f64;
 
@@ -206,34 +179,26 @@ impl Waterfall {
             sample_rate: output_sample_rate,
             name: channel_info.name.clone(),
             center_frequency: channel_info.center_frequency,
+            bandwidth: channel_group_info.bandwidth,
             tuning_error,
         };
         let receive_channel_descriptor_ptr = receive_channel_descriptor.into();
 
-        let reassemble = Reassemble::new(channel_group.ifft.size());
-
-        let output_chunk_size = (output_sample_rate * period).round() as usize;
-
-        let rechunker = Rechunker::new(output_chunk_size);
+        let overlap_reduce = OverlapReduce::new(channel_group.ifft.size());
 
         Some(Channel {
-            //receive_channel_descriptor,
             receive_channel_descriptor_ptr,
             bins,
-            //squelch_threshold_on,
-            //squelch_threshold_off,
-            //squelch_alpha,
-            //probe_level: 1e-10,
-            //active: None,
+            fft_buffer: Vec::new(),
             phasors,
             ifft: channel_group.ifft.clone(),
-            reassemble,
-            rechunker,
+            overlap_reduce,
+            iq_buffer: Vec::new(),
         })
     }
 
     pub fn period(&self) -> f64 {
-        self.period
+        self.output_period
     }
 
     pub fn process<T: IntoComplexF32 + Copy + std::fmt::Debug>(
@@ -244,21 +209,33 @@ impl Waterfall {
         channel_sender: &SyncSender<ChannelMessage>,
     ) -> Result<(), String> {
         // TODO custom error type
+        // TODO make this function take Complex<f32> input only
         let mut result = Ok(());
 
-        self.overlap.process_iter(
+        self.rechunker.process_iter(
             samples.iter().map(|sample| sample.into_complex_f32()),
-            |chunk, counter| {
-                if result.is_err() {
-                    return;
+            |samples| {
+                // Clear buffers & accumulators
+                self.buffer.clear();
+                self.accumulator.fill(0.0);
+                self.offset_accumulator = Complex::ZERO;
+                let mut chunk_count = 0;
+                for channel in self.channels.iter_mut() {
+                    channel.fft_buffer.clear();
+                    channel.iq_buffer.clear();
                 }
 
-                {
-                    self.fft.apply(chunk);
+                // Process incoming data into overlapping chunks
+                self.overlap_expand.process(samples, &mut self.buffer);
 
-                    // Add the DC value to the DC accumulator
-                    // and remove the DC component for further computation.
-                    // Note that the Hann window smears the DC component across 3 FFT terms
+                // TODO: Hann window
+
+                // FFT each chunk
+                self.fft.apply(&mut self.buffer);
+
+                // Apply per-chunk processing
+                let mut chunks = self.buffer.chunks_exact_mut(self.fft.size());
+                while let Some(chunk) = chunks.next() {
                     self.offset_accumulator += (1. / 3.)
                         * (-chunk[self.fft.dc_bin() - 1] + 2. * chunk[self.fft.dc_bin()]
                             - chunk[self.fft.dc_bin() + 1]);
@@ -274,133 +251,105 @@ impl Waterfall {
                         *acc += power;
                     }
 
-                    self.accumulations_count += 1;
-                }
-
-                // Check if we should emit a waterfall row
-                if self.accumulations_count >= self.accumulations_target {
-                    // Normalize and convert to dB
-                    let normalization_factor =
-                        1.0 / (self.accumulations_count as f32 * self.fft.size() as f32);
-                    let output: Vec<f32> = self
-                        .accumulator
-                        .iter()
-                        .map(|&power| power * normalization_factor)
-                        .collect();
-
-                    let new_offset = self.offset_accumulator / self.accumulations_count as f32;
-
-                    if self.offset_reject_alpha.is_finite() {
-                        self.offset =
-                            self.offset + self.offset_reject_alpha * (new_offset - self.offset);
-                    }
-
-                    let new_min = output
-                        .iter()
-                        .copied()
-                        .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                        .unwrap()
-                        .max(1e-10);
-                    let new_max = output
-                        .iter()
-                        .copied()
-                        .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                        .unwrap()
-                        .max(1e-10);
-
-                    // Compute min/max with LPF
-                    if self.min <= self.max {
-                        // Normal case:
-
-                        // LPF in log space
-                        self.min = log_mix_f32(self.min, new_min, self.min_max_alpha);
-                        self.max = log_mix_f32(self.max, new_max, self.min_max_alpha);
-                    } else {
-                        // On startup, or if something goes wrong:
-                        self.min = new_min;
-                        self.max = new_max;
-                    }
-
-                    // Check each channel for squelch
-                    /*
+                    // Aggregate FFT data in each individual channel
                     for channel in self.channels.iter_mut() {
-                        let probe_threshold_on = self.min * channel.squelch_threshold_on;
-                        let probe_threshold_off = self.min * channel.squelch_threshold_off;
+                        // This is a hot loop
+                        let slice = &chunk[channel.bins.clone()];
+                        let start = channel.fft_buffer.len();
+                        channel.fft_buffer.extend_from_slice(slice);
 
-                        // Check power within this channel
-                        let new_probe_level = output
-                            [channel.probe_left_bin as usize..=channel.probe_right_bin as usize]
-                            .iter()
-                            .sum::<f32>();
-                        channel.probe_level = log_mix_f32(
-                            channel.probe_level,
-                            new_probe_level,
-                            channel.squelch_alpha,
-                        );
-
-                        match channel.active {
-                            None => {
-                                if channel.probe_level > probe_threshold_on {
-                                    channel.active =
-                                        Some(channel.receive_channel_descriptor.clone().into());
-                                }
-                            }
-                            Some(_) => {
-                                if channel.probe_level < probe_threshold_off {
-                                    channel.active = None;
-                                }
-                            }
+                        // Apply phase correction due to overlap
+                        let phasor = channel.phasors[self.counter as usize];
+                        for sample in channel.fft_buffer[start..start + slice.len()].iter_mut() {
+                            *sample *= phasor;
                         }
                     }
-                    drop(channels_squelch);
-                    */
 
-                    result = stream_sender
-                        .try_send(StreamMessage {
-                            receive_stream_descriptor_ptr: self
-                                .receive_stream_descriptor_ptr
-                                .clone(),
-                            waterfall_row: output,
-                            start_time: self.stream_last_t,
-                            end_time: time,
-                            min: self.min,
-                            max: self.max,
-                        })
-                        .map_err(|e| e.to_string());
+                    // Count chunks so we can compute averages
+                    chunk_count += 1;
 
-                    // Clear accumulator
-                    self.accumulator.fill(0.0);
-                    self.offset_accumulator = Complex::ZERO;
-                    self.accumulations_count = 0;
-                    self.stream_last_t = time;
-                }
-
-                if result.is_err() {
-                    return;
-                }
-
-                {
-                    //rayon::scope(|s| {
-                    for channel in self.channels.iter_mut() {
-                        //if channel.active.is_none() {
-                        //    continue;
-                        //}
-                        //        s.spawn(|_| {
-                        let r = channel.process(
-                            chunk,
-                            self.channel_last_t,
-                            time,
-                            channel_sender.clone(),
-                            counter,
-                        );
-                        if r.is_err() {
-                            result = r;
-                        }
-                        //        });
+                    // Keep track of the overlap for phase adjustment
+                    self.counter += 1;
+                    if self.counter >= 2 {
+                        self.counter = 0;
                     }
-                    //});
-                    self.channel_last_t = time;
                 }
+                assert!(chunks.into_remainder().is_empty());
+
+                let inv_chunk_count = 1.0 / (chunk_count as f32 as f32);
+                let output: Vec<f32> = self
+                    .accumulator
+                    .iter()
+                    .map(|&power| power * inv_chunk_count)
+                    .collect();
+
+                let new_offset = self.offset_accumulator * inv_chunk_count;
+
+                if self.offset_reject_alpha.is_finite() {
+                    self.offset =
+                        self.offset + self.offset_reject_alpha * (new_offset - self.offset);
+                }
+
+                let new_min = output
+                    .iter()
+                    .copied()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                    .unwrap()
+                    .max(1e-10);
+                let new_max = output
+                    .iter()
+                    .copied()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                    .unwrap()
+                    .max(1e-10);
+
+                // Compute min/max with LPF
+                if self.min <= self.max {
+                    // Normal case:
+
+                    // LPF in log space
+                    self.min = log_mix_f32(self.min, new_min, self.min_max_alpha);
+                    self.max = log_mix_f32(self.max, new_max, self.min_max_alpha);
+                } else {
+                    // On startup, or if something goes wrong:
+                    self.min = new_min;
+                    self.max = new_max;
+                }
+
+                result = stream_sender
+                    .try_send(StreamMessage {
+                        receive_stream_descriptor_ptr: self.receive_stream_descriptor_ptr.clone(),
+                        waterfall_row: output,
+                        start_time: self.stream_last_t,
+                        end_time: time,
+                        min: self.min,
+                        max: self.max,
+                    })
+                    .map_err(|e| e.to_string());
+
+                // Drive each channel
+                let channel_result = Mutex::new(Ok(()));
+                rayon::scope(|s| {
+                    let channel_result = &channel_result;
+                    for channel in self.channels.iter_mut() {
+                        s.spawn(|_| {
+                            let r =
+                                channel.process(self.channel_last_t, time, channel_sender.clone());
+                            if r.is_err() {
+                                let mut channel_result = channel_result.lock().unwrap();
+                                *channel_result = r;
+                            }
+                        });
+                    }
+                });
+                self.channel_last_t = time;
+
+                let channel_result = channel_result.into_inner().unwrap();
+                if channel_result.is_err() {
+                    result = channel_result;
+                }
+
+                self.stream_last_t = time;
             },
         );
         result
@@ -412,52 +361,34 @@ struct ChannelGroup {
 }
 
 struct Channel {
-    //receive_channel_descriptor: ReceiveChannelDescriptor,
     receive_channel_descriptor_ptr: ReceiveChannelDescriptorPtr,
     bins: Range<usize>,
-    //squelch_threshold_on: f32,
-    //squelch_threshold_off: f32,
-    //squelch_alpha: f32,
-    //probe_level: f32,
-    //active: Option<ReceiveChannelDescriptorPtr>, // TODO move more stuff inside this Option
+    fft_buffer: Vec<Complex<f32>>,
     phasors: [f32; 2],
     ifft: Ifft,
-    reassemble: Reassemble,
-    rechunker: Rechunker<Complex<f32>>,
+    iq_buffer: Vec<Complex<f32>>,
+    overlap_reduce: OverlapReduce<Complex<f32>>,
 }
 
 impl Channel {
+    // Called every period, possibly from a different thread
     fn process(
         &mut self,
-        fft: &[Complex<f32>],
         start_time: Instant,
         end_time: Instant,
         channel_sender: SyncSender<ChannelMessage>,
-        counter: u32,
     ) -> Result<(), String> {
-        let mut result = Ok(());
-        let chunk = self.ifft.process(&fft[self.bins.clone()]);
-        // Apply phase correction due to overlap
-        let phasor = self.phasors[counter as usize];
-        for sample in chunk.iter_mut() {
-            *sample *= phasor;
-        }
-        self.reassemble.process(chunk, |chunk| {
-            self.rechunker.process(chunk, |chunk| {
-                if result.is_err() {
-                    return;
-                }
-                result = channel_sender
-                    .try_send(ChannelMessage {
-                        receive_channel_descriptor_ptr: self.receive_channel_descriptor_ptr.clone(),
-                        iq_data: chunk.to_vec(),
-                        start_time,
-                        end_time,
-                    })
-                    .map_err(|e| e.to_string());
-            });
-        });
-        result
+        self.ifft.apply(&mut self.fft_buffer);
+        self.overlap_reduce
+            .process(&self.fft_buffer, &mut self.iq_buffer);
+        channel_sender
+            .try_send(ChannelMessage {
+                receive_channel_descriptor_ptr: self.receive_channel_descriptor_ptr.clone(),
+                iq_data: self.iq_buffer.to_vec(),
+                start_time,
+                end_time,
+            })
+            .map_err(|e| e.to_string())
     }
 }
 

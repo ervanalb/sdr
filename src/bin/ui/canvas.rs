@@ -505,7 +505,7 @@ pub fn ui(
         for channel in channels_gpu.draw_list() {
             let descriptor = &channel.receive_channel_descriptor_ptr;
             let center_frequency = descriptor.center_frequency;
-            let width = descriptor.sample_rate;
+            let width = descriptor.bandwidth;
 
             // Calculate time positions relative to temp_random_instant
             let start_time = offset

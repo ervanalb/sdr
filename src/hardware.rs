@@ -15,12 +15,12 @@ const STREAM_MESSAGE_CAPACITY: usize = 64;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
 const STREAM_BUFFER_DURATION: f64 = 0.001;
-const WATERFALL_TARGET_BIN_SIZE: f64 = 5_000.0; // 5 KHz
+const WATERFALL_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
 const STREAM_OUTPUT_PERIOD: f64 = 0.01; // 100 waterfall rows per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
-const CHANNEL_MESSAGE_CAPACITY: usize = 1024;
+const CHANNEL_MESSAGE_CAPACITY: usize = 32768;
 
 fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
     // Snap to the nearest discrete step if stepsize is non-zero
@@ -93,6 +93,7 @@ pub struct ReceiveChannelDescriptor {
     pub sample_rate: f64,
     pub name: String,
     pub center_frequency: f64,
+    pub bandwidth: f64,
     pub tuning_error: f64,
 }
 

@@ -188,6 +188,26 @@
         "Frequency": 5
       },
       "bandwidth": 150e3
+    },
+    {
+      "name": "HAM",
+      "min": 420.0125e6,
+      "max": 449.9875e6,
+      "step": 12.5e3,
+      "naming": {
+        "Frequency": 2
+      },
+      "bandwidth": 12.5e3
+    },
+    {
+      "name": "Public Safety",
+      "min": 450.0125e6,
+      "max": 469.9875e6,
+      "step": 12.5e3,
+      "naming": {
+        "Frequency": 2
+      },
+      "bandwidth": 12.5e3
     }
   ],
   "highest_freq": 12e9
