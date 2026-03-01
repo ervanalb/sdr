@@ -7,7 +7,7 @@ use std::time::Instant;
 use num_complex::Complex;
 
 use crate::band_info::{ChannelGroupInfo, ChannelInfo};
-use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker};
+use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker, hann_window};
 use crate::hardware::IntoComplexF32;
 use crate::hardware::{
     ChannelMessage, HardwareDeviceId, ReceiveChannelDescriptor, ReceiveChannelDescriptorPtr,
@@ -18,12 +18,9 @@ pub struct Waterfall {
     receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
     rechunker: Rechunker<Complex<f32>>,
     overlap_expand: OverlapExpand<Complex<f32>>,
-    buffer: Vec<Complex<f32>>,
+    hann_window: Vec<f32>,
     fft: Fft,
     counter: u32,
-    power_buffer: Vec<f32>,
-    accumulator: Vec<f32>,
-    offset_accumulator: Complex<f32>,
     output_period: f64,
     min: f32,
     max: f32,
@@ -104,12 +101,9 @@ impl Waterfall {
             receive_stream_descriptor_ptr,
             rechunker,
             overlap_expand,
-            buffer: Vec::new(),
+            hann_window: hann_window(fft_size),
             fft,
             counter: 0,
-            power_buffer: vec![0.0; fft_size],
-            accumulator: vec![0.0; fft_size],
-            offset_accumulator: Default::default(),
             output_period,
             min: std::f32::NAN,
             max: std::f32::NAN,
@@ -189,11 +183,9 @@ impl Waterfall {
         Some(Channel {
             receive_channel_descriptor_ptr,
             bins,
-            fft_buffer: Vec::new(),
             phasors,
             ifft: channel_group.ifft.clone(),
             overlap_reduce,
-            iq_buffer: Vec::new(),
         })
     }
 
@@ -216,74 +208,64 @@ impl Waterfall {
             samples.iter().map(|sample| sample.into_complex_f32()),
             |samples| {
                 // Clear buffers & accumulators
-                self.buffer.clear();
-                self.accumulator.fill(0.0);
-                self.offset_accumulator = Complex::ZERO;
                 let mut chunk_count = 0;
-                for channel in self.channels.iter_mut() {
-                    channel.fft_buffer.clear();
-                    channel.iq_buffer.clear();
-                }
+                let mut offset_accumulator = Complex::<f32>::ZERO;
+                let mut accumulator = vec![0.; self.fft.size()];
 
                 // Process incoming data into overlapping chunks
-                self.overlap_expand.process(samples, &mut self.buffer);
+                let mut buffer = self.overlap_expand.process(&samples);
 
-                // TODO: Hann window
-
-                // FFT each chunk
-                self.fft.apply(&mut self.buffer);
-
-                // Apply per-chunk processing
-                let mut chunks = self.buffer.chunks_exact_mut(self.fft.size());
+                let mut chunks = buffer.chunks_exact_mut(self.fft.size());
                 while let Some(chunk) = chunks.next() {
-                    self.offset_accumulator += (1. / 3.)
-                        * (-chunk[self.fft.dc_bin() - 1] + 2. * chunk[self.fft.dc_bin()]
-                            - chunk[self.fft.dc_bin() + 1]);
-                    chunk[self.fft.dc_bin()] -= self.offset;
-                    chunk[self.fft.dc_bin() - 1] += 0.5 * self.offset;
-                    chunk[self.fft.dc_bin() + 1] += 0.5 * self.offset;
-
-                    // Compute squared magnitude and add to accumulator
-                    for (&sample, power) in chunk.iter().zip(self.power_buffer.iter_mut()) {
-                        *power = sample.re * sample.re + sample.im * sample.im;
-                    }
-                    for (&power, acc) in self.power_buffer.iter().zip(self.accumulator.iter_mut()) {
-                        *acc += power;
-                    }
-
-                    // Aggregate FFT data in each individual channel
-                    for channel in self.channels.iter_mut() {
-                        // This is a hot loop
-                        let slice = &chunk[channel.bins.clone()];
-                        let start = channel.fft_buffer.len();
-                        channel.fft_buffer.extend_from_slice(slice);
-
-                        // Apply phase correction due to overlap
-                        let phasor = channel.phasors[self.counter as usize];
-                        for sample in channel.fft_buffer[start..start + slice.len()].iter_mut() {
-                            *sample *= phasor;
-                        }
-                    }
-
-                    // Count chunks so we can compute averages
-                    chunk_count += 1;
-
-                    // Keep track of the overlap for phase adjustment
-                    self.counter += 1;
-                    if self.counter >= 2 {
-                        self.counter = 0;
+                    // Apply Hann window
+                    for (sample, win) in chunk.iter_mut().zip(self.hann_window.iter()) {
+                        *sample *= win;
                     }
                 }
                 assert!(chunks.into_remainder().is_empty());
 
+                // FFT each chunk
+                self.fft.process_inplace(&mut buffer);
+
+                // Apply per-chunk processing
+                {
+                    let mut power_buffer = vec![0.; self.fft.size()];
+                    let mut chunks = buffer.chunks_exact_mut(self.fft.size());
+                    while let Some(chunk) = chunks.next() {
+                        offset_accumulator += (1. / 3.)
+                            * (-chunk[self.fft.dc_bin() - 1] + 2. * chunk[self.fft.dc_bin()]
+                                - chunk[self.fft.dc_bin() + 1]);
+                        chunk[self.fft.dc_bin()] -= self.offset;
+                        chunk[self.fft.dc_bin() - 1] += 0.5 * self.offset;
+                        chunk[self.fft.dc_bin() + 1] += 0.5 * self.offset;
+
+                        // Compute squared magnitude and add to accumulator
+                        for (&sample, power) in chunk.iter().zip(power_buffer.iter_mut()) {
+                            *power = sample.re * sample.re + sample.im * sample.im;
+                        }
+                        for (&power, acc) in power_buffer.iter().zip(accumulator.iter_mut()) {
+                            *acc += power;
+                        }
+
+                        // Count chunks so we can compute averages
+                        chunk_count += 1;
+
+                        // Keep track of the overlap for phase adjustment
+                        self.counter += 1;
+                        if self.counter >= 2 {
+                            self.counter = 0;
+                        }
+                    }
+                    assert!(chunks.into_remainder().is_empty());
+                }
+
                 let inv_chunk_count = 1.0 / (chunk_count as f32 as f32);
-                let output: Vec<f32> = self
-                    .accumulator
+                let output: Vec<f32> = accumulator
                     .iter()
                     .map(|&power| power * inv_chunk_count)
                     .collect();
 
-                let new_offset = self.offset_accumulator * inv_chunk_count;
+                let new_offset = offset_accumulator * inv_chunk_count;
 
                 if self.offset_reject_alpha.is_finite() {
                     self.offset =
@@ -328,13 +310,35 @@ impl Waterfall {
                     .map_err(|e| e.to_string());
 
                 // Drive each channel
+                let num_chunks = buffer.len() / self.fft.size();
                 let channel_result = Mutex::new(Ok(()));
                 rayon::scope(|s| {
                     let channel_result = &channel_result;
                     for channel in self.channels.iter_mut() {
+                        // Aggregate per-channel FFT data in this thread
+                        let chunk_slice_len = channel.bins.end - channel.bins.start;
+                        let mut fft_buffer = Vec::with_capacity(chunk_slice_len * num_chunks);
+                        for chunk in buffer.chunks_exact_mut(self.fft.size()) {
+                            // This is a hot loop
+                            let slice = &chunk[channel.bins.clone()];
+                            let start = fft_buffer.len();
+                            fft_buffer.extend_from_slice(slice);
+
+                            // Apply phase correction due to overlap
+                            let phasor = channel.phasors[self.counter as usize];
+                            for sample in fft_buffer[start..start + slice.len()].iter_mut() {
+                                *sample *= phasor;
+                            }
+                        }
+
+                        // Do remainder of channel processing in the rayon thread pool
                         s.spawn(|_| {
-                            let r =
-                                channel.process(self.channel_last_t, time, channel_sender.clone());
+                            let r = channel.process(
+                                fft_buffer,
+                                self.channel_last_t,
+                                time,
+                                channel_sender.clone(),
+                            );
                             if r.is_err() {
                                 let mut channel_result = channel_result.lock().unwrap();
                                 *channel_result = r;
@@ -363,10 +367,8 @@ struct ChannelGroup {
 struct Channel {
     receive_channel_descriptor_ptr: ReceiveChannelDescriptorPtr,
     bins: Range<usize>,
-    fft_buffer: Vec<Complex<f32>>,
     phasors: [f32; 2],
     ifft: Ifft,
-    iq_buffer: Vec<Complex<f32>>,
     overlap_reduce: OverlapReduce<Complex<f32>>,
 }
 
@@ -374,17 +376,17 @@ impl Channel {
     // Called every period, possibly from a different thread
     fn process(
         &mut self,
+        mut fft_buffer: Vec<Complex<f32>>,
         start_time: Instant,
         end_time: Instant,
         channel_sender: SyncSender<ChannelMessage>,
     ) -> Result<(), String> {
-        self.ifft.apply(&mut self.fft_buffer);
-        self.overlap_reduce
-            .process(&self.fft_buffer, &mut self.iq_buffer);
+        self.ifft.process_inplace(&mut fft_buffer);
+        let iq_buffer = self.overlap_reduce.process(&fft_buffer);
         channel_sender
             .try_send(ChannelMessage {
                 receive_channel_descriptor_ptr: self.receive_channel_descriptor_ptr.clone(),
-                iq_data: self.iq_buffer.to_vec(),
+                iq_data: iq_buffer,
                 start_time,
                 end_time,
             })
