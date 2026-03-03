@@ -1,15 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use sdr::band_info::BandsInfo;
 use sdr::channels_gpu::ChannelsGpu;
-use sdr::hardware::{Hardware, HardwareParams};
+use sdr::hardware::{Hardware, HardwareParams, StreamId};
+use sdr::waterfall::Waterfall;
 use sdr::waterfall_gpu::WaterfallGpu;
 use std::sync::{Arc, Mutex};
 
 mod ui;
+
+const STREAM_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
+const STREAM_TARGET_OUTPUT_PERIOD: f64 = 0.01; // 100 waterfall rows per second
+const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
+const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
+//const CHANNEL_MESSAGE_CAPACITY: usize = 32768;
 
 const CANVAS_DURATION: f64 = 120.;
 
@@ -55,6 +63,7 @@ struct SdrApp {
     prev_reference_time: Instant,
     temp_random_instant: Instant,
     bands_info: Arc<Mutex<BandsInfo>>,
+    streams: BTreeMap<StreamId, Waterfall>,
 }
 
 impl SdrApp {
@@ -70,7 +79,7 @@ impl SdrApp {
         let bands_info = Arc::new(Mutex::new(bands_info));
 
         Self {
-            hardware: Some(Hardware::new(bands_info.clone())),
+            hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
@@ -79,6 +88,7 @@ impl SdrApp {
             prev_reference_time: now,
             temp_random_instant: now,
             bands_info,
+            streams: BTreeMap::new(),
         }
     }
 }
@@ -93,33 +103,77 @@ impl eframe::App for SdrApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
+
+        let Some(wgpu_render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+
+        let Some(hardware) = &mut self.hardware else {
+            return;
+        };
+
         self.prev_reference_time = self.reference_time;
         if self.hardware_params.run {
             self.reference_time = Instant::now();
         }
 
         // Update hardware every frame
-        if let Some(hardware) = &mut self.hardware {
-            hardware.update(&mut self.hardware_params);
+        hardware.update(&mut self.hardware_params);
 
-            // Upload waterfall messages to GPU
-            if let Some(wgpu_render_state) = frame.wgpu_render_state() {
-                let device = &wgpu_render_state.device;
-                let queue = &wgpu_render_state.queue;
-
-                while let Some(msg) = hardware.stream_try_recv() {
-                    self.waterfall_gpu.add_row(&msg, device, queue);
-                }
-
-                while let Some(msg) = hardware.channel_try_recv() {
-                    self.channels_gpu.add_chunk(msg);
-                }
+        // Remove / close any streams that no longer exist
+        self.streams.retain(|&k, _| {
+            if !hardware.streams.contains_key(k) {
+                self.waterfall_gpu.close_stream(k);
+                return false;
             }
-            self.waterfall_gpu
-                .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
-            self.channels_gpu
-                .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+            true
+        });
+
+        // Process all streams
+        for (stream_id, stream) in hardware.streams.iter() {
+            let waterfall = self.streams.entry(stream_id).or_insert_with(|| {
+                let channels = { &self.bands_info.lock().unwrap().channels };
+                Waterfall::new(
+                    stream.descriptor.frequency,
+                    stream.descriptor.sample_rate,
+                    STREAM_TARGET_BIN_SIZE,
+                    STREAM_TARGET_OUTPUT_PERIOD,
+                    STREAM_MIN_MAX_TIME_CONSTANT,
+                    STREAM_OFFSET_REJECT_TIME_CONSTANT,
+                    stream.descriptor.start_time,
+                    channels,
+                )
+            });
+            for message in &stream.messages {
+                waterfall
+                    .process(&message.iq_data, message.end_time, |waterfall| {
+                        self.waterfall_gpu.add_row(
+                            stream_id,
+                            &stream.descriptor,
+                            message.start_time,
+                            message.end_time,
+                            &waterfall.spectrum,
+                            waterfall.min,
+                            waterfall.max,
+                            &wgpu_render_state.device,
+                            &wgpu_render_state.queue,
+                        );
+
+                        for (channel_id, channel) in waterfall.channels.iter() {
+                            self.channels_gpu.add_chunk(
+                                channel_id,
+                                channel,
+                                message.end_time,
+                            );
+                        }
+                    })
+                    .unwrap();
+            }
         }
+        self.waterfall_gpu
+            .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+        self.channels_gpu
+            .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 
         let prev_run = self.hardware_params.run;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {

@@ -16,6 +16,10 @@ impl<T: Clone> Rechunker<T> {
         }
     }
 
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
+    }
+
     pub fn process(&mut self, mut data: &[T], mut emit: impl FnMut(Vec<T>)) {
         while !data.is_empty() {
             // Fill buffer until full or we run out of samples
@@ -90,9 +94,7 @@ pub struct OverlapReduce<T> {
 }
 
 impl<T: Clone + Default + AddAssign> OverlapReduce<T> {
-    pub fn new(chunk_size: usize) -> Self {
-        assert!(chunk_size % 2 == 0, "chunk size must be even");
-        let half_chunk_size = chunk_size / 2;
+    pub fn new(half_chunk_size: usize) -> Self {
         OverlapReduce {
             half_chunk_size,
             buffer: Vec::with_capacity(half_chunk_size),
@@ -136,6 +138,7 @@ impl<T: Clone + Default + AddAssign> OverlapReduce<T> {
 pub struct Fft {
     fft_plan: Arc<dyn rustfft::Fft<f32>>,
     fft_size: usize,
+    fft_scratch: Vec<Complex<f32>>,
     inv_len_f64: f64, // used for freq2bin & friends
     inv_len: f32,     // used for normalization
 }
@@ -144,9 +147,11 @@ impl Fft {
     pub fn new(fft_size: usize) -> Self {
         let mut planner = rustfft::FftPlanner::new();
         let fft_plan = planner.plan_fft_forward(fft_size);
+        let fft_scratch = vec![Default::default(); fft_plan.get_inplace_scratch_len()];
         Fft {
             fft_plan,
             fft_size,
+            fft_scratch,
             inv_len_f64: 1. / fft_size as f64,
             inv_len: 1. / fft_size as f32,
         }
@@ -162,7 +167,7 @@ impl Fft {
     }
 
     pub fn process_inplace(&mut self, data: &mut [Complex<f32>]) {
-        self.fft_plan.process(data);
+        self.fft_plan.process_with_scratch(data, &mut self.fft_scratch);
         let mut chunks = data.chunks_exact_mut(self.size());
         while let Some(chunk) = chunks.next() {
             chunk.rotate_left(self.size() / 2);
@@ -186,13 +191,15 @@ impl Fft {
 pub struct Ifft {
     fft_plan: Arc<dyn rustfft::Fft<f32>>,
     fft_size: usize,
+    fft_scratch: Vec<Complex<f32>>,
 }
 
 impl Ifft {
     pub fn new(fft_size: usize) -> Self {
         let mut planner = rustfft::FftPlanner::new();
         let fft_plan = planner.plan_fft_inverse(fft_size);
-        Ifft { fft_plan, fft_size }
+        let fft_scratch = vec![Default::default(); fft_plan.get_inplace_scratch_len()];
+        Ifft { fft_plan, fft_size, fft_scratch }
     }
 
     pub fn dc_bin(&self) -> usize {
@@ -206,7 +213,7 @@ impl Ifft {
         }
         assert!(chunks.into_remainder().is_empty());
 
-        self.fft_plan.process(data);
+        self.fft_plan.process_with_scratch(data, &mut self.fft_scratch);
     }
 
     pub fn size(&self) -> usize {
@@ -335,20 +342,57 @@ mod tests {
     #[test]
     fn test_overlap() {
         let mut overlap_expand = OverlapExpand::new(4);
-        let mut overlap_reduce = OverlapReduce::new(4);
+        let mut overlap_reduce = OverlapReduce::new(2);
 
-        let input: Vec<u32> = (0..20).collect();
+        let input: Vec<u32> = (0..24).collect();
 
         let overlapped = overlap_expand.process(&input);
 
+        assert_eq!(overlapped.len(), 48);
         assert_eq!(
             overlapped[..16],
             vec![0, 0, 0, 1, 0, 1, 2, 3, 2, 3, 4, 5, 4, 5, 6, 7]
         );
 
         let output = overlap_reduce.process(&overlapped);
+        assert_eq!(output.len(), 22);
 
-        assert_eq!(output, (0..18).map(|i| i * 2).collect::<Vec<_>>())
+        assert_eq!(output, (0..22).map(|i| i * 2).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn test_overlap_multiple_calls() {
+        let input: Vec<u32> = (0..24).collect();
+
+        let mut overlapped_from_chunks = vec![];
+        let mut output_from_chunks = vec![];
+
+        {
+            // Process in chunks
+            let mut overlap_expand = OverlapExpand::new(4);
+            let mut overlap_reduce = OverlapReduce::new(2);
+
+            for input_chunk in input.chunks_exact(4) {
+                let overlapped_chunk = overlap_expand.process(&input_chunk);
+                overlapped_from_chunks.extend_from_slice(&overlapped_chunk);
+                let output_chunk = overlap_reduce.process(&overlapped_chunk);
+                output_from_chunks.extend(output_chunk);
+            }
+        }
+
+        let overlapped_bulk;
+        let output_bulk;
+        {
+            // Process in bulk
+            let mut overlap_expand = OverlapExpand::new(4);
+            let mut overlap_reduce = OverlapReduce::new(2);
+
+            overlapped_bulk = overlap_expand.process(&input);
+            output_bulk = overlap_reduce.process(&overlapped_from_chunks);
+        }
+
+        assert_eq!(overlapped_from_chunks, overlapped_bulk,);
+        assert_eq!(output_from_chunks, output_bulk,);
     }
 
     #[test]
@@ -360,8 +404,8 @@ mod tests {
             })
             .collect();
 
-        let mut fft = Fft::new(20);
-        let mut ifft = Ifft::new(20);
+        let mut fft = Fft::new(4);
+        let mut ifft = Ifft::new(4);
 
         let mut work = input.clone();
         fft.process_inplace(&mut work);

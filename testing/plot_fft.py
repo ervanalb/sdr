@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 
 # Load IQ samples from the raw file
-samples = np.fromfile('iq_samples.raw', dtype=np.complex64)[0:100000]
+samples = np.fromfile(sys.argv[1], dtype=np.complex64)[0:100000]
 #samples = np.fromfile('lpf_impulse_response.raw', dtype=np.complex64)
 
 print(f"Loaded {len(samples)} samples")
+
+plt.title("IQ Samples")
+plt.plot(np.real(samples), label="I")
+plt.plot(np.imag(samples), label="Q")
+plt.show()
 
 # Compute FFT
 fft_result = np.fft.fft(samples)
@@ -17,7 +23,7 @@ magnitude = np.abs(fft_shifted)
 magnitude_db = 20 * np.log10(magnitude + 1e-10)  # Add small value to avoid log(0)
 
 # Create frequency axis (normalized to sample rate)
-freqs = np.fft.fftshift(298507.46268656716 * np.fft.fftfreq(len(samples)))
+freqs = np.fft.fftshift(20e6 * np.fft.fftfreq(len(samples)))
 
 # Plot
 plt.figure(figsize=(12, 6))

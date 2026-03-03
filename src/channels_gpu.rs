@@ -1,30 +1,33 @@
 // TODO: rename this file, it has nothing to do with GPU
 
-use crate::hardware::{ChannelMessage, ReceiveChannelDescriptorPtr};
 use num_complex::Complex;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
+use crate::waterfall::{Channel, ChannelDescriptor, ChannelId};
+
 pub struct ChannelsGpu {
-    channels: HashMap<ReceiveChannelDescriptorPtr, ChannelHistory>,
+    pub channels: BTreeMap<ChannelId, ChannelHistory>,
 }
 
 impl ChannelsGpu {
     pub fn new() -> Self {
         Self {
-            channels: HashMap::new(),
+            channels: BTreeMap::new(),
         }
     }
 
-    pub fn add_chunk(&mut self, msg: ChannelMessage) {
-        let key = msg.receive_channel_descriptor_ptr.clone();
-
+    pub fn add_chunk(&mut self, channel_id: ChannelId, channel: &Channel, end_time: Instant) {
         let history = self
             .channels
-            .entry(key)
-            .or_insert_with(|| ChannelHistory::new());
+            .entry(channel_id)
+            .or_insert_with(|| ChannelHistory::new(channel.descriptor.clone()));
 
-        history.add_chunk(msg.iq_data, msg.start_time, msg.end_time);
+        history.add_chunk(&channel.iq_data, end_time);
+    }
+
+    pub fn close_channel(&mut self, channel: ChannelId) {
+        // XXX TODO
     }
 
     pub fn prune(&mut self, retain_time: Instant) {
@@ -33,83 +36,55 @@ impl ChannelsGpu {
             !history.chunks.is_empty()
         });
     }
-
-    pub fn draw_list(&self) -> impl Iterator<Item = ChannelDrawInfo> + '_ {
-        self.channels
-            .iter()
-            .filter_map(|(descriptor_ptr, history)| {
-                if history.chunks.is_empty() {
-                    return None;
-                }
-
-                let start_time = history.chunks.first().unwrap().start_time;
-                let end_time = history.chunks.last().unwrap().end_time;
-
-                Some(ChannelDrawInfo {
-                    receive_channel_descriptor_ptr: descriptor_ptr.clone(),
-                    start_time,
-                    end_time,
-                })
-            })
-    }
-
-    pub fn export_iq_data(
-        &self,
-        descriptor_ptr: &ReceiveChannelDescriptorPtr,
-        path: &std::path::Path,
-    ) -> Result<(), std::io::Error> {
-        use std::io::Write;
-
-        if let Some(history) = self.channels.get(descriptor_ptr) {
-            let mut file = std::fs::File::create(path)?;
-
-            for chunk in &history.chunks {
-                for sample in &chunk.iq_data {
-                    file.write_all(&sample.re.to_le_bytes())?;
-                    file.write_all(&sample.im.to_le_bytes())?;
-                }
-            }
-
-            file.flush()?;
-        }
-
-        Ok(())
-    }
 }
 
 pub struct ChannelHistory {
+    pub descriptor: ChannelDescriptor,
+    pub end_time: Instant,
     chunks: Vec<ChannelChunk>,
 }
 
 impl ChannelHistory {
-    fn new() -> Self {
+    fn new(descriptor: ChannelDescriptor) -> Self {
+        let end_time = descriptor.start_time;
         Self {
+            descriptor,
+            end_time,
             chunks: Vec::new(),
         }
     }
 
-    fn add_chunk(&mut self, iq_data: Vec<Complex<f32>>, start_time: Instant, end_time: Instant) {
+    fn add_chunk(&mut self, iq_data: &[Complex<f32>], end_time: Instant) {
         self.chunks.push(ChannelChunk {
-            iq_data,
-            start_time,
+            iq_data: iq_data.to_vec(),
             end_time,
         });
+        self.end_time = self.end_time.max(end_time);
     }
 
     fn prune(&mut self, retain_time: Instant) {
         self.chunks.retain(|chunk| chunk.end_time >= retain_time);
     }
+
+    pub fn export_iq_data(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path)?;
+
+        for chunk in &self.chunks {
+            dbg!(chunk.iq_data.len());
+            for sample in &chunk.iq_data {
+                file.write_all(&sample.re.to_le_bytes())?;
+                file.write_all(&sample.im.to_le_bytes())?;
+            }
+        }
+
+        file.flush()?;
+
+        Ok(())
+    }
 }
 
 struct ChannelChunk {
     iq_data: Vec<Complex<f32>>,
-    start_time: Instant,
     end_time: Instant,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelDrawInfo {
-    pub receive_channel_descriptor_ptr: ReceiveChannelDescriptorPtr,
-    pub start_time: Instant,
-    pub end_time: Instant,
 }

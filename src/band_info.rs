@@ -54,7 +54,7 @@ pub struct ChannelGroupInfo {
 }
 
 impl ChannelGroupInfo {
-    pub fn iter(&self) -> ChannelInfoIter {
+    pub fn iter(&self) -> ChannelInfoIter<'_> {
         let num_channels = if self.step == 0.0 {
             1
         } else {

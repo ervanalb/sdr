@@ -10,8 +10,7 @@ import numpy as np
 import wave
 import struct
 import argparse
-from scipy import signal
-
+from scipy import signal, ndimage
 
 def create_bandpass_filter(sample_rate, bandwidth_hz=15000, num_taps=101):
     """
@@ -64,11 +63,19 @@ def demodulate_fm(iq_samples, sample_rate):
 
     amp = np.abs(iq_samples)
     phase_diff = np.diff(np.atan2(np.imag(iq_samples), np.real(iq_samples)))
+    #plt.plot(phase_diff)
     phase_diff = (phase_diff + np.pi) % (2 * np.pi) - np.pi
     plt.plot(amp / np.max(amp))
+
+    filt = ndimage.median_filter(phase_diff, size=9)
+    resid = phase_diff - filt
+    resid = (resid + np.pi) % (2 * np.pi) - np.pi
+    phase_diff = filt + resid
     plt.plot(phase_diff)
+
     #phase_diff2 = np.diff(phase_diff)
-    #phase_diff2 = (phase_diff + np.pi) % (2 * np.pi) - np.pi
+    #plt.plot(phase_diff2)
+    #phase_diff2 = (phase_diff2 + np.pi) % (2 * np.pi) - np.pi
     #phase_diff2 = np.cumsum(phase_diff2)
     #plt.plot(phase_diff2)
     plt.show()

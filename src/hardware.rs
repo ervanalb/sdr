@@ -1,26 +1,22 @@
-use crate::band_info::BandsInfo;
-use crate::by_ptr::ByPtr;
-use crate::waterfall::Waterfall;
 use log::{info, warn};
 use num_complex::Complex;
+use slotmap::{SlotMap, new_key_type};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::mpsc::TryRecvError;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
 
+const STREAM_CREATION_MESSAGE_CAPACITY: usize = 64;
 const STREAM_MESSAGE_CAPACITY: usize = 64;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
-const STREAM_BUFFER_DURATION: f64 = 0.001;
-const WATERFALL_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
-const STREAM_OUTPUT_PERIOD: f64 = 0.01; // 100 waterfall rows per second
+const STREAM_CHUNK_PERIOD: f64 = 0.0005; // 200 per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
-const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
-const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
-const CHANNEL_MESSAGE_CAPACITY: usize = 32768;
+
+new_key_type! {pub struct StreamId; }
 
 fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
     // Snap to the nearest discrete step if stepsize is non-zero
@@ -61,43 +57,57 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
     snap_to_range(closest_range, value)
 }
 
-pub struct StreamMessage {
-    pub receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
-    pub waterfall_row: Vec<f32>,
-    pub start_time: Instant,
-    pub end_time: Instant,
-    pub min: f32,
-    pub max: f32,
+pub struct Stream {
+    pub descriptor: StreamDescriptor,
+    pub messages: Vec<StreamMessage>,
+    receiver: Receiver<StreamMessage>,
 }
 
-pub struct ChannelMessage {
-    pub receive_channel_descriptor_ptr: ReceiveChannelDescriptorPtr,
-    pub iq_data: Vec<Complex<f32>>,
-    pub start_time: Instant,
-    pub end_time: Instant,
+impl Stream {
+    fn new(descriptor: StreamDescriptor, receiver: Receiver<StreamMessage>) -> Self {
+        Stream {
+            descriptor,
+            messages: vec![],
+            receiver,
+        }
+    }
+
+    // Returns true if this stream is still active,
+    // false if it is no longer active
+    fn update(&mut self) -> bool {
+        self.messages.clear();
+        loop {
+            match self.receiver.try_recv() {
+                Ok(message) => {
+                    self.messages.push(message);
+                }
+                Err(TryRecvError::Empty) => {
+                    // Stream receiver is still connected
+                    return true;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    // Stream receiver is disconnected
+                    return false;
+                }
+            }
+        }
+    }
 }
 
-#[derive(Debug)]
-pub struct ReceiveStreamDescriptor {
+#[derive(Clone, Debug)]
+pub struct StreamDescriptor {
     pub device_id: HardwareDeviceId,
     pub stream_index: usize,
     pub frequency: f64,
     pub sample_rate: f64,
+    pub start_time: Instant,
 }
 
-pub type ReceiveStreamDescriptorPtr = ByPtr<ReceiveStreamDescriptor>;
-
-#[derive(Debug, Clone)]
-pub struct ReceiveChannelDescriptor {
-    pub receive_stream_descriptor_ptr: ReceiveStreamDescriptorPtr,
-    pub sample_rate: f64,
-    pub name: String,
-    pub center_frequency: f64,
-    pub bandwidth: f64,
-    pub tuning_error: f64,
+pub struct StreamMessage {
+    pub iq_data: Vec<Complex<f32>>,
+    pub start_time: Instant,
+    pub end_time: Instant,
 }
-
-pub type ReceiveChannelDescriptorPtr = ByPtr<ReceiveChannelDescriptor>;
 
 pub type HardwareDeviceId = String;
 
@@ -120,24 +130,20 @@ impl Default for HardwareParams {
 
 pub struct Hardware {
     devices: HashMap<HardwareDeviceId, HardwareDevice>,
-    stream_sender: SyncSender<StreamMessage>,
-    stream_receiver: Receiver<StreamMessage>,
-    channel_sender: SyncSender<ChannelMessage>,
-    channel_receiver: Receiver<ChannelMessage>,
-    bands_info: Arc<Mutex<BandsInfo>>,
+    stream_creation_sender: SyncSender<(StreamDescriptor, Receiver<StreamMessage>)>,
+    stream_creation_receiver: Receiver<(StreamDescriptor, Receiver<StreamMessage>)>,
+    pub streams: SlotMap<StreamId, Stream>,
 }
 
 impl Hardware {
-    pub fn new(bands_info: Arc<Mutex<BandsInfo>>) -> Self {
-        let (stream_sender, stream_receiver) = mpsc::sync_channel(STREAM_MESSAGE_CAPACITY);
-        let (channel_sender, channel_receiver) = mpsc::sync_channel(CHANNEL_MESSAGE_CAPACITY);
+    pub fn new() -> Self {
+        let (stream_creation_sender, stream_creation_receiver) =
+            mpsc::sync_channel(STREAM_CREATION_MESSAGE_CAPACITY);
         Hardware {
             devices: Default::default(),
-            stream_sender,
-            stream_receiver,
-            channel_sender,
-            channel_receiver,
-            bands_info,
+            stream_creation_sender,
+            stream_creation_receiver,
+            streams: SlotMap::with_key(),
         }
     }
 
@@ -157,9 +163,7 @@ impl Hardware {
                     HardwareDevice::new(
                         enumerated_id,
                         enumerated_args,
-                        self.stream_sender.clone(),
-                        self.channel_sender.clone(),
-                        self.bands_info.clone(),
+                        self.stream_creation_sender.clone(),
                     ),
                 );
             }
@@ -182,6 +186,15 @@ impl Hardware {
             let device = self.devices.get_mut(id).unwrap();
             device.update(device_params, params.run);
         }
+
+        // Handle receiving messages back from the hardware
+        // Create new streams
+        while let Ok((descriptor, receiver)) = self.stream_creation_receiver.try_recv() {
+            self.streams.insert(Stream::new(descriptor, receiver));
+        }
+
+        // Poll each stream
+        self.streams.retain(|_k, stream| stream.update());
     }
 
     pub fn shutdown(mut self) {
@@ -204,23 +217,13 @@ impl Hardware {
             self.update(&mut params);
         }
     }
-
-    pub fn stream_try_recv(&mut self) -> Option<StreamMessage> {
-        self.stream_receiver.try_recv().ok()
-    }
-
-    pub fn channel_try_recv(&mut self) -> Option<ChannelMessage> {
-        self.channel_receiver.try_recv().ok()
-    }
 }
 
 struct HardwareDevice {
     device_id: HardwareDeviceId,
     args: soapysdr::Args,
     active: HardwareState<ActiveHardwareDevice>,
-    stream_sender: SyncSender<StreamMessage>,
-    channel_sender: SyncSender<ChannelMessage>,
-    bands_info: Arc<Mutex<BandsInfo>>,
+    stream_creation_sender: SyncSender<(StreamDescriptor, Receiver<StreamMessage>)>,
 }
 
 enum HardwareState<T> {
@@ -270,17 +273,13 @@ impl HardwareDevice {
     fn new(
         device_id: HardwareDeviceId,
         args: soapysdr::Args,
-        stream_sender: SyncSender<StreamMessage>,
-        channel_sender: SyncSender<ChannelMessage>,
-        bands_info: Arc<Mutex<BandsInfo>>,
+        stream_creation_sender: SyncSender<(StreamDescriptor, Receiver<StreamMessage>)>,
     ) -> Self {
         HardwareDevice {
             device_id,
             args,
             active: HardwareState::Inactive,
-            stream_sender,
-            channel_sender,
-            bands_info,
+            stream_creation_sender,
         }
     }
 
@@ -300,9 +299,7 @@ impl HardwareDevice {
                                 self.device_id.clone(),
                                 device.clone(),
                                 i,
-                                self.stream_sender.clone(),
-                                self.channel_sender.clone(),
-                                self.bands_info.clone(),
+                                self.stream_creation_sender.clone(),
                             )
                         })
                         .collect();
@@ -453,8 +450,7 @@ struct HardwareGain {
 struct HardwareDeviceRxStream {
     device_id: HardwareDeviceId,
     stream_index: usize,
-    stream_sender: SyncSender<StreamMessage>,
-    channel_sender: SyncSender<ChannelMessage>,
+    stream_creation_sender: SyncSender<(StreamDescriptor, Receiver<StreamMessage>)>,
     active: HardwareState<ActiveHardwareDeviceRxStream>,
     device: soapysdr::Device,
     sample_rate_range: Vec<soapysdr::Range>,
@@ -470,7 +466,6 @@ struct HardwareDeviceRxStream {
     sample_rate: f64,
     frequency: f64,
     bandwidth: f64,
-    bands_info: Arc<Mutex<BandsInfo>>,
 }
 
 fn compute_range_min_max(ranges: &[soapysdr::Range]) -> Option<(f64, f64)> {
@@ -493,9 +488,7 @@ impl HardwareDeviceRxStream {
         device_id: HardwareDeviceId,
         device: soapysdr::Device,
         stream_index: usize,
-        stream_sender: SyncSender<StreamMessage>,
-        channel_sender: SyncSender<ChannelMessage>,
-        bands_info: Arc<Mutex<BandsInfo>>,
+        stream_creation_sender: SyncSender<(StreamDescriptor, Receiver<StreamMessage>)>,
     ) -> Self {
         let sample_rate_range = device
             .get_sample_rate_range(soapysdr::Direction::Rx, stream_index)
@@ -567,9 +560,7 @@ impl HardwareDeviceRxStream {
             frequency,
             bandwidth,
             gains,
-            stream_sender,
-            channel_sender,
-            bands_info,
+            stream_creation_sender,
         }
     }
 
@@ -585,28 +576,24 @@ impl HardwareDeviceRxStream {
                     let device_id = self.device_id.clone();
                     let stream_index = self.stream_index;
                     let device = self.device.clone();
-                    let stream_sender = self.stream_sender.clone();
-                    let channel_sender = self.channel_sender.clone();
+                    let stream_creation_sender = self.stream_creation_sender.clone();
                     let (control_sender, control_receiver) =
                         mpsc::sync_channel(CONTROL_MESSAGE_CAPACITY);
                     let sample_rate = self.sample_rate;
                     let frequency = self.frequency;
                     let bandwidth = self.bandwidth;
                     let gains = self.gains.clone();
-                    let bands_info = self.bands_info.clone();
                     let join_handle = spawn(move || {
                         Self::process(
                             device_id,
                             stream_index,
                             device,
                             control_receiver,
-                            stream_sender,
-                            channel_sender,
+                            stream_creation_sender,
                             sample_rate,
                             frequency,
                             bandwidth,
                             gains,
-                            bands_info,
                         );
                     });
 
@@ -779,16 +766,13 @@ impl HardwareDeviceRxStream {
         stream_index: usize,
         device: soapysdr::Device,
         control_receiver: Receiver<HardwareDeviceRxStreamControlMessage>,
-        stream_sender: SyncSender<StreamMessage>,
-        channel_sender: SyncSender<ChannelMessage>,
+        stream_creation_sender: SyncSender<(StreamDescriptor, Receiver<StreamMessage>)>,
         mut sample_rate: f64,
         mut frequency: f64,
         mut bandwidth: f64,
         gains: HashMap<String, HardwareGain>,
-        bands_info: Arc<Mutex<BandsInfo>>,
     ) {
         info!("Started thread for RX stream {stream_index:?} on device {device_id:?}");
-
         // Apply initial parameters
         device
             .set_frequency(soapysdr::Direction::Rx, stream_index, frequency, ())
@@ -814,37 +798,35 @@ impl HardwareDeviceRxStream {
                 .set_sample_rate(soapysdr::Direction::Rx, stream_index, sample_rate)
                 .unwrap();
 
-            let buffer_size = (STREAM_BUFFER_DURATION * sample_rate) as usize;
-            let buffer_size = buffer_size.next_power_of_two();
-            info!(
-                "Hardware channel parameters: sample_rate={sample_rate:?}, frequency={frequency:?}, bandwidth={bandwidth:?}, buffer_size={buffer_size:?}"
-            );
-
-            let mut buffer = vec![num_complex::Complex::<i8>::new(0, 0); buffer_size];
-
             info!("Opening stream");
             let mut stream = device
-                .rx_stream::<num_complex::Complex<i8>>(&[stream_index])
+                .rx_stream::<num_complex::Complex<f32>>(&[stream_index])
                 .unwrap();
             stream.activate(None).unwrap();
 
             'middle: loop {
-                let mut waterfall = {
-                    let bands_info_guard = bands_info.lock().unwrap();
-                    let channels_info = &bands_info_guard.channels[..];
-                    Waterfall::new(
-                        device_id.clone(),
-                        stream_index,
-                        frequency,
-                        sample_rate,
-                        WATERFALL_TARGET_BIN_SIZE,
-                        STREAM_OUTPUT_PERIOD,
-                        STREAM_MIN_MAX_TIME_CONSTANT,
-                        STREAM_OFFSET_REJECT_TIME_CONSTANT,
-                        Instant::now(),
-                        channels_info,
-                    )
-                };
+                let mut last_t = Instant::now();
+
+                let (stream_sender, receiver) = mpsc::sync_channel(STREAM_MESSAGE_CAPACITY);
+                stream_creation_sender
+                    .send((
+                        StreamDescriptor {
+                            device_id: device_id.clone(),
+                            stream_index,
+                            frequency,
+                            sample_rate,
+                            start_time: last_t,
+                        },
+                        receiver,
+                    ))
+                    .unwrap();
+
+                let buffer_size = (sample_rate * STREAM_CHUNK_PERIOD).round() as usize;
+                info!(
+                    "Hardware channel parameters: sample_rate={sample_rate:?}, frequency={frequency:?}, bandwidth={bandwidth:?}, buffer_size={buffer_size:?}"
+                );
+                let mut buffer = vec![num_complex::Complex::<f32>::ZERO; buffer_size];
+                let mut buffer_ix = 0;
 
                 // Inner loop for data reading
                 'inner: loop {
@@ -907,21 +889,29 @@ impl HardwareDeviceRxStream {
                         }
                     }
 
-                    let stream_read =
-                        { stream.read(&mut [&mut buffer], (STREAM_READ_TIMEOUT * 1e6) as i64) };
+                    let stream_read = stream.read(
+                        &mut [&mut buffer[buffer_ix..]],
+                        (STREAM_READ_TIMEOUT * 1e6) as i64,
+                    );
+                    let t = Instant::now();
 
                     match stream_read {
                         Ok(len) => {
-                            let r = waterfall.process(
-                                &buffer[..len],
-                                Instant::now(),
-                                &stream_sender,
-                                &channel_sender,
-                            );
-
-                            if let Err(e) = r {
-                                warn!("Stream processing error: {e:?}");
-                                break 'inner; // Create a discontinuity in the stream messages
+                            buffer_ix += len;
+                            if buffer_ix >= buffer.len() {
+                                let iq_data = mem::replace(
+                                    &mut buffer,
+                                    vec![num_complex::Complex::<f32>::ZERO; buffer_size],
+                                );
+                                stream_sender
+                                    .send(StreamMessage {
+                                        iq_data,
+                                        start_time: last_t, // TODO get rid of start_time
+                                        end_time: t,
+                                    })
+                                    .unwrap();
+                                last_t = t;
+                                buffer_ix = 0;
                             }
                         }
                         Err(e) => {
@@ -948,15 +938,15 @@ pub struct HardwareDeviceTxStreamParams {
 }
 
 struct HardwareDeviceTxStream {
-    stream_index: usize,
-    device: soapysdr::Device,
+    _stream_index: usize,
+    _device: soapysdr::Device,
 }
 
 impl HardwareDeviceTxStream {
     fn new(stream_index: usize, device: soapysdr::Device) -> Self {
         Self {
-            stream_index,
-            device,
+            _stream_index: stream_index,
+            _device: device,
         }
     }
     fn update(&mut self, _params: &mut HardwareDeviceTxStreamParams) {}

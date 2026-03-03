@@ -187,7 +187,7 @@
       "naming": {
         "Frequency": 5
       },
-      "bandwidth": 150e3
+      "bandwidth": 200e3
     },
     {
       "name": "HAM",

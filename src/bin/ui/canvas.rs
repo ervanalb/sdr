@@ -502,14 +502,14 @@ pub fn ui(
             .duration_since(temp_random_instant)
             .as_secs_f64();
 
-        for channel in channels_gpu.draw_list() {
-            let descriptor = &channel.receive_channel_descriptor_ptr;
-            let center_frequency = descriptor.center_frequency;
-            let width = descriptor.bandwidth;
+        for (channel_id, channel) in channels_gpu.channels.iter() {
+            let center_frequency = channel.descriptor.center_frequency;
+            let width = channel.descriptor.bandwidth;
 
             // Calculate time positions relative to temp_random_instant
             let start_time = offset
                 - channel
+                    .descriptor
                     .start_time
                     .duration_since(temp_random_instant)
                     .as_secs_f64();
@@ -545,7 +545,7 @@ pub fn ui(
                 );
 
                 egui::Popup::context_menu(&response)
-                    .id(egui::Id::new(descriptor))
+                    .id(egui::Id::new(channel_id))
                     .show(|ui| {
                         if ui.button("Export IQ data...").clicked() {
                             ui.close();
@@ -553,8 +553,8 @@ pub fn ui(
                             // Sanitize the channel name for use as a filename
                             let default_name = format!(
                                 "{}_{}sps.raw",
-                                descriptor.name,
-                                descriptor.sample_rate.round()
+                                channel.descriptor.name,
+                                channel.descriptor.sample_rate.round()
                             )
                             .replace(" ", "_")
                             .replace("/", "_");
@@ -564,13 +564,15 @@ pub fn ui(
                                 .add_filter("Raw (complex f32 samples)", &["raw"])
                                 .save_file()
                             {
-                                if let Err(e) = channels_gpu.export_iq_data(descriptor, &path) {
+                                if let Err(e) =
+                                    channel.export_iq_data(&path)
+                                {
                                     eprintln!("Failed to export IQ data: {}", e);
                                 }
                             }
                         }
                     });
-                response.on_hover_text(descriptor.name.clone());
+                response.on_hover_text(channel.descriptor.name.clone());
             }
         }
     }

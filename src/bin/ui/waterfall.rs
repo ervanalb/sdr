@@ -205,12 +205,8 @@ impl WaterfallRenderer {
             }
 
             // Calculate frequency coordinates (X axis)
-            let x_left = (chunk.receive_stream_descriptor_ptr.frequency
-                - 0.5 * chunk.receive_stream_descriptor_ptr.sample_rate)
-                as f32;
-            let x_right = (chunk.receive_stream_descriptor_ptr.frequency
-                + 0.5 * chunk.receive_stream_descriptor_ptr.sample_rate)
-                as f32;
+            let x_left = chunk.freq_min as f32;
+            let x_right = chunk.freq_max as f32;
 
             // Calculate the V coordinate of one texel
             let color_range = [chunk.min, chunk.max];
