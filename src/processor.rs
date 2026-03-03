@@ -7,17 +7,17 @@ use std::time::Instant;
 use num_complex::Complex;
 
 use crate::band_info::{ChannelGroupInfo, ChannelInfo};
-use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker, hann_window};
+use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, hann_window};
 
 new_key_type! {pub struct ChannelId; }
 
-pub struct Waterfall {
-    rechunker: Option<Rechunker<Complex<f32>>>,
+pub struct Processor {
+    chunk_size: usize,
     overlap_expand: OverlapExpand<Complex<f32>>,
     hann_window: Vec<f32>,
     fft: Fft,
     counter: u32,
-    output_period: f64,
+    period: f64,
     pub spectrum: Vec<f32>,
     pub min: f32,
     pub max: f32,
@@ -59,7 +59,7 @@ pub struct ChannelDescriptor {
     pub start_time: Instant,
 }
 
-impl Waterfall {
+impl Processor {
     pub fn new(
         frequency: f64,
         sample_rate: f64,
@@ -78,7 +78,6 @@ impl Waterfall {
         // but which contains an integer number of FFTs
         let chunk_size =
             (sample_rate * target_output_period / fft_size as f64).round() as usize * fft_size;
-        let rechunker = Rechunker::new(chunk_size);
 
         let output_period = chunk_size as f64 / sample_rate;
 
@@ -120,12 +119,12 @@ impl Waterfall {
         }
 
         Self {
-            rechunker: Some(rechunker),
+            chunk_size,
             overlap_expand,
             hann_window: hann_window(fft_size),
             fft,
             counter: 0,
-            output_period,
+            period: output_period,
             spectrum: vec![0.; fft_size],
             min: std::f32::NAN,
             max: std::f32::NAN,
@@ -142,16 +141,16 @@ impl Waterfall {
         channel_group: &mut Option<ChannelGroup>,
         channel_info: &ChannelInfo,
         channel_group_info: &ChannelGroupInfo,
-        waterfall_center_frequency: f64,
+        stream_center_frequency: f64,
         sample_rate: f64,
         fft: &Fft,
         time: Instant,
     ) -> Option<Channel> {
         let center_frequency = channel_info.center_frequency;
         let left_freq =
-            center_frequency - waterfall_center_frequency - 0.5 * channel_group_info.bandwidth;
+            center_frequency - stream_center_frequency - 0.5 * channel_group_info.bandwidth;
         let right_freq =
-            center_frequency - waterfall_center_frequency + 0.5 * channel_group_info.bandwidth;
+            center_frequency - stream_center_frequency + 0.5 * channel_group_info.bandwidth;
 
         if left_freq < -0.5 * sample_rate || right_freq > 0.5 * sample_rate {
             return None;
@@ -167,8 +166,8 @@ impl Waterfall {
             ChannelGroup { ifft }
         });
 
-        let center_bin = fft
-            .freq2bin((channel_info.center_frequency - waterfall_center_frequency) / sample_rate);
+        let center_bin =
+            fft.freq2bin((channel_info.center_frequency - stream_center_frequency) / sample_rate);
         // If left bin < 0, skip this channel
         let left_bin = center_bin.checked_sub(channel_group.ifft.dc_bin())?;
         let right_bin = left_bin + channel_group.ifft.size();
@@ -178,7 +177,7 @@ impl Waterfall {
         }
         let bins = left_bin..right_bin;
 
-        let tuning_error = fft.bin2freq(center_bin) * sample_rate + waterfall_center_frequency
+        let tuning_error = fft.bin2freq(center_bin) * sample_rate + stream_center_frequency
             - channel_info.center_frequency;
 
         // Phasor to correct the phase shift caused by overlapping chunks.
@@ -209,43 +208,15 @@ impl Waterfall {
     }
 
     pub fn period(&self) -> f64 {
-        self.output_period
+        self.period
     }
 
     pub fn chunk_size(&self) -> usize {
-        self.rechunker.as_ref().unwrap().chunk_size()
+        self.chunk_size
     }
 
-    pub fn process(
-        &mut self,
-        samples: &[Complex<f32>],
-        time: Instant,
-        mut emit: impl FnMut(&mut Self),
-    ) -> Result<(), String> {
-        let mut rechunker = self.rechunker.take().unwrap(); // XXX fix lifetime issues requiring this
-        let mut result = Ok(());
-        rechunker.process(samples, |samples| {
-            if result.is_err() {
-                return;
-            }
-            match self.process_chunk(samples, time) {
-                Ok(()) => {
-                    emit(self);
-                }
-                Err(e) => {
-                    result = Err(e);
-                }
-            }
-        });
-        self.rechunker = Some(rechunker);
-        result
-    }
-
-    pub fn process_chunk(
-        &mut self,
-        samples: Vec<Complex<f32>>,
-        time: Instant,
-    ) -> Result<(), String> {
+    pub fn process(&mut self, samples: &[Complex<f32>], time: Instant) {
+        assert_eq!(samples.len(), self.chunk_size);
         // TODO custom error type
 
         let mut offset_accumulator = Complex::<f32>::ZERO;
@@ -254,44 +225,40 @@ impl Waterfall {
         // Process incoming data into overlapping chunks
         let mut buffer = self.overlap_expand.process(&samples);
 
-        let mut chunks = buffer.chunks_exact_mut(self.fft.size());
-        let chunk_count = chunks.len();
-        while let Some(chunk) = chunks.next() {
+        let fft_count = self.chunk_size / self.fft.size();
+        for one_fft in buffer.chunks_exact_mut(self.fft.size()) {
             // Apply Hann window
-            for (sample, win) in chunk.iter_mut().zip(self.hann_window.iter()) {
+            for (sample, win) in one_fft.iter_mut().zip(self.hann_window.iter()) {
                 *sample *= win;
             }
         }
-        assert!(chunks.into_remainder().is_empty());
 
         // FFT each chunk
         self.fft.process_inplace(&mut buffer);
 
         // Apply offset correction
-        let mut chunks = buffer.chunks_exact_mut(self.fft.size());
-        while let Some(chunk) = chunks.next() {
+        for one_fft in buffer.chunks_exact_mut(self.fft.size()) {
             offset_accumulator += (1. / 3.)
-                * (-chunk[self.fft.dc_bin() - 1] + 2. * chunk[self.fft.dc_bin()]
-                    - chunk[self.fft.dc_bin() + 1]);
-            chunk[self.fft.dc_bin()] -= self.offset;
-            chunk[self.fft.dc_bin() - 1] += 0.5 * self.offset;
-            chunk[self.fft.dc_bin() + 1] += 0.5 * self.offset;
+                * (-one_fft[self.fft.dc_bin() - 1] + 2. * one_fft[self.fft.dc_bin()]
+                    - one_fft[self.fft.dc_bin() + 1]);
+            one_fft[self.fft.dc_bin()] -= self.offset;
+            one_fft[self.fft.dc_bin() - 1] += 0.5 * self.offset;
+            one_fft[self.fft.dc_bin() + 1] += 0.5 * self.offset;
         }
-        assert!(chunks.into_remainder().is_empty());
 
         // Accumulate power, for waterfall
-        for chunk in buffer.chunks_exact(self.fft.size()) {
-            for (&sample, spectrum_sample) in chunk.iter().zip(self.spectrum.iter_mut()) {
+        for one_fft in buffer.chunks_exact(self.fft.size()) {
+            for (&sample, spectrum_sample) in one_fft.iter().zip(self.spectrum.iter_mut()) {
                 *spectrum_sample += sample.re * sample.re + sample.im * sample.im;
             }
         }
 
-        let inv_chunk_count = 1.0 / (chunk_count as f32);
+        let inv_fft_count = 1.0 / (fft_count as f32);
         for sample in self.spectrum.iter_mut() {
-            *sample *= inv_chunk_count;
+            *sample *= inv_fft_count;
         }
 
-        let new_offset = offset_accumulator * inv_chunk_count;
+        let new_offset = offset_accumulator * inv_fft_count;
 
         if self.offset_reject_alpha.is_finite() {
             self.offset = self.offset + self.offset_reject_alpha * (new_offset - self.offset);
@@ -327,47 +294,40 @@ impl Waterfall {
 
         // Drive each channel
         let vec_of_channel_values: Vec<_> = self.channels.values_mut().collect();
-        vec_of_channel_values
-            .into_par_iter()
-            .map(|channel| {
-                // Aggregate per-channel FFT data in this thread
-                let chunk_slice_len = channel.bins.end - channel.bins.start;
-                let mut fft_buffer = Vec::with_capacity(chunk_slice_len * chunk_count);
-                let mut counter = self.counter;
-                for chunk in buffer.chunks_exact(self.fft.size()) {
-                    // This is a hot loop
-                    let slice = &chunk[channel.bins.clone()];
-                    let start = fft_buffer.len();
-                    fft_buffer.extend_from_slice(slice);
+        vec_of_channel_values.into_par_iter().for_each(|channel| {
+            // Aggregate per-channel FFT data in this thread
+            let chunk_slice_len = channel.bins.end - channel.bins.start;
+            let mut fft_buffer = Vec::with_capacity(chunk_slice_len * fft_count);
+            let mut counter = self.counter;
+            for one_fft in buffer.chunks_exact(self.fft.size()) {
+                // This is a hot loop
+                let slice = &one_fft[channel.bins.clone()];
+                let start = fft_buffer.len();
+                fft_buffer.extend_from_slice(slice);
 
-                    // Apply phase correction due to overlap
-                    let phasor = channel.phasors[counter as usize];
-                    for sample in fft_buffer[start..start + slice.len()].iter_mut() {
-                        *sample *= phasor;
-                    }
-                    counter = (counter + 1) % 2;
+                // Apply phase correction due to overlap
+                let phasor = channel.phasors[counter as usize];
+                for sample in fft_buffer[start..start + slice.len()].iter_mut() {
+                    *sample *= phasor;
                 }
+                counter = (counter + 1) % 2;
+            }
 
-                // Process this channel
-                channel.process(fft_buffer)
-            })
-            .collect::<Result<(), _>>()?;
+            // Process this channel
+            channel.process(fft_buffer)
+        });
         self.channel_last_t = time;
 
-        self.counter = (self.counter + (chunk_count % 2) as u32) % 2;
+        self.counter = (self.counter + (fft_count % 2) as u32) % 2;
         self.stream_last_t = time;
-
-        Ok(())
     }
 }
 
 impl Channel {
-    // Called every period, possibly from a different thread
-    fn process(&mut self, mut fft_buffer: Vec<Complex<f32>>) -> Result<(), String> {
+    fn process(&mut self, mut fft_buffer: Vec<Complex<f32>>) {
         self.ifft.process_inplace(&mut fft_buffer);
         let iq_buffer = self.overlap_reduce.process(&fft_buffer);
         self.iq_data = iq_buffer;
-        Ok(())
     }
 }
 
@@ -409,7 +369,7 @@ mod tests {
 
         let time = Instant::now();
 
-        let mut waterfall = Waterfall::new(
+        let mut processor = Processor::new(
             center_frequency,
             sample_rate,
             target_bin_size,
@@ -420,13 +380,14 @@ mod tests {
             &channel_group_info,
         );
 
-        // Get the chunk size from the rechunker
-        let chunk_size = waterfall.rechunker.as_ref().unwrap().chunk_size();
-        println!("Chunk size: {}", chunk_size);
+        // Get the chunk size
+        let chunk_size = processor.chunk_size();
+        let chunk_count = 40;
+        println!("Chunk size: {}, chunk count: {}", chunk_size, chunk_count);
 
         // Generate signal: e^(j*w*t) where w = channel_center_frequency * 2π
         // and t = sample_index / sample_rate
-        let samples: Vec<Complex<f32>> = (0..chunk_size * 40)
+        let samples: Vec<Complex<f32>> = (0..chunk_size * chunk_count)
             .map(|i| {
                 let t = i as f64 / sample_rate;
                 let omega = channel_center_frequency * std::f64::consts::TAU;
@@ -434,24 +395,21 @@ mod tests {
             })
             .collect();
 
-        // Process the chunks
+        // Process the data in chunks
         let mut combined_channel_data = vec![];
-        let mut chunk_count = 0;
-        waterfall
-            .process(&samples, time, |chunk_result| {
-                let mut channels_iq_data = chunk_result.channels.values().filter_map(|channel| {
-                    (channel.descriptor.center_frequency == channel_center_frequency)
-                        .then(|| &channel.iq_data)
-                });
-                let iq_data = channels_iq_data.next().expect("Could not find channel!");
-                assert!(
-                    channels_iq_data.next().is_none(),
-                    "Found multiple channels!"
-                );
-                combined_channel_data.extend_from_slice(iq_data);
-                chunk_count += 1;
-            })
-            .unwrap();
+        for chunk in samples.chunks_exact(chunk_size) {
+            processor.process(chunk, time);
+            let mut channels_iq_data = processor.channels.values().filter_map(|channel| {
+                (channel.descriptor.center_frequency == channel_center_frequency)
+                    .then(|| &channel.iq_data)
+            });
+            let iq_data = channels_iq_data.next().expect("Could not find channel!");
+            assert!(
+                channels_iq_data.next().is_none(),
+                "Found multiple channels!"
+            );
+            combined_channel_data.extend_from_slice(iq_data);
+        }
 
         if combined_channel_data.is_empty() {
             println!("No channel output received");
@@ -468,12 +426,11 @@ mod tests {
                 .collect();
             std::fs::write(channel_output_path, channel_bytes)
                 .expect("Failed to write channel output");
-            println!("Channel output saved to {}", channel_output_path);
             println!(
-                "Total channel IQ data length: {} samples from {} chunks",
+                "Total channel IQ data length: {} samples",
                 combined_channel_data.len(),
-                chunk_count
             );
+            println!("Channel output saved to {}", channel_output_path);
         }
     }
 }

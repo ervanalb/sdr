@@ -1,4 +1,4 @@
-use crate::hardware::{StreamDescriptor, StreamId};
+use crate::hardware::{ReceiveStreamDescriptor, ReceiveStreamId};
 use std::collections::BTreeMap;
 use std::time::Instant;
 use wgpu::{
@@ -9,7 +9,7 @@ use wgpu::{
 const TEXTURE_HEIGHT: u32 = 1024;
 
 pub struct WaterfallGpu {
-    texture_groups: BTreeMap<StreamId, TextureGroup>,
+    texture_groups: BTreeMap<ReceiveStreamId, TextureGroup>,
     blank_texture: Texture,
 }
 
@@ -38,10 +38,9 @@ impl WaterfallGpu {
 
     pub fn add_row(
         &mut self,
-        stream_id: StreamId,
-        descriptor: &StreamDescriptor,
-        start_time: Instant,
-        end_time: Instant,
+        stream_id: ReceiveStreamId,
+        descriptor: &ReceiveStreamDescriptor,
+        time: Instant,
         spectrum: &[f32],
         min: f32,
         max: f32,
@@ -56,17 +55,17 @@ impl WaterfallGpu {
                 active_texture: ActiveTexture::new(
                     device,
                     spectrum,
-                    start_time,
+                    descriptor.start_time,
                     self.blank_texture.clone(),
                 ),
                 finished_textures: vec![],
                 min,
                 max,
             });
-        group.add_row(device, queue, spectrum, min, max, end_time);
+        group.add_row(device, queue, spectrum, min, max, time);
     }
 
-    pub fn close_stream(&mut self, stream: StreamId) {
+    pub fn close_stream(&mut self, stream: ReceiveStreamId) {
         // XXX TODO
     }
 
@@ -225,7 +224,7 @@ impl ActiveTexture {
 
 #[derive(Debug)]
 struct TextureGroup {
-    descriptor: StreamDescriptor,
+    descriptor: ReceiveStreamDescriptor,
     active_texture: ActiveTexture,
     finished_textures: Vec<TextureInfo>,
     min: f32,
@@ -243,7 +242,7 @@ impl TextureGroup {
         end_time: Instant,
     ) {
         if self.active_texture.current_row >= TEXTURE_HEIGHT as usize {
-            self.swap_active_texture(device, queue, spectrum, end_time);
+            self.swap_active_texture(device, queue, spectrum);
         }
 
         self.active_texture.add_row(queue, spectrum);
@@ -271,7 +270,6 @@ impl TextureGroup {
         device: &Device,
         queue: &Queue,
         spectrum: &[f32],
-        end_time: Instant,
     ) {
         if self.active_texture.current_row < TEXTURE_HEIGHT as usize {
             // If partial, copy this texture into an appropriately sized one
@@ -328,10 +326,11 @@ impl TextureGroup {
         }
 
         // Create a new active texture
+        let prev_end_time = self.active_texture.end_time;
         let prev_texture = self.active_texture.texture.clone();
         let old_active_texture = std::mem::replace(
             &mut self.active_texture,
-            ActiveTexture::new(device, spectrum, end_time, prev_texture),
+            ActiveTexture::new(device, spectrum, prev_end_time, prev_texture),
         );
         let next_texture = self.active_texture.texture.clone();
 

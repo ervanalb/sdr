@@ -4,10 +4,13 @@ use num_complex::Complex;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use crate::waterfall::{Channel, ChannelDescriptor, ChannelId};
+use crate::{
+    hardware::ReceiveStreamId,
+    processor::{Channel, ChannelDescriptor, ChannelId},
+};
 
 pub struct ChannelsGpu {
-    pub channels: BTreeMap<ChannelId, ChannelHistory>,
+    pub channels: BTreeMap<(ReceiveStreamId, ChannelId), ChannelHistory>,
 }
 
 impl ChannelsGpu {
@@ -17,16 +20,22 @@ impl ChannelsGpu {
         }
     }
 
-    pub fn add_chunk(&mut self, channel_id: ChannelId, channel: &Channel, end_time: Instant) {
+    pub fn add_chunk(
+        &mut self,
+        stream_id: ReceiveStreamId,
+        channel_id: ChannelId,
+        channel: &Channel,
+        end_time: Instant,
+    ) {
         let history = self
             .channels
-            .entry(channel_id)
+            .entry((stream_id, channel_id))
             .or_insert_with(|| ChannelHistory::new(channel.descriptor.clone()));
 
         history.add_chunk(&channel.iq_data, end_time);
     }
 
-    pub fn close_channel(&mut self, channel: ChannelId) {
+    pub fn close_channel(&mut self, stream_id: ReceiveStreamId, channel_id: ChannelId) {
         // XXX TODO
     }
 

@@ -1,4 +1,4 @@
-use std::{mem, ops::AddAssign, sync::Arc};
+use std::{convert::Infallible, mem, ops::AddAssign, sync::Arc};
 
 use num_complex::Complex;
 
@@ -20,7 +20,19 @@ impl<T: Clone> Rechunker<T> {
         self.chunk_size
     }
 
-    pub fn process(&mut self, mut data: &[T], mut emit: impl FnMut(Vec<T>)) {
+    pub fn process(&mut self, data: &[T], mut emit: impl FnMut(Vec<T>)) {
+        let Ok(()) = self.process_fallible::<Infallible>(data, |chunk| {
+            emit(chunk);
+            Ok(())
+        });
+    }
+
+    pub fn process_fallible<E>(
+        &mut self,
+        mut data: &[T],
+        mut emit: impl FnMut(Vec<T>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut result = Ok(());
         while !data.is_empty() {
             // Fill buffer until full or we run out of samples
             let space_available = (self.chunk_size - self.buffer.len()).min(data.len());
@@ -29,9 +41,12 @@ impl<T: Clone> Rechunker<T> {
             data = &data[space_available..];
             if self.buffer.len() == self.chunk_size {
                 let output = mem::replace(&mut self.buffer, Vec::with_capacity(self.chunk_size));
-                emit(output);
+                if let Err(e) = emit(output) {
+                    result = Err(e);
+                }
             }
         }
+        result
     }
 
     pub fn process_iter(&mut self, data: impl Iterator<Item = T>, mut emit: impl FnMut(Vec<T>)) {
@@ -167,7 +182,8 @@ impl Fft {
     }
 
     pub fn process_inplace(&mut self, data: &mut [Complex<f32>]) {
-        self.fft_plan.process_with_scratch(data, &mut self.fft_scratch);
+        self.fft_plan
+            .process_with_scratch(data, &mut self.fft_scratch);
         let mut chunks = data.chunks_exact_mut(self.size());
         while let Some(chunk) = chunks.next() {
             chunk.rotate_left(self.size() / 2);
@@ -199,7 +215,11 @@ impl Ifft {
         let mut planner = rustfft::FftPlanner::new();
         let fft_plan = planner.plan_fft_inverse(fft_size);
         let fft_scratch = vec![Default::default(); fft_plan.get_inplace_scratch_len()];
-        Ifft { fft_plan, fft_size, fft_scratch }
+        Ifft {
+            fft_plan,
+            fft_size,
+            fft_scratch,
+        }
     }
 
     pub fn dc_bin(&self) -> usize {
@@ -213,7 +233,8 @@ impl Ifft {
         }
         assert!(chunks.into_remainder().is_empty());
 
-        self.fft_plan.process_with_scratch(data, &mut self.fft_scratch);
+        self.fft_plan
+            .process_with_scratch(data, &mut self.fft_scratch);
     }
 
     pub fn size(&self) -> usize {
