@@ -1,6 +1,5 @@
-use log::{info, warn};
+use log::{error, info, warn};
 use num_complex::Complex;
-use slotmap::{SlotMap, new_key_type};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::mpsc::TryRecvError;
@@ -15,8 +14,6 @@ const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
 const STREAM_CHUNK_PERIOD: f64 = 0.0005; // 200 per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
-
-new_key_type! {pub struct ReceiveStreamId; }
 
 fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
     // Snap to the nearest discrete step if stepsize is non-zero
@@ -57,31 +54,46 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
     snap_to_range(closest_range, value)
 }
 
-pub struct ReceiveStream {
-    pub descriptor: ReceiveStreamDescriptor,
+pub struct ReceiveStream<H> {
+    pub handler: H,
     receiver: Receiver<ReceiveStreamMessage>,
-    connected: bool,
 }
 
-impl ReceiveStream {
-    fn new(descriptor: ReceiveStreamDescriptor, receiver: Receiver<ReceiveStreamMessage>) -> Self {
-        ReceiveStream {
-            descriptor,
-            receiver,
-            connected: true,
-        }
+impl<H: StreamHandler> ReceiveStream<H> {
+    fn new(handler: H, receiver: Receiver<ReceiveStreamMessage>) -> Self {
+        ReceiveStream { handler, receiver }
     }
 
-    pub fn try_recv(&mut self) -> Option<ReceiveStreamMessage> {
-        match self.receiver.try_recv() {
-            Ok(msg) => Some(msg),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                self.connected = false;
-                None
+    fn process(&mut self) -> bool {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(msg) => match self.handler.process(msg) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        error!("Stream processing error: {:?}", e);
+                        return false; // Drop this stream
+                    }
+                },
+                Err(TryRecvError::Empty) => {
+                    return true; // Stream is still connected, keep it
+                }
+                Err(TryRecvError::Disconnected) => {
+                    return false; // Stream is disconnected, remove it
+                }
             }
         }
     }
+
+    //pub fn try_recv(&mut self) -> Option<ReceiveStreamMessage> {
+    //    match self.receiver.try_recv() {
+    //        Ok(msg) => Some(msg),
+    //        Err(TryRecvError::Empty) => None,
+    //        Err(TryRecvError::Disconnected) => {
+    //            self.connected = false;
+    //            None
+    //        }
+    //    }
+    //}
 }
 
 #[derive(Clone, Debug)]
@@ -117,24 +129,36 @@ impl Default for HardwareParams {
     }
 }
 
-pub struct Hardware {
+pub trait HardwareHandler {
+    type StreamHandler: StreamHandler;
+
+    fn new_stream_handler(&mut self, descriptor: ReceiveStreamDescriptor) -> Self::StreamHandler;
+}
+
+pub trait StreamHandler {
+    fn process(&mut self, msg: ReceiveStreamMessage) -> Result<(), String>;
+}
+
+pub struct Hardware<H: HardwareHandler> {
+    handler: H,
     devices: HashMap<HardwareDeviceId, HardwareDevice>,
     receive_stream_creation_sender:
         SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
     receive_stream_creation_receiver:
         Receiver<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
-    pub receive_streams: SlotMap<ReceiveStreamId, ReceiveStream>,
+    pub receive_streams: Vec<ReceiveStream<<H as HardwareHandler>::StreamHandler>>,
 }
 
-impl Hardware {
-    pub fn new() -> Self {
+impl<H: HardwareHandler> Hardware<H> {
+    pub fn new(handler: H) -> Self {
         let (receive_stream_creation_sender, receive_stream_creation_receiver) =
             mpsc::sync_channel(STREAM_CREATION_MESSAGE_CAPACITY);
         Hardware {
+            handler,
             devices: Default::default(),
             receive_stream_creation_sender,
             receive_stream_creation_receiver,
-            receive_streams: SlotMap::with_key(),
+            receive_streams: vec![],
         }
     }
 
@@ -180,12 +204,14 @@ impl Hardware {
 
         // Create new streams
         while let Ok((descriptor, receiver)) = self.receive_stream_creation_receiver.try_recv() {
+            let stream_handler = self.handler.new_stream_handler(descriptor);
             self.receive_streams
-                .insert(ReceiveStream::new(descriptor, receiver));
+                .push(ReceiveStream::new(stream_handler, receiver));
         }
 
-        // Remove disconnected streams
-        self.receive_streams.retain(|_k, stream| stream.connected);
+        // Process all streams, and remove disconnected ones
+        // TODO parallelize with rayon??
+        self.receive_streams.retain_mut(|stream| stream.process());
     }
 
     pub fn shutdown(mut self) {

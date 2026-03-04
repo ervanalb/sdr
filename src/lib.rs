@@ -5,3 +5,4 @@ pub mod format;
 pub mod hardware;
 pub mod processor;
 pub mod waterfall_gpu;
+mod id_factory;

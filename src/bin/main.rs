@@ -1,23 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use num_complex::Complex;
 use sdr::band_info::BandsInfo;
 use sdr::channels_gpu::ChannelsGpu;
-use sdr::dsp::Rechunker;
-use sdr::hardware::{Hardware, HardwareParams, ReceiveStreamId};
-use sdr::processor::Processor;
+use sdr::hardware::{Hardware, HardwareParams};
+use sdr::processor::{Processor, StreamChunkProcessor};
 use sdr::waterfall_gpu::WaterfallGpu;
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod ui;
 
-const STREAM_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
-const STREAM_TARGET_OUTPUT_PERIOD: f64 = 0.01; // 100 chunks per second
-const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
-const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
 //const CHANNEL_MESSAGE_CAPACITY: usize = 32768;
 
 const CANVAS_DURATION: f64 = 120.;
@@ -55,7 +48,7 @@ fn main() -> eframe::Result<()> {
 }
 
 struct SdrApp {
-    hardware: Option<Hardware>,
+    hardware: Option<Hardware<Processor>>,
     hardware_params: HardwareParams,
     viewport_state: ui::canvas::Viewport,
     waterfall_gpu: WaterfallGpu,
@@ -64,7 +57,6 @@ struct SdrApp {
     prev_reference_time: Instant,
     temp_random_instant: Instant,
     bands_info: Arc<Mutex<BandsInfo>>,
-    streams: BTreeMap<ReceiveStreamId, (Rechunker<Complex<f32>>, Processor)>,
 }
 
 impl SdrApp {
@@ -79,8 +71,11 @@ impl SdrApp {
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
         let bands_info = Arc::new(Mutex::new(bands_info));
 
+        let processor = Processor::new(bands_info.clone());
+        let hardware = Hardware::new(processor);
+
         Self {
-            hardware: Some(Hardware::new()),
+            hardware: Some(hardware),
             hardware_params: HardwareParams::default(),
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
@@ -89,7 +84,6 @@ impl SdrApp {
             prev_reference_time: now,
             temp_random_instant: now,
             bands_info,
-            streams: BTreeMap::new(),
         }
     }
 }
@@ -124,32 +118,17 @@ impl eframe::App for SdrApp {
         // TODO: consider moving rechunker & processor into Hardware
 
         // Remove / close any streams that no longer exist
-        self.streams.retain(|&k, _| {
-            if !hardware.receive_streams.contains_key(k) {
-                self.waterfall_gpu.close_stream(k);
-                return false;
-            }
-            true
-        });
+        // XXX FIX ME
+        //self.streams.retain(|&k, _| {
+        //    if !hardware.receive_streams.contains_key(k) {
+        //        self.waterfall_gpu.close_stream(k);
+        //        return false;
+        //    }
+        //    true
+        //});
 
         // Process all streams
         for (stream_id, stream) in hardware.receive_streams.iter_mut() {
-            let (rechunker, processor) = self.streams.entry(stream_id).or_insert_with(|| {
-                let channels = { &self.bands_info.lock().unwrap().channels };
-                let processor = Processor::new(
-                    stream.descriptor.frequency,
-                    stream.descriptor.sample_rate,
-                    STREAM_TARGET_BIN_SIZE,
-                    STREAM_TARGET_OUTPUT_PERIOD,
-                    STREAM_MIN_MAX_TIME_CONSTANT,
-                    STREAM_OFFSET_REJECT_TIME_CONSTANT,
-                    stream.descriptor.start_time,
-                    channels,
-                );
-                let rechunker = Rechunker::new(processor.chunk_size());
-                (rechunker, processor)
-            });
-
             while let Some(message) = stream.try_recv() {
                 rechunker.process(&message.iq_data, |chunk| {
                     processor.process(&chunk, message.time);
