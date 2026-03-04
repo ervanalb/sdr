@@ -1,5 +1,6 @@
 use log::{error, info, warn};
 use num_complex::Complex;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::mpsc::TryRecvError;
@@ -54,8 +55,8 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
     snap_to_range(closest_range, value)
 }
 
-pub struct ReceiveStream<H> {
-    pub handler: H,
+struct ReceiveStream<H> {
+    handler: H,
     receiver: Receiver<ReceiveStreamMessage>,
 }
 
@@ -83,17 +84,6 @@ impl<H: StreamHandler> ReceiveStream<H> {
             }
         }
     }
-
-    //pub fn try_recv(&mut self) -> Option<ReceiveStreamMessage> {
-    //    match self.receiver.try_recv() {
-    //        Ok(msg) => Some(msg),
-    //        Err(TryRecvError::Empty) => None,
-    //        Err(TryRecvError::Disconnected) => {
-    //            self.connected = false;
-    //            None
-    //        }
-    //    }
-    //}
 }
 
 #[derive(Clone, Debug)]
@@ -132,7 +122,7 @@ impl Default for HardwareParams {
 pub trait HardwareHandler {
     type StreamHandler: StreamHandler;
 
-    fn new_stream_handler(&mut self, descriptor: ReceiveStreamDescriptor) -> Self::StreamHandler;
+    fn new_stream_handler(&mut self, descriptor: &ReceiveStreamDescriptor) -> Self::StreamHandler;
 }
 
 pub trait StreamHandler {
@@ -140,16 +130,16 @@ pub trait StreamHandler {
 }
 
 pub struct Hardware<H: HardwareHandler> {
-    handler: H,
+    pub handler: H,
     devices: HashMap<HardwareDeviceId, HardwareDevice>,
     receive_stream_creation_sender:
         SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
     receive_stream_creation_receiver:
         Receiver<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
-    pub receive_streams: Vec<ReceiveStream<<H as HardwareHandler>::StreamHandler>>,
+    pub receive_streams: Vec<ReceiveStream<H::StreamHandler>>,
 }
 
-impl<H: HardwareHandler> Hardware<H> {
+impl<H: HardwareHandler<StreamHandler: Send>> Hardware<H> {
     pub fn new(handler: H) -> Self {
         let (receive_stream_creation_sender, receive_stream_creation_receiver) =
             mpsc::sync_channel(STREAM_CREATION_MESSAGE_CAPACITY);
@@ -204,14 +194,20 @@ impl<H: HardwareHandler> Hardware<H> {
 
         // Create new streams
         while let Ok((descriptor, receiver)) = self.receive_stream_creation_receiver.try_recv() {
-            let stream_handler = self.handler.new_stream_handler(descriptor);
+            let stream_handler = self.handler.new_stream_handler(&descriptor);
             self.receive_streams
                 .push(ReceiveStream::new(stream_handler, receiver));
         }
 
         // Process all streams, and remove disconnected ones
-        // TODO parallelize with rayon??
-        self.receive_streams.retain_mut(|stream| stream.process());
+        // This is a somewhat convoluted way to achieve a parallel .retain() operation.
+        let empty_vec = Vec::with_capacity(self.receive_streams.len());
+        let old_receive_streams = mem::replace(&mut self.receive_streams, empty_vec);
+        self.receive_streams.par_extend(
+            old_receive_streams
+                .into_par_iter()
+                .filter_map(|mut stream| stream.process().then_some(stream)),
+        );
     }
 
     pub fn shutdown(mut self) {

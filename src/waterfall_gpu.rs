@@ -1,4 +1,4 @@
-use crate::hardware::{ReceiveStreamDescriptor, ReceiveStreamId};
+use crate::hardware::ReceiveStreamDescriptor;
 use std::collections::BTreeMap;
 use std::time::Instant;
 use wgpu::{
@@ -265,12 +265,7 @@ impl TextureGroup {
         any_remain || self.active_texture.end_time > time
     }
 
-    fn swap_active_texture(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        spectrum: &[f32],
-    ) {
+    fn swap_active_texture(&mut self, device: &Device, queue: &Queue, spectrum: &[f32]) {
         if self.active_texture.current_row < TEXTURE_HEIGHT as usize {
             // If partial, copy this texture into an appropriately sized one
             // to free up space

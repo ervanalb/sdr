@@ -12,10 +12,6 @@ use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker, hann_window
 use crate::hardware::{
     HardwareHandler, ReceiveStreamDescriptor, ReceiveStreamMessage, StreamHandler,
 };
-use crate::id_factory::IdFactory;
-
-pub type ReceiveStreamId = usize;
-pub type ChannelId = usize;
 
 const STREAM_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
 const STREAM_TARGET_OUTPUT_PERIOD: f64 = 0.01; // 100 chunks per second
@@ -23,59 +19,63 @@ const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
 
 pub trait ProcessedDataHandler {
-    fn add_waterfall_row(
-        &mut self,
-        stream_id: ReceiveStreamId,
-        time: Instant,
-        spectrum: &[f32],
-        min: f32,
-        max: f32,
-    );
+    type ProcessedStreamHandler: ProcessedStreamHandler;
 
-    fn add_channel_iq(
+    fn new_stream_handler(
         &mut self,
-        stream_id: ReceiveStreamId,
-        channel_id: ChannelId,
-        time: Instant,
-        iq_data: &[f32],
-    );
+        descriptor: &ReceiveStreamDescriptor,
+    ) -> Self::ProcessedStreamHandler;
 }
 
-pub struct Processor<H: ProcessedDataHandler> {
-    bands_info: Arc<Mutex<BandsInfo>>, // TODO maybe Rc<RefCell> is sufficient?
+pub trait ProcessedStreamHandler {
+    type ProcessedChannelHandler: ProcessedChannelHandler;
+
+    fn add_waterfall_row(&mut self, time: Instant, spectrum: &[f32], min: f32, max: f32);
+
+    fn new_channel_handler(
+        &mut self,
+        descriptor: &ChannelDescriptor,
+    ) -> Self::ProcessedChannelHandler;
+}
+
+pub trait ProcessedChannelHandler {
+    fn add_channel_iq(&mut self, time: Instant, iq_data: &[Complex<f32>]);
+}
+
+pub struct Processor<H> {
     pub handler: H,
-    receive_stream_id_factory: IdFactory,
+    bands_info: Arc<Mutex<BandsInfo>>, // TODO maybe Rc<RefCell> is sufficient?
 }
 
-impl<H: ProcessedDataHandler> Processor<H> {
+impl<H> Processor<H> {
     pub fn new(bands_info: Arc<Mutex<BandsInfo>>, handler: H) -> Processor<H> {
         Processor {
-            bands_info,
             handler,
-            receive_stream_id_factory: IdFactory::default(),
+            bands_info,
         }
     }
 }
 
-impl<H: ProcessedDataHandler + Clone> HardwareHandler for Processor<H> {
+impl<
+    H: ProcessedDataHandler<
+        ProcessedStreamHandler: ProcessedStreamHandler<ProcessedChannelHandler: Send>,
+    >,
+> HardwareHandler for Processor<H>
+{
     type StreamHandler = (
-        ReceiveStreamId,
         Rechunker<Complex<f32>>,
-        StreamChunkProcessor,
-        H,
+        StreamChunkProcessor<H::ProcessedStreamHandler>,
     );
 
     fn new_stream_handler(
         &mut self,
-        descriptor: ReceiveStreamDescriptor,
+        descriptor: &ReceiveStreamDescriptor,
     ) -> (
-        ReceiveStreamId,
         Rechunker<Complex<f32>>,
-        StreamChunkProcessor,
-        H,
+        StreamChunkProcessor<H::ProcessedStreamHandler>,
     ) {
-        let stream_id = self.receive_stream_id_factory.create();
         let channels = { &self.bands_info.lock().unwrap().channels };
+        let processed_stream_handler = self.handler.new_stream_handler(descriptor);
         let processor = StreamChunkProcessor::new(
             descriptor.frequency,
             descriptor.sample_rate,
@@ -85,17 +85,13 @@ impl<H: ProcessedDataHandler + Clone> HardwareHandler for Processor<H> {
             STREAM_OFFSET_REJECT_TIME_CONSTANT,
             descriptor.start_time,
             channels,
+            processed_stream_handler,
         );
-        (
-            stream_id,
-            Rechunker::new(processor.chunk_size),
-            processor,
-            self.handler.clone(),
-        )
+        (Rechunker::new(processor.chunk_size), processor)
     }
 }
 
-pub struct StreamChunkProcessor {
+pub struct StreamChunkProcessor<H: ProcessedStreamHandler> {
     chunk_size: usize,
     overlap_expand: OverlapExpand<Complex<f32>>,
     hann_window: Vec<f32>,
@@ -108,24 +104,22 @@ pub struct StreamChunkProcessor {
     min_max_alpha: f32,
     offset: Complex<f32>,
     offset_reject_alpha: f32,
-    channels: Vec<Channel>,
-    stream_last_t: Instant,
-    channel_last_t: Instant,
-    channel_id_factory: IdFactory,
+    channels: Vec<Channel<H::ProcessedChannelHandler>>,
+    pub handler: H,
 }
 
 struct ChannelGroup {
     ifft: Ifft,
 }
 
-pub struct Channel {
-    id: ChannelId,
-    pub descriptor: ChannelDescriptor,
-    pub iq_data: Vec<Complex<f32>>,
+pub struct Channel<H> {
+    descriptor: ChannelDescriptor,
+    iq_data: Vec<Complex<f32>>,
     bins: Range<usize>,
     phasors: [f32; 2],
     ifft: Ifft,
     overlap_reduce: OverlapReduce<Complex<f32>>,
+    pub handler: H,
 }
 
 #[derive(Debug, Clone)]
@@ -138,7 +132,7 @@ pub struct ChannelDescriptor {
     pub start_time: Instant,
 }
 
-impl StreamChunkProcessor {
+impl<H: ProcessedStreamHandler<ProcessedChannelHandler: Send>> StreamChunkProcessor<H> {
     pub fn new(
         frequency: f64,
         sample_rate: f64,
@@ -148,6 +142,7 @@ impl StreamChunkProcessor {
         offset_reject_time_constant: f64,
         time: Instant,
         channel_group_info: &[ChannelGroupInfo],
+        handler: H,
     ) -> Self {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (sample_rate / target_bin_size).ceil() as usize;
@@ -173,7 +168,7 @@ impl StreamChunkProcessor {
 
         // This refcell is very silly,
         // why don't the lifetimes work?
-        let channel_id_factory = RefCell::new(IdFactory::default());
+        let handler_refcell = RefCell::new(handler);
         let channels = channel_group_info
             .iter()
             .filter(|channel_group_info| {
@@ -182,7 +177,7 @@ impl StreamChunkProcessor {
             .flat_map(|channel_group_info| {
                 let mut channel_group = None;
                 let fft = &fft;
-                let channel_id_factory_ref = &channel_id_factory;
+                let handler_refcell = &handler_refcell;
                 channel_group_info.iter().filter_map(move |channel_info| {
                     Self::maybe_create_channel(
                         &mut channel_group,
@@ -192,11 +187,12 @@ impl StreamChunkProcessor {
                         sample_rate,
                         fft,
                         time,
-                        channel_id_factory_ref.borrow_mut(),
+                        handler_refcell.borrow_mut(),
                     )
                 })
             })
             .collect();
+        let handler = handler_refcell.into_inner();
 
         Self {
             chunk_size,
@@ -212,9 +208,7 @@ impl StreamChunkProcessor {
             offset: Default::default(),
             offset_reject_alpha,
             channels,
-            stream_last_t: time,
-            channel_last_t: time,
-            channel_id_factory: channel_id_factory.into_inner(),
+            handler,
         }
     }
 
@@ -226,8 +220,8 @@ impl StreamChunkProcessor {
         sample_rate: f64,
         fft: &Fft,
         time: Instant,
-        mut channel_id_factory: impl DerefMut<Target = IdFactory>,
-    ) -> Option<Channel> {
+        mut stream_handler: impl DerefMut<Target = H>,
+    ) -> Option<Channel<H::ProcessedChannelHandler>> {
         let center_frequency = channel_info.center_frequency;
         let left_freq =
             center_frequency - stream_center_frequency - 0.5 * channel_group_info.bandwidth;
@@ -272,21 +266,25 @@ impl StreamChunkProcessor {
 
         let overlap_reduce = OverlapReduce::new(channel_group.ifft.size() / 2);
 
+        let descriptor = ChannelDescriptor {
+            sample_rate: output_sample_rate,
+            name: channel_info.name.clone(),
+            center_frequency: channel_info.center_frequency,
+            bandwidth: channel_group_info.bandwidth,
+            tuning_error,
+            start_time: time,
+        };
+
+        let handler = stream_handler.new_channel_handler(&descriptor);
+
         Some(Channel {
-            id: channel_id_factory.create(),
-            descriptor: ChannelDescriptor {
-                sample_rate: output_sample_rate,
-                name: channel_info.name.clone(),
-                center_frequency: channel_info.center_frequency,
-                bandwidth: channel_group_info.bandwidth,
-                tuning_error,
-                start_time: time,
-            },
+            descriptor,
             bins,
             phasors,
             ifft: channel_group.ifft.clone(),
             overlap_reduce,
             iq_data: vec![],
+            handler,
         })
     }
 
@@ -371,6 +369,9 @@ impl StreamChunkProcessor {
             self.max = new_max;
         }
 
+        self.handler
+            .add_waterfall_row(time, &self.spectrum, self.min, self.max);
+
         // Drive each channel
         self.channels.par_iter_mut().for_each(|channel| {
             // Aggregate per-channel FFT data in this thread
@@ -392,44 +393,30 @@ impl StreamChunkProcessor {
             }
 
             // Process this channel
-            channel.process(fft_buffer)
+            channel.process(time, fft_buffer)
         });
-        self.channel_last_t = time;
 
         self.counter = (self.counter + (fft_count % 2) as u32) % 2;
-        self.stream_last_t = time;
     }
 }
 
-impl<H: ProcessedDataHandler> StreamHandler
-    for (
-        ReceiveStreamId,
-        Rechunker<Complex<f32>>,
-        StreamChunkProcessor,
-        H,
-    )
+impl<H: ProcessedStreamHandler<ProcessedChannelHandler: Send>> StreamHandler
+    for (Rechunker<Complex<f32>>, StreamChunkProcessor<H>)
 {
     fn process(&mut self, msg: ReceiveStreamMessage) -> Result<(), String> {
-        let (stream_id, rechunker, processor, handler) = self;
+        let (rechunker, processor) = self;
         rechunker.process(&msg.iq_data, |chunk| {
             processor.process_chunk(&chunk, msg.time);
-            handler.add_waterfall_row(
-                *stream_id,
-                msg.time,
-                &processor.spectrum,
-                processor.min,
-                processor.max,
-            );
         });
         Ok(())
     }
 }
 
-impl Channel {
-    fn process(&mut self, mut fft_buffer: Vec<Complex<f32>>) {
+impl<H: ProcessedChannelHandler> Channel<H> {
+    fn process(&mut self, time: Instant, mut fft_buffer: Vec<Complex<f32>>) {
         self.ifft.process_inplace(&mut fft_buffer);
         let iq_buffer = self.overlap_reduce.process(&fft_buffer);
-        self.iq_data = iq_buffer;
+        self.handler.add_channel_iq(time, &iq_buffer);
     }
 }
 
@@ -441,6 +428,38 @@ fn log_mix_f32(x: f32, y: f32, a: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MyProcessedStreamHandler {}
+
+    impl ProcessedStreamHandler for MyProcessedStreamHandler {
+        type ProcessedChannelHandler = MyChannelHandler;
+
+        fn add_waterfall_row(&mut self, _time: Instant, _spectrum: &[f32], _min: f32, _max: f32) {
+            // Don't store waterfalls
+        }
+
+        fn new_channel_handler(
+            &mut self,
+            descriptor: &ChannelDescriptor,
+        ) -> Self::ProcessedChannelHandler {
+            MyChannelHandler {
+                frequency: descriptor.center_frequency,
+                iq_data: vec![],
+            }
+        }
+    }
+
+    struct MyChannelHandler {
+        frequency: f64,
+        iq_data: Vec<Complex<f32>>,
+    }
+
+    impl ProcessedChannelHandler for MyChannelHandler {
+        fn add_channel_iq(&mut self, _time: Instant, iq_data: &[Complex<f32>]) {
+            self.iq_data.extend_from_slice(iq_data);
+        }
+    }
 
     #[test]
     fn test_channel_processing() {
@@ -480,6 +499,7 @@ mod tests {
             offset_reject_time_constant,
             time,
             &channel_group_info,
+            MyProcessedStreamHandler::default(),
         );
 
         // Get the chunk size
@@ -500,26 +520,25 @@ mod tests {
             .collect();
 
         // Process the data in chunks
-        let mut combined_channel_data = vec![];
         for chunk in samples.chunks_exact(processor.chunk_size) {
             processor.process_chunk(chunk, time);
-            let mut channels_iq_data = processor.channels.iter().filter_map(|channel| {
-                (channel.descriptor.center_frequency == channel_center_frequency)
-                    .then(|| &channel.iq_data)
-            });
-            let iq_data = channels_iq_data.next().expect("Could not find channel!");
-            assert!(
-                channels_iq_data.next().is_none(),
-                "Found multiple channels!"
-            );
-            combined_channel_data.extend_from_slice(iq_data);
         }
 
-        if combined_channel_data.is_empty() {
+        let mut channels_iq_data = processor.channels.iter().filter_map(|channel| {
+            (channel.handler.frequency == channel_center_frequency)
+                .then(|| channel.handler.iq_data.clone())
+        });
+        let iq_data = channels_iq_data.next().expect("Could not find channel!");
+        assert!(
+            channels_iq_data.next().is_none(),
+            "Found multiple channels!"
+        );
+
+        if iq_data.is_empty() {
             println!("No channel output received");
         } else {
             let channel_output_path = "channel_test_output.raw";
-            let channel_bytes: Vec<u8> = combined_channel_data
+            let channel_bytes: Vec<u8> = iq_data
                 .iter()
                 .flat_map(|c| {
                     let mut bytes = Vec::new();
@@ -530,10 +549,7 @@ mod tests {
                 .collect();
             std::fs::write(channel_output_path, channel_bytes)
                 .expect("Failed to write channel output");
-            println!(
-                "Total channel IQ data length: {} samples",
-                combined_channel_data.len(),
-            );
+            println!("Total channel IQ data length: {} samples", iq_data.len(),);
             println!("Channel output saved to {}", channel_output_path);
         }
     }
