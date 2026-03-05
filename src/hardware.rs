@@ -1,13 +1,16 @@
-use log::{error, info, warn};
+use log::{info, warn};
 use num_complex::Complex;
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
+
+use crate::id_factory::IdFactory;
 
 const STREAM_CREATION_MESSAGE_CAPACITY: usize = 64;
 const STREAM_MESSAGE_CAPACITY: usize = 64;
@@ -15,6 +18,8 @@ const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
 const STREAM_CHUNK_PERIOD: f64 = 0.0005; // 200 per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
+
+pub type StreamId = usize;
 
 fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
     // Snap to the nearest discrete step if stepsize is non-zero
@@ -55,33 +60,52 @@ fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
     snap_to_range(closest_range, value)
 }
 
-struct ReceiveStream<H> {
-    handler: H,
-    receiver: Receiver<ReceiveStreamMessage>,
+struct ReceiveStream {
+    stream_id: StreamId,
+    receiver: Receiver<ReceiveStreamChunk>,
+    descriptor: Arc<ReceiveStreamDescriptor>,
+    data: Vec<ReceiveStreamChunk>,
 }
 
-impl<H: StreamHandler> ReceiveStream<H> {
-    fn new(handler: H, receiver: Receiver<ReceiveStreamMessage>) -> Self {
-        ReceiveStream { handler, receiver }
+pub struct ReceiveStreamResult {
+    pub descriptor: Arc<ReceiveStreamDescriptor>,
+    pub data: Vec<ReceiveStreamChunk>,
+}
+
+impl ReceiveStream {
+    fn new(
+        stream_id: StreamId,
+        descriptor: ReceiveStreamDescriptor,
+        receiver: Receiver<ReceiveStreamChunk>,
+    ) -> Self {
+        ReceiveStream {
+            stream_id,
+            descriptor: Arc::new(descriptor),
+            receiver,
+            data: vec![],
+        }
     }
 
     fn process(&mut self) -> bool {
         loop {
             match self.receiver.try_recv() {
-                Ok(msg) => match self.handler.process(msg) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        error!("Stream processing error: {:?}", e);
-                        return false; // Drop this stream
-                    }
-                },
+                Ok(msg) => {
+                    self.data.push(msg);
+                }
                 Err(TryRecvError::Empty) => {
                     return true; // Stream is still connected, keep it
                 }
                 Err(TryRecvError::Disconnected) => {
-                    return false; // Stream is disconnected, remove it
+                    return !self.data.is_empty(); // Stream is disconnected, remove it if the queue is empty
                 }
             }
+        }
+    }
+
+    fn result(&mut self) -> ReceiveStreamResult {
+        ReceiveStreamResult {
+            descriptor: self.descriptor.clone(),
+            data: mem::replace(&mut self.data, vec![]),
         }
     }
 }
@@ -95,7 +119,7 @@ pub struct ReceiveStreamDescriptor {
     pub start_time: Instant,
 }
 
-pub struct ReceiveStreamMessage {
+pub struct ReceiveStreamChunk {
     pub iq_data: Vec<Complex<f32>>,
     pub time: Instant,
 }
@@ -119,40 +143,44 @@ impl Default for HardwareParams {
     }
 }
 
-pub trait HardwareHandler {
-    type StreamHandler: StreamHandler;
-
-    fn new_stream_handler(&mut self, descriptor: &ReceiveStreamDescriptor) -> Self::StreamHandler;
+pub struct HardwareResult {
+    pub receive_streams: BTreeMap<StreamId, ReceiveStreamResult>,
 }
 
-pub trait StreamHandler {
-    fn process(&mut self, msg: ReceiveStreamMessage) -> Result<(), String>;
-}
+//pub trait HardwareHandler {
+//    type StreamHandler: StreamHandler;
+//
+//    fn new_stream_handler(&mut self, descriptor: &ReceiveStreamDescriptor) -> Self::StreamHandler;
+//}
+//
+//pub trait StreamHandler {
+//    fn process(&mut self, msg: ReceiveStreamChunk) -> Result<(), String>;
+//}
 
-pub struct Hardware<H: HardwareHandler> {
-    pub handler: H,
+pub struct Hardware {
     devices: HashMap<HardwareDeviceId, HardwareDevice>,
     receive_stream_creation_sender:
-        SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
+        SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamChunk>)>,
     receive_stream_creation_receiver:
-        Receiver<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
-    pub receive_streams: Vec<ReceiveStream<H::StreamHandler>>,
+        Receiver<(ReceiveStreamDescriptor, Receiver<ReceiveStreamChunk>)>,
+    receive_streams: Vec<ReceiveStream>,
+    receive_stream_id_factory: IdFactory,
 }
 
-impl<H: HardwareHandler<StreamHandler: Send>> Hardware<H> {
-    pub fn new(handler: H) -> Self {
+impl Hardware {
+    pub fn new() -> Self {
         let (receive_stream_creation_sender, receive_stream_creation_receiver) =
             mpsc::sync_channel(STREAM_CREATION_MESSAGE_CAPACITY);
         Hardware {
-            handler,
             devices: Default::default(),
             receive_stream_creation_sender,
             receive_stream_creation_receiver,
             receive_streams: vec![],
+            receive_stream_id_factory: IdFactory::default(),
         }
     }
 
-    pub fn update(&mut self, params: &mut HardwareParams) {
+    pub fn update(&mut self, params: &mut HardwareParams) -> HardwareResult {
         if params.enumerate {
             self.devices
                 .retain(|_, d| matches!(d.active, HardwareState::Active(_)));
@@ -194,9 +222,11 @@ impl<H: HardwareHandler<StreamHandler: Send>> Hardware<H> {
 
         // Create new streams
         while let Ok((descriptor, receiver)) = self.receive_stream_creation_receiver.try_recv() {
-            let stream_handler = self.handler.new_stream_handler(&descriptor);
-            self.receive_streams
-                .push(ReceiveStream::new(stream_handler, receiver));
+            self.receive_streams.push(ReceiveStream::new(
+                self.receive_stream_id_factory.create(),
+                descriptor,
+                receiver,
+            ));
         }
 
         // Process all streams, and remove disconnected ones
@@ -208,6 +238,15 @@ impl<H: HardwareHandler<StreamHandler: Send>> Hardware<H> {
                 .into_par_iter()
                 .filter_map(|mut stream| stream.process().then_some(stream)),
         );
+
+        // Collect all received data into a HardwareResult
+        HardwareResult {
+            receive_streams: self
+                .receive_streams
+                .iter_mut()
+                .map(|s| (s.stream_id, s.result()))
+                .collect(),
+        }
     }
 
     pub fn shutdown(mut self) {
@@ -237,7 +276,7 @@ struct HardwareDevice {
     args: soapysdr::Args,
     active: HardwareState<ActiveHardwareDevice>,
     receive_stream_creation_sender:
-        SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
+        SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamChunk>)>,
 }
 
 enum HardwareState<T> {
@@ -289,7 +328,7 @@ impl HardwareDevice {
         args: soapysdr::Args,
         receive_stream_creation_sender: SyncSender<(
             ReceiveStreamDescriptor,
-            Receiver<ReceiveStreamMessage>,
+            Receiver<ReceiveStreamChunk>,
         )>,
     ) -> Self {
         HardwareDevice {
@@ -467,7 +506,7 @@ struct HardwareGain {
 struct HardwareDeviceRxStream {
     device_id: HardwareDeviceId,
     stream_index: usize,
-    stream_creation_sender: SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamMessage>)>,
+    stream_creation_sender: SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamChunk>)>,
     active: HardwareState<ActiveHardwareDeviceRxStream>,
     device: soapysdr::Device,
     sample_rate_range: Vec<soapysdr::Range>,
@@ -505,10 +544,7 @@ impl HardwareDeviceRxStream {
         device_id: HardwareDeviceId,
         device: soapysdr::Device,
         stream_index: usize,
-        stream_creation_sender: SyncSender<(
-            ReceiveStreamDescriptor,
-            Receiver<ReceiveStreamMessage>,
-        )>,
+        stream_creation_sender: SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamChunk>)>,
     ) -> Self {
         let sample_rate_range = device
             .get_sample_rate_range(soapysdr::Direction::Rx, stream_index)
@@ -786,10 +822,7 @@ impl HardwareDeviceRxStream {
         stream_index: usize,
         device: soapysdr::Device,
         control_receiver: Receiver<HardwareDeviceRxStreamControlMessage>,
-        stream_creation_sender: SyncSender<(
-            ReceiveStreamDescriptor,
-            Receiver<ReceiveStreamMessage>,
-        )>,
+        stream_creation_sender: SyncSender<(ReceiveStreamDescriptor, Receiver<ReceiveStreamChunk>)>,
         mut sample_rate: f64,
         mut frequency: f64,
         mut bandwidth: f64,
@@ -927,7 +960,7 @@ impl HardwareDeviceRxStream {
                                     vec![num_complex::Complex::<f32>::ZERO; buffer_size],
                                 );
                                 stream_sender
-                                    .send(ReceiveStreamMessage { iq_data, time })
+                                    .send(ReceiveStreamChunk { iq_data, time })
                                     .unwrap();
                                 buffer_ix = 0;
                             }

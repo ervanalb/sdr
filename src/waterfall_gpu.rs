@@ -1,6 +1,7 @@
-use crate::hardware::ReceiveStreamDescriptor;
-use std::collections::BTreeMap;
+use crate::hardware::{ReceiveStreamDescriptor, StreamId};
+use crate::processor::WaterfallRow;
 use std::time::Instant;
+use std::{collections::BTreeMap, sync::Arc};
 use wgpu::{
     Device, Extent3d, Origin3d, Queue, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -9,7 +10,7 @@ use wgpu::{
 const TEXTURE_HEIGHT: u32 = 1024;
 
 pub struct WaterfallGpu {
-    texture_groups: BTreeMap<ReceiveStreamId, TextureGroup>,
+    texture_groups: BTreeMap<StreamId, TextureGroup>,
     blank_texture: Texture,
 }
 
@@ -36,37 +37,38 @@ impl WaterfallGpu {
         }
     }
 
-    pub fn add_row(
+    pub fn add_rows(
         &mut self,
-        stream_id: ReceiveStreamId,
-        descriptor: &ReceiveStreamDescriptor,
-        time: Instant,
-        spectrum: &[f32],
-        min: f32,
-        max: f32,
+        stream_id: StreamId,
+        descriptor: Arc<ReceiveStreamDescriptor>,
+        spectrum_len: usize,
+        waterfall_rows: Vec<WaterfallRow>,
         device: &Device,
         queue: &Queue,
     ) {
-        let group = self
-            .texture_groups
-            .entry(stream_id)
-            .or_insert_with(|| TextureGroup {
-                descriptor: descriptor.clone(),
+        let group = self.texture_groups.entry(stream_id).or_insert_with(|| {
+            let start_time = descriptor.start_time;
+            TextureGroup {
+                descriptor,
                 active_texture: ActiveTexture::new(
                     device,
-                    spectrum,
-                    descriptor.start_time,
+                    spectrum_len as u32,
+                    start_time,
                     self.blank_texture.clone(),
                 ),
                 finished_textures: vec![],
-                min,
-                max,
-            });
-        group.add_row(device, queue, spectrum, min, max, time);
+                min: f32::INFINITY,
+                max: -f32::INFINITY,
+            }
+        });
+        for waterfall_row in waterfall_rows.into_iter() {
+            group.add_row(device, queue, waterfall_row);
+        }
     }
 
-    pub fn close_stream(&mut self, stream: ReceiveStreamId) {
-        // XXX TODO
+    pub fn close_stream(&mut self, stream: StreamId) {
+        // XXX TODO make a simple update() method which calls add_rows for each stream
+        // and prunes the closed streams
     }
 
     pub fn prune_old_textures(&mut self, time: Instant) {
@@ -117,6 +119,7 @@ struct ActiveTexture {
     current_row: usize,
     start_time: Instant,
     end_time: Instant,
+    spectrum_len: u32,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
 }
@@ -124,7 +127,7 @@ struct ActiveTexture {
 impl ActiveTexture {
     pub fn new(
         device: &Device,
-        spectrum: &[f32],
+        spectrum_len: u32,
         start_time: Instant,
         prev_texture: Texture,
     ) -> Self {
@@ -132,7 +135,7 @@ impl ActiveTexture {
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Waterfall Texture"),
             size: Extent3d {
-                width: spectrum.len() as u32,
+                width: spectrum_len,
                 height: TEXTURE_HEIGHT,
                 depth_or_array_layers: 1,
             },
@@ -152,10 +155,11 @@ impl ActiveTexture {
             current_row: 0,
             start_time,
             end_time: start_time, // Haven't actually pushed the row yet
+            spectrum_len,
             mip_level_count,
             // Allocate some extra space in the mip_buffer
             // in case waterfall_row.len() is very small
-            mip_buffer: vec![0.; 2 * spectrum.len() + mip_level_count as usize],
+            mip_buffer: vec![0.; (2 * spectrum_len + mip_level_count) as usize],
         }
     }
 
@@ -224,7 +228,7 @@ impl ActiveTexture {
 
 #[derive(Debug)]
 struct TextureGroup {
-    descriptor: ReceiveStreamDescriptor,
+    descriptor: Arc<ReceiveStreamDescriptor>,
     active_texture: ActiveTexture,
     finished_textures: Vec<TextureInfo>,
     min: f32,
@@ -232,23 +236,15 @@ struct TextureGroup {
 }
 
 impl TextureGroup {
-    fn add_row(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        spectrum: &[f32],
-        min: f32,
-        max: f32,
-        end_time: Instant,
-    ) {
+    fn add_row(&mut self, device: &Device, queue: &Queue, waterfall_row: WaterfallRow) {
         if self.active_texture.current_row >= TEXTURE_HEIGHT as usize {
-            self.swap_active_texture(device, queue, spectrum);
+            self.swap_active_texture(device, queue);
         }
 
-        self.active_texture.add_row(queue, spectrum);
-        self.active_texture.end_time = end_time;
-        self.min = min;
-        self.max = max;
+        self.active_texture.add_row(queue, &waterfall_row.spectrum);
+        self.active_texture.end_time = waterfall_row.time;
+        self.min = waterfall_row.min;
+        self.max = waterfall_row.max;
     }
 
     // Returns true if there are still chunks
@@ -265,7 +261,7 @@ impl TextureGroup {
         any_remain || self.active_texture.end_time > time
     }
 
-    fn swap_active_texture(&mut self, device: &Device, queue: &Queue, spectrum: &[f32]) {
+    fn swap_active_texture(&mut self, device: &Device, queue: &Queue) {
         if self.active_texture.current_row < TEXTURE_HEIGHT as usize {
             // If partial, copy this texture into an appropriately sized one
             // to free up space
@@ -323,9 +319,10 @@ impl TextureGroup {
         // Create a new active texture
         let prev_end_time = self.active_texture.end_time;
         let prev_texture = self.active_texture.texture.clone();
+        let spectrum_len = self.active_texture.spectrum_len;
         let old_active_texture = std::mem::replace(
             &mut self.active_texture,
-            ActiveTexture::new(device, spectrum, prev_end_time, prev_texture),
+            ActiveTexture::new(device, spectrum_len, prev_end_time, prev_texture),
         );
         let next_texture = self.active_texture.texture.clone();
 

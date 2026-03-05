@@ -4,7 +4,7 @@ use eframe::egui;
 use sdr::band_info::BandsInfo;
 use sdr::channels_gpu::ChannelsGpu;
 use sdr::hardware::{Hardware, HardwareParams};
-use sdr::processor::{Processor, StreamChunkProcessor};
+use sdr::processor::Processor;
 use sdr::waterfall_gpu::WaterfallGpu;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,8 +48,9 @@ fn main() -> eframe::Result<()> {
 }
 
 struct SdrApp {
-    hardware: Option<Hardware<Processor>>,
+    hardware: Option<Hardware>,
     hardware_params: HardwareParams,
+    processor: Processor,
     viewport_state: ui::canvas::Viewport,
     waterfall_gpu: WaterfallGpu,
     channels_gpu: ChannelsGpu,
@@ -71,12 +72,10 @@ impl SdrApp {
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
         let bands_info = Arc::new(Mutex::new(bands_info));
 
-        let processor = Processor::new(bands_info.clone());
-        let hardware = Hardware::new(processor);
-
         Self {
-            hardware: Some(hardware),
+            hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
+            processor: Processor::new(bands_info.clone()),
             viewport_state: ui::canvas::Viewport::default(),
             waterfall_gpu: WaterfallGpu::new(device),
             channels_gpu: ChannelsGpu::new(),
@@ -113,7 +112,7 @@ impl eframe::App for SdrApp {
         }
 
         // Update hardware every frame
-        hardware.update(&mut self.hardware_params);
+        let hardware_results = hardware.update(&mut self.hardware_params);
 
         // TODO: consider moving rechunker & processor into Hardware
 
@@ -127,28 +126,20 @@ impl eframe::App for SdrApp {
         //    true
         //});
 
+        let processed_results = self.processor.process(&hardware_results);
+
         // Process all streams
-        for (stream_id, stream) in hardware.receive_streams.iter_mut() {
-            while let Some(message) = stream.try_recv() {
-                rechunker.process(&message.iq_data, |chunk| {
-                    processor.process(&chunk, message.time);
-
-                    self.waterfall_gpu.add_row(
-                        stream_id,
-                        &stream.descriptor,
-                        message.time,
-                        &processor.spectrum,
-                        processor.min,
-                        processor.max,
-                        &wgpu_render_state.device,
-                        &wgpu_render_state.queue,
-                    );
-
-                    for (channel_id, channel) in processor.channels.iter() {
-                        self.channels_gpu
-                            .add_chunk(stream_id, channel_id, channel, message.time);
-                    }
-                });
+        for (stream_id, stream) in processed_results.receive_streams.into_iter() {
+            self.waterfall_gpu.add_rows(
+                stream_id,
+                stream.descriptor,
+                stream.spectrum_len,
+                stream.waterfall_rows,
+                &wgpu_render_state.device,
+                &wgpu_render_state.queue,
+            );
+            for (channel_id, channel) in stream.channels.into_iter() {
+                self.channels_gpu.add_chunks(stream_id, channel_id, channel);
             }
         }
         self.waterfall_gpu

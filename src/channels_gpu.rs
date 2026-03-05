@@ -1,16 +1,16 @@
 // TODO: rename this file, it has nothing to do with GPU
 
-use num_complex::Complex;
-use std::collections::BTreeMap;
 use std::time::Instant;
+use std::{collections::BTreeMap, sync::Arc};
 
+use crate::processor::IqChunk;
 use crate::{
-    hardware::ReceiveStreamId,
-    processor::{Channel, ChannelDescriptor, ChannelId},
+    hardware::StreamId,
+    processor::{ChannelDescriptor, ChannelId, ChannelResult},
 };
 
 pub struct ChannelsGpu {
-    pub channels: BTreeMap<(ReceiveStreamId, ChannelId), ChannelHistory>,
+    pub channels: BTreeMap<(StreamId, ChannelId), ChannelHistory>,
 }
 
 impl ChannelsGpu {
@@ -20,23 +20,20 @@ impl ChannelsGpu {
         }
     }
 
-    pub fn add_chunk(
+    pub fn add_chunks(
         &mut self,
-        stream_id: ReceiveStreamId,
+        stream_id: StreamId,
         channel_id: ChannelId,
-        channel: &Channel,
-        end_time: Instant,
+        channel_result: ChannelResult,
     ) {
         let history = self
             .channels
             .entry((stream_id, channel_id))
-            .or_insert_with(|| ChannelHistory::new(channel.descriptor.clone()));
+            .or_insert_with(|| ChannelHistory::new(channel_result.descriptor.clone()));
 
-        history.add_chunk(&channel.iq_data, end_time);
-    }
-
-    pub fn close_channel(&mut self, stream_id: ReceiveStreamId, channel_id: ChannelId) {
-        // XXX TODO
+        for chunk in channel_result.iq.into_iter() {
+            history.add_chunk(chunk);
+        }
     }
 
     pub fn prune(&mut self, retain_time: Instant) {
@@ -48,13 +45,13 @@ impl ChannelsGpu {
 }
 
 pub struct ChannelHistory {
-    pub descriptor: ChannelDescriptor,
+    pub descriptor: Arc<ChannelDescriptor>,
     pub end_time: Instant,
-    chunks: Vec<ChannelChunk>,
+    chunks: Vec<IqChunk>,
 }
 
 impl ChannelHistory {
-    fn new(descriptor: ChannelDescriptor) -> Self {
+    fn new(descriptor: Arc<ChannelDescriptor>) -> Self {
         let end_time = descriptor.start_time;
         Self {
             descriptor,
@@ -63,16 +60,13 @@ impl ChannelHistory {
         }
     }
 
-    fn add_chunk(&mut self, iq_data: &[Complex<f32>], end_time: Instant) {
-        self.chunks.push(ChannelChunk {
-            iq_data: iq_data.to_vec(),
-            end_time,
-        });
-        self.end_time = self.end_time.max(end_time);
+    fn add_chunk(&mut self, chunk: IqChunk) {
+        self.end_time = self.end_time.max(chunk.time);
+        self.chunks.push(chunk);
     }
 
     fn prune(&mut self, retain_time: Instant) {
-        self.chunks.retain(|chunk| chunk.end_time >= retain_time);
+        self.chunks.retain(|chunk| chunk.time >= retain_time);
     }
 
     pub fn export_iq_data(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
@@ -80,8 +74,8 @@ impl ChannelHistory {
         let mut file = std::fs::File::create(path)?;
 
         for chunk in &self.chunks {
-            dbg!(chunk.iq_data.len());
-            for sample in &chunk.iq_data {
+            dbg!(chunk.data.len());
+            for sample in &chunk.data {
                 file.write_all(&sample.re.to_le_bytes())?;
                 file.write_all(&sample.im.to_le_bytes())?;
             }
@@ -91,9 +85,4 @@ impl ChannelHistory {
 
         Ok(())
     }
-}
-
-struct ChannelChunk {
-    iq_data: Vec<Complex<f32>>,
-    end_time: Instant,
 }
