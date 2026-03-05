@@ -37,6 +37,14 @@ impl WaterfallGpu {
         }
     }
 
+    pub fn retain_active_streams(&mut self, mut predicate: impl FnMut(StreamId) -> bool) {
+        for (stream_id, _group) in self.texture_groups.iter_mut() {
+            if !predicate(*stream_id) {
+                // TODO: close active textures
+            }
+        }
+    }
+
     pub fn add_rows(
         &mut self,
         stream_id: StreamId,
@@ -64,11 +72,6 @@ impl WaterfallGpu {
         for waterfall_row in waterfall_rows.into_iter() {
             group.add_row(device, queue, waterfall_row);
         }
-    }
-
-    pub fn close_stream(&mut self, stream: StreamId) {
-        // XXX TODO make a simple update() method which calls add_rows for each stream
-        // and prunes the closed streams
     }
 
     pub fn prune_old_textures(&mut self, time: Instant) {

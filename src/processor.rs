@@ -1,24 +1,44 @@
+use crate::band_info::{BandsInfo, ChannelGroupInfo, ChannelInfo};
+use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker, hann_window};
+use crate::hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId};
+use crate::id_factory::IdFactory;
+use num_complex::Complex;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::{DerefMut, Range};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
-
-use num_complex::Complex;
-
-use crate::band_info::{BandsInfo, ChannelGroupInfo, ChannelInfo};
-use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker, hann_window};
-use crate::hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId};
-use crate::id_factory::IdFactory;
 
 const STREAM_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
 const STREAM_TARGET_OUTPUT_PERIOD: f64 = 0.01; // 100 chunks per second
 const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
 
+// IDS //
+
 pub type ChannelId = usize;
+
+// DESCRIPTORS //
+
+#[derive(Debug, Clone)]
+pub struct ChannelDescriptor {
+    pub sample_rate: f64,
+    pub name: String,
+    pub center_frequency: f64,
+    pub bandwidth: f64,
+    pub tuning_error: f64,
+    pub start_time: Instant,
+}
+
+// RESULTS //
+
+#[derive(Debug, Default)]
+pub struct ProcessingResult {
+    pub receive_streams: BTreeMap<StreamId, StreamProcessingResult>,
+}
 
 #[derive(Debug)]
 pub struct StreamProcessingResult {
@@ -26,11 +46,6 @@ pub struct StreamProcessingResult {
     pub spectrum_len: usize, // XXX move to descriptor
     pub waterfall_rows: Vec<WaterfallRow>,
     pub channels: BTreeMap<ChannelId, ChannelResult>,
-}
-
-#[derive(Default)]
-pub struct ProcessingResult {
-    pub receive_streams: BTreeMap<StreamId, StreamProcessingResult>,
 }
 
 pub struct WaterfallRow {
@@ -51,6 +66,12 @@ impl std::fmt::Debug for WaterfallRow {
     }
 }
 
+#[derive(Debug)]
+pub struct ChannelResult {
+    pub descriptor: Arc<ChannelDescriptor>,
+    pub iq: Vec<IqChunk>,
+}
+
 pub struct IqChunk {
     pub time: Instant,
     pub data: Vec<Complex<f32>>,
@@ -65,19 +86,15 @@ impl std::fmt::Debug for IqChunk {
     }
 }
 
-#[derive(Debug)]
-pub struct ChannelResult {
-    pub descriptor: Arc<ChannelDescriptor>,
-    pub iq: Vec<IqChunk>,
-}
+// PROCESSOR //
 
 pub struct Processor {
-    bands_info: Arc<Mutex<BandsInfo>>, // TODO maybe Rc<RefCell> is sufficient?
+    bands_info: Rc<RefCell<BandsInfo>>, // TODO maybe Rc<RefCell> is sufficient?
     streams: BTreeMap<StreamId, StreamProcessor>,
 }
 
 impl Processor {
-    pub fn new(bands_info: Arc<Mutex<BandsInfo>>) -> Processor {
+    pub fn new(bands_info: Rc<RefCell<BandsInfo>>) -> Processor {
         Processor {
             bands_info,
             streams: BTreeMap::default(),
@@ -95,7 +112,7 @@ impl Processor {
             .iter()
             .map(|(stream_id, stream)| {
                 let processor = self.streams.entry(*stream_id).or_insert_with(|| {
-                    let channels = { &self.bands_info.lock().unwrap().channels };
+                    let channels = { &self.bands_info.borrow().channels };
                     StreamProcessor::new(stream.descriptor.clone(), channels)
                 });
 
@@ -179,7 +196,6 @@ struct StreamChunkProcessor {
     hann_window: Vec<f32>,
     fft: Fft,
     counter: u32,
-    period: f64,
     spectrum: Vec<f32>,
     min: f32,
     max: f32,
@@ -188,30 +204,6 @@ struct StreamChunkProcessor {
     offset_reject_alpha: f32,
     channels: Vec<Channel>,
     _channel_id_factory: IdFactory,
-}
-
-struct ChannelGroup {
-    ifft: Ifft,
-}
-
-pub struct Channel {
-    id: ChannelId,
-    descriptor: Arc<ChannelDescriptor>,
-    iq_data: Vec<Complex<f32>>,
-    bins: Range<usize>,
-    phasors: [f32; 2],
-    ifft: Ifft,
-    overlap_reduce: OverlapReduce<Complex<f32>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelDescriptor {
-    pub sample_rate: f64,
-    pub name: String,
-    pub center_frequency: f64,
-    pub bandwidth: f64,
-    pub tuning_error: f64,
-    pub start_time: Instant,
 }
 
 impl StreamChunkProcessor {
@@ -281,7 +273,6 @@ impl StreamChunkProcessor {
             hann_window: hann_window(fft_size),
             fft,
             counter: 0,
-            period: output_period,
             spectrum: vec![0.; fft_size],
             min: std::f32::NAN,
             max: std::f32::NAN,
@@ -365,10 +356,6 @@ impl StreamChunkProcessor {
             overlap_reduce,
             iq_data: vec![],
         })
-    }
-
-    pub fn period(&self) -> f64 {
-        self.period
     }
 
     pub fn process_chunk(&mut self, samples: &[Complex<f32>]) {
@@ -476,6 +463,20 @@ impl StreamChunkProcessor {
     }
 }
 
+struct ChannelGroup {
+    ifft: Ifft,
+}
+
+pub struct Channel {
+    id: ChannelId,
+    descriptor: Arc<ChannelDescriptor>,
+    iq_data: Vec<Complex<f32>>,
+    bins: Range<usize>,
+    phasors: [f32; 2],
+    ifft: Ifft,
+    overlap_reduce: OverlapReduce<Complex<f32>>,
+}
+
 impl Channel {
     fn process(&mut self, mut fft_buffer: Vec<Complex<f32>>) {
         self.ifft.process_inplace(&mut fft_buffer);
@@ -483,6 +484,8 @@ impl Channel {
         self.iq_data = iq_buffer;
     }
 }
+
+// HELPER FUNCTIONS //
 
 fn log_mix_f32(x: f32, y: f32, a: f32) -> f32 {
     (x * (y / x).powf(a)).max(1e-10)

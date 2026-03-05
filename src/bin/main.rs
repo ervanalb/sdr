@@ -6,12 +6,11 @@ use sdr::channels_gpu::ChannelsGpu;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::Processor;
 use sdr::waterfall_gpu::WaterfallGpu;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 mod ui;
-
-//const CHANNEL_MESSAGE_CAPACITY: usize = 32768;
 
 const CANVAS_DURATION: f64 = 120.;
 
@@ -57,7 +56,7 @@ struct SdrApp {
     reference_time: Instant,
     prev_reference_time: Instant,
     temp_random_instant: Instant,
-    bands_info: Arc<Mutex<BandsInfo>>,
+    bands_info: Rc<RefCell<BandsInfo>>,
 }
 
 impl SdrApp {
@@ -70,7 +69,7 @@ impl SdrApp {
         // Load bands info from JSON file included at compile time
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
-        let bands_info = Arc::new(Mutex::new(bands_info));
+        let bands_info = Rc::new(RefCell::new(bands_info));
 
         Self {
             hardware: Some(Hardware::new()),
@@ -113,20 +112,12 @@ impl eframe::App for SdrApp {
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
-
-        // TODO: consider moving rechunker & processor into Hardware
-
-        // Remove / close any streams that no longer exist
-        // XXX FIX ME
-        //self.streams.retain(|&k, _| {
-        //    if !hardware.receive_streams.contains_key(k) {
-        //        self.waterfall_gpu.close_stream(k);
-        //        return false;
-        //    }
-        //    true
-        //});
-
         let processed_results = self.processor.process(&hardware_results);
+
+        // Deactivate waterfall streams that don't exist anymore
+        self.waterfall_gpu.retain_active_streams(|stream_id| {
+            processed_results.receive_streams.contains_key(&stream_id)
+        });
 
         // Process all streams
         for (stream_id, stream) in processed_results.receive_streams.into_iter() {
@@ -138,6 +129,7 @@ impl eframe::App for SdrApp {
                 &wgpu_render_state.device,
                 &wgpu_render_state.queue,
             );
+            // Process all channels
             for (channel_id, channel) in stream.channels.into_iter() {
                 self.channels_gpu.add_chunks(stream_id, channel_id, channel);
             }

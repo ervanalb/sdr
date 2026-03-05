@@ -1,3 +1,4 @@
+use crate::id_factory::IdFactory;
 use log::{info, warn};
 use num_complex::Complex;
 use rayon::prelude::*;
@@ -10,105 +11,19 @@ use std::thread::{JoinHandle, spawn};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
 
-use crate::id_factory::IdFactory;
-
 const STREAM_CREATION_MESSAGE_CAPACITY: usize = 64;
 const STREAM_MESSAGE_CAPACITY: usize = 64;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
-const STREAM_CHUNK_PERIOD: f64 = 0.0005; // 200 per second
+const STREAM_CHUNK_PERIOD: f64 = 0.005; // 200 per second
 const SHUTDOWN_POLLING_PERIOD: f64 = 0.01;
 
+// IDS //
+
 pub type StreamId = usize;
+pub type HardwareDeviceId = String;
 
-fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
-    // Snap to the nearest discrete step if stepsize is non-zero
-    if range.step > 0.0 {
-        let steps_from_min = (value - range.minimum) / range.step;
-        let rounded_steps = steps_from_min.round();
-        value = range.minimum + (rounded_steps * range.step);
-    }
-
-    // Clamp to the desired range
-    value.clamp(range.minimum, range.maximum)
-}
-
-fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
-    if ranges.is_empty() {
-        return value;
-    }
-
-    // Find the closest range by checking distance to both min and max
-
-    let (closest_range, _) = ranges
-        .iter()
-        .map(|range| {
-            let dist_to_min = (value - range.minimum).abs();
-            let dist_to_max = (value - range.maximum).abs();
-            let dist_to_range = if value < range.minimum {
-                dist_to_min
-            } else if value > range.maximum {
-                dist_to_max
-            } else {
-                0.0 // value is within range
-            };
-            (range, dist_to_range)
-        })
-        .min_by(|(_, dist_a), (_, dist_b)| dist_a.partial_cmp(dist_b).unwrap())
-        .unwrap();
-
-    snap_to_range(closest_range, value)
-}
-
-struct ReceiveStream {
-    stream_id: StreamId,
-    receiver: Receiver<ReceiveStreamChunk>,
-    descriptor: Arc<ReceiveStreamDescriptor>,
-    data: Vec<ReceiveStreamChunk>,
-}
-
-pub struct ReceiveStreamResult {
-    pub descriptor: Arc<ReceiveStreamDescriptor>,
-    pub data: Vec<ReceiveStreamChunk>,
-}
-
-impl ReceiveStream {
-    fn new(
-        stream_id: StreamId,
-        descriptor: ReceiveStreamDescriptor,
-        receiver: Receiver<ReceiveStreamChunk>,
-    ) -> Self {
-        ReceiveStream {
-            stream_id,
-            descriptor: Arc::new(descriptor),
-            receiver,
-            data: vec![],
-        }
-    }
-
-    fn process(&mut self) -> bool {
-        loop {
-            match self.receiver.try_recv() {
-                Ok(msg) => {
-                    self.data.push(msg);
-                }
-                Err(TryRecvError::Empty) => {
-                    return true; // Stream is still connected, keep it
-                }
-                Err(TryRecvError::Disconnected) => {
-                    return !self.data.is_empty(); // Stream is disconnected, remove it if the queue is empty
-                }
-            }
-        }
-    }
-
-    fn result(&mut self) -> ReceiveStreamResult {
-        ReceiveStreamResult {
-            descriptor: self.descriptor.clone(),
-            data: mem::replace(&mut self.data, vec![]),
-        }
-    }
-}
+// DESCRIPTORS //
 
 #[derive(Clone, Debug)]
 pub struct ReceiveStreamDescriptor {
@@ -119,12 +34,34 @@ pub struct ReceiveStreamDescriptor {
     pub start_time: Instant,
 }
 
+// RESULTS //
+
+#[derive(Debug)]
+pub struct HardwareResult {
+    pub receive_streams: BTreeMap<StreamId, ReceiveStreamResult>,
+}
+
+#[derive(Debug)]
+pub struct ReceiveStreamResult {
+    pub descriptor: Arc<ReceiveStreamDescriptor>,
+    pub data: Vec<ReceiveStreamChunk>,
+}
+
 pub struct ReceiveStreamChunk {
     pub iq_data: Vec<Complex<f32>>,
     pub time: Instant,
 }
 
-pub type HardwareDeviceId = String;
+impl std::fmt::Debug for ReceiveStreamChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiveStreamChunk")
+            .field("iq_data.len()", &self.iq_data.len())
+            .field("time", &self.time)
+            .finish()
+    }
+}
+
+// PARAMS //
 
 #[derive(Clone, Debug)]
 pub struct HardwareParams {
@@ -143,19 +80,72 @@ impl Default for HardwareParams {
     }
 }
 
-pub struct HardwareResult {
-    pub receive_streams: BTreeMap<StreamId, ReceiveStreamResult>,
+#[derive(Clone, Debug)]
+pub struct HardwareDeviceParams {
+    pub active: bool,
+    pub rx_streams: Vec<HardwareDeviceRxStreamParams>,
+    pub tx_streams: Vec<HardwareDeviceTxStreamParams>,
 }
 
-//pub trait HardwareHandler {
-//    type StreamHandler: StreamHandler;
-//
-//    fn new_stream_handler(&mut self, descriptor: &ReceiveStreamDescriptor) -> Self::StreamHandler;
-//}
-//
-//pub trait StreamHandler {
-//    fn process(&mut self, msg: ReceiveStreamChunk) -> Result<(), String>;
-//}
+impl Default for HardwareDeviceParams {
+    fn default() -> Self {
+        Self {
+            active: true,
+            rx_streams: Default::default(),
+            tx_streams: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HardwareDeviceRxStreamParams {
+    pub active: bool,
+    pub sample_rate: Option<f64>,
+    pub frequency: Option<f64>,
+    pub bandwidth: Option<f64>,
+    pub gains: HashMap<String, GainParams>,
+    pub sample_rate_min: f64,
+    pub sample_rate_max: f64,
+    pub frequency_min: f64,
+    pub frequency_max: f64,
+    pub bandwidth_min: f64,
+    pub bandwidth_max: f64,
+}
+
+impl Default for HardwareDeviceRxStreamParams {
+    fn default() -> Self {
+        Self {
+            active: true,
+            sample_rate: None,
+            frequency: None,
+            bandwidth: None,
+            gains: Default::default(),
+            sample_rate_min: 0.,
+            sample_rate_max: 0.,
+            frequency_min: 0.,
+            frequency_max: 0.,
+            bandwidth_min: 0.,
+            bandwidth_max: 0.,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GainParams {
+    pub value: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HardwareDeviceTxStreamParams {
+    pub active: bool,
+    pub sample_rate: f64,
+    pub frequency: f64,
+    pub bandwidth: f64,
+}
+
+// HARDWARE //
 
 pub struct Hardware {
     devices: HashMap<HardwareDeviceId, HardwareDevice>,
@@ -305,23 +295,6 @@ struct ActiveHardwareDevice {
     tx_streams: Vec<HardwareDeviceTxStream>,
 }
 
-#[derive(Clone, Debug)]
-pub struct HardwareDeviceParams {
-    pub active: bool,
-    pub rx_streams: Vec<HardwareDeviceRxStreamParams>,
-    pub tx_streams: Vec<HardwareDeviceTxStreamParams>,
-}
-
-impl Default for HardwareDeviceParams {
-    fn default() -> Self {
-        Self {
-            active: true,
-            rx_streams: Default::default(),
-            tx_streams: Default::default(),
-        }
-    }
-}
-
 impl HardwareDevice {
     fn new(
         device_id: HardwareDeviceId,
@@ -444,46 +417,6 @@ impl HardwareDevice {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct GainParams {
-    pub value: f64,
-    pub min: f64,
-    pub max: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct HardwareDeviceRxStreamParams {
-    pub active: bool,
-    pub sample_rate: Option<f64>,
-    pub frequency: Option<f64>,
-    pub bandwidth: Option<f64>,
-    pub gains: HashMap<String, GainParams>,
-    pub sample_rate_min: f64,
-    pub sample_rate_max: f64,
-    pub frequency_min: f64,
-    pub frequency_max: f64,
-    pub bandwidth_min: f64,
-    pub bandwidth_max: f64,
-}
-
-impl Default for HardwareDeviceRxStreamParams {
-    fn default() -> Self {
-        Self {
-            active: true,
-            sample_rate: None,
-            frequency: None,
-            bandwidth: None,
-            gains: Default::default(),
-            sample_rate_min: 0.,
-            sample_rate_max: 0.,
-            frequency_min: 0.,
-            frequency_max: 0.,
-            bandwidth_min: 0.,
-            bandwidth_max: 0.,
-        }
-    }
-}
-
 struct ActiveHardwareDeviceRxStream {
     join_handle: JoinHandle<()>,
     control_sender: SyncSender<HardwareDeviceRxStreamControlMessage>,
@@ -524,19 +457,49 @@ struct HardwareDeviceRxStream {
     bandwidth: f64,
 }
 
-fn compute_range_min_max(ranges: &[soapysdr::Range]) -> Option<(f64, f64)> {
-    if ranges.is_empty() {
-        return None;
+struct ReceiveStream {
+    stream_id: StreamId,
+    receiver: Receiver<ReceiveStreamChunk>,
+    descriptor: Arc<ReceiveStreamDescriptor>,
+    data: Vec<ReceiveStreamChunk>,
+}
+
+impl ReceiveStream {
+    fn new(
+        stream_id: StreamId,
+        descriptor: ReceiveStreamDescriptor,
+        receiver: Receiver<ReceiveStreamChunk>,
+    ) -> Self {
+        ReceiveStream {
+            stream_id,
+            descriptor: Arc::new(descriptor),
+            receiver,
+            data: vec![],
+        }
     }
-    let min = ranges
-        .iter()
-        .map(|r| r.minimum)
-        .fold(f64::INFINITY, f64::min);
-    let max = ranges
-        .iter()
-        .map(|r| r.maximum)
-        .fold(f64::NEG_INFINITY, f64::max);
-    Some((min, max))
+
+    fn process(&mut self) -> bool {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(msg) => {
+                    self.data.push(msg);
+                }
+                Err(TryRecvError::Empty) => {
+                    return true; // Stream is still connected, keep it
+                }
+                Err(TryRecvError::Disconnected) => {
+                    return !self.data.is_empty(); // Stream is disconnected, remove it if the queue is empty
+                }
+            }
+        }
+    }
+
+    fn result(&mut self) -> ReceiveStreamResult {
+        ReceiveStreamResult {
+            descriptor: self.descriptor.clone(),
+            data: mem::replace(&mut self.data, vec![]),
+        }
+    }
 }
 
 impl HardwareDeviceRxStream {
@@ -980,14 +943,6 @@ impl HardwareDeviceRxStream {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct HardwareDeviceTxStreamParams {
-    pub active: bool,
-    pub sample_rate: f64,
-    pub frequency: f64,
-    pub bandwidth: f64,
-}
-
 struct HardwareDeviceTxStream {
     _stream_index: usize,
     _device: soapysdr::Device,
@@ -1003,30 +958,58 @@ impl HardwareDeviceTxStream {
     fn update(&mut self, _params: &mut HardwareDeviceTxStreamParams) {}
 }
 
-pub trait IntoComplexF32 {
-    fn into_complex_f32(self) -> num_complex::Complex32;
+// HELPER FUNCTIONS //
+
+fn compute_range_min_max(ranges: &[soapysdr::Range]) -> Option<(f64, f64)> {
+    if ranges.is_empty() {
+        return None;
+    }
+    let min = ranges
+        .iter()
+        .map(|r| r.minimum)
+        .fold(f64::INFINITY, f64::min);
+    let max = ranges
+        .iter()
+        .map(|r| r.maximum)
+        .fold(f64::NEG_INFINITY, f64::max);
+    Some((min, max))
 }
 
-impl IntoComplexF32 for num_complex::Complex<i8> {
-    fn into_complex_f32(self) -> num_complex::Complex32 {
-        num_complex::Complex32::new(self.re as f32 / 128.0, self.im as f32 / 128.0)
+fn snap_to_range(range: &soapysdr::Range, mut value: f64) -> f64 {
+    // Snap to the nearest discrete step if stepsize is non-zero
+    if range.step > 0.0 {
+        let steps_from_min = (value - range.minimum) / range.step;
+        let rounded_steps = steps_from_min.round();
+        value = range.minimum + (rounded_steps * range.step);
     }
+
+    // Clamp to the desired range
+    value.clamp(range.minimum, range.maximum)
 }
 
-impl IntoComplexF32 for num_complex::Complex<i16> {
-    fn into_complex_f32(self) -> num_complex::Complex32 {
-        num_complex::Complex32::new(self.re as f32 / 32768.0, self.im as f32 / 32768.0)
+fn snap_to_ranges(ranges: &[soapysdr::Range], value: f64) -> f64 {
+    if ranges.is_empty() {
+        return value;
     }
-}
 
-impl IntoComplexF32 for num_complex::Complex<i32> {
-    fn into_complex_f32(self) -> num_complex::Complex32 {
-        num_complex::Complex32::new(self.re as f32 / 2147483648.0, self.im as f32 / 2147483648.0)
-    }
-}
+    // Find the closest range by checking distance to both min and max
 
-impl IntoComplexF32 for num_complex::Complex32 {
-    fn into_complex_f32(self) -> num_complex::Complex32 {
-        self
-    }
+    let (closest_range, _) = ranges
+        .iter()
+        .map(|range| {
+            let dist_to_min = (value - range.minimum).abs();
+            let dist_to_max = (value - range.maximum).abs();
+            let dist_to_range = if value < range.minimum {
+                dist_to_min
+            } else if value > range.maximum {
+                dist_to_max
+            } else {
+                0.0 // value is within range
+            };
+            (range, dist_to_range)
+        })
+        .min_by(|(_, dist_a), (_, dist_b)| dist_a.partial_cmp(dist_b).unwrap())
+        .unwrap();
+
+    snap_to_range(closest_range, value)
 }

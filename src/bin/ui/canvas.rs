@@ -1,6 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use eframe::wgpu;
@@ -229,9 +230,9 @@ pub fn ui(
     temp_random_instant: Instant,
     force_live: bool,
     hardware_params: &mut HardwareParams,
-    bands_info: &Arc<Mutex<BandsInfo>>,
+    bands_info: &Rc<RefCell<BandsInfo>>,
 ) {
-    let highest_freq = { bands_info.lock().unwrap().highest_freq };
+    let highest_freq = { bands_info.borrow().highest_freq };
 
     let id = ui.id().with(&id_source);
     let ui_size = ui.available_size();
@@ -447,7 +448,7 @@ pub fn ui(
 
     // Bands
     {
-        let bands_info = bands_info.lock().unwrap();
+        let bands_info = bands_info.borrow();
         let visuals = ui.visuals().widgets.noninteractive;
         for (bands_or_allocations, offset) in
             [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
@@ -564,9 +565,7 @@ pub fn ui(
                                 .add_filter("Raw (complex f32 samples)", &["raw"])
                                 .save_file()
                             {
-                                if let Err(e) =
-                                    channel.export_iq_data(&path)
-                                {
+                                if let Err(e) = channel.export_iq_data(&path) {
                                     eprintln!("Failed to export IQ data: {}", e);
                                 }
                             }
