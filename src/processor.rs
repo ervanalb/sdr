@@ -10,12 +10,14 @@ use std::collections::BTreeMap;
 use std::ops::{DerefMut, Range};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const STREAM_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
 const STREAM_TARGET_OUTPUT_PERIOD: f64 = 0.01; // 100 chunks per second
 const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
+const STREAM_PEAK_TIME_CONSTANT: f64 = 1.;
 const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
+const CHANNEL_MARGIN: f64 = 0.05; // Add 5% of channel bandwidth as margin on each side
 
 // IDS //
 
@@ -53,6 +55,8 @@ pub struct WaterfallRow {
     pub spectrum: Vec<f32>,
     pub min: f32,
     pub max: f32,
+    pub peak: f32,
+    pub overload: bool,
 }
 
 impl std::fmt::Debug for WaterfallRow {
@@ -62,6 +66,8 @@ impl std::fmt::Debug for WaterfallRow {
             .field("spectrum.len()", &self.spectrum.len())
             .field("min", &self.min)
             .field("max", &self.max)
+            .field("peak", &self.peak)
+            .field("overload", &self.overload)
             .finish()
     }
 }
@@ -138,6 +144,7 @@ impl StreamProcessor {
             STREAM_TARGET_BIN_SIZE,
             STREAM_TARGET_OUTPUT_PERIOD,
             STREAM_MIN_MAX_TIME_CONSTANT,
+            STREAM_PEAK_TIME_CONSTANT,
             STREAM_OFFSET_REJECT_TIME_CONSTANT,
             descriptor.start_time,
             channels,
@@ -163,12 +170,14 @@ impl StreamProcessor {
         };
         for msg in data {
             self.rechunker.process(&msg.iq_data, |chunk| {
-                self.processor.process_chunk(&chunk);
+                self.processor.process_chunk(&chunk, msg.time);
                 result.waterfall_rows.push(WaterfallRow {
                     time: msg.time,
                     spectrum: self.processor.spectrum.clone(),
                     min: self.processor.min,
                     max: self.processor.max,
+                    peak: self.processor.peak,
+                    overload: self.processor.overload,
                 });
                 for channel in self.processor.channels.iter() {
                     let channel_result =
@@ -199,7 +208,12 @@ struct StreamChunkProcessor {
     spectrum: Vec<f32>,
     min: f32,
     max: f32,
+    peak: f32,
+    overload_t: Instant,
+    overload: bool,
     min_max_alpha: f32,
+    peak_alpha: f32,
+    peak_time_constant: f64,
     offset: Complex<f32>,
     offset_reject_alpha: f32,
     channels: Vec<Channel>,
@@ -213,6 +227,7 @@ impl StreamChunkProcessor {
         target_bin_size: f64,
         target_output_period: f64,
         min_max_time_constant: f64,
+        peak_time_constant: f64,
         offset_reject_time_constant: f64,
         time: Instant,
         channel_group_info: &[ChannelGroupInfo],
@@ -232,6 +247,7 @@ impl StreamChunkProcessor {
         let fft = Fft::new(fft_size);
 
         let min_max_alpha = (output_period / (min_max_time_constant + output_period)) as f32;
+        let peak_alpha = (output_period / (peak_time_constant + output_period)) as f32;
         let offset_reject_alpha =
             (output_period / (offset_reject_time_constant + output_period)) as f32;
 
@@ -276,7 +292,12 @@ impl StreamChunkProcessor {
             spectrum: vec![0.; fft_size],
             min: std::f32::NAN,
             max: std::f32::NAN,
+            peak: std::f32::NAN,
+            overload_t: time - Duration::from_secs_f64(2. * peak_time_constant),
+            overload: false,
             min_max_alpha,
+            peak_alpha,
+            peak_time_constant,
             offset: Default::default(),
             offset_reject_alpha,
             channels,
@@ -305,20 +326,31 @@ impl StreamChunkProcessor {
         }
 
         // This channel is probably within range
-        let channel_group = channel_group.get_or_insert_with(|| {
+        let ChannelGroup {
+            signal_bin_count,
+            margin_bin_count,
+            ifft,
+        } = channel_group.get_or_insert_with(|| {
             // Compute channel width, in bins
-            let width_bins = fft.size() as f64 * channel_group_info.bandwidth / sample_rate;
-            let width_bins = (width_bins / 2.).max(1.).ceil() as usize * 2; // Round up to even size of at least 2
-            let ifft = Ifft::new(width_bins);
+            let signal_bin_count = fft.size() as f64 * channel_group_info.bandwidth / sample_rate;
+            let signal_bin_count = (signal_bin_count / 2.).max(1.).ceil() as usize * 2; // Round up to even size of at least 2
+            let margin_bin_count =
+                fft.size() as f64 * channel_group_info.bandwidth * CHANNEL_MARGIN / sample_rate;
+            let margin_bin_count = margin_bin_count.max(1.).ceil() as usize;
+            let ifft = Ifft::new(signal_bin_count + 2 * margin_bin_count);
 
-            ChannelGroup { ifft }
+            ChannelGroup {
+                signal_bin_count,
+                margin_bin_count,
+                ifft,
+            }
         });
 
         let center_bin =
             fft.freq2bin((channel_info.center_frequency - stream_center_frequency) / sample_rate);
         // If left bin < 0, skip this channel
-        let left_bin = center_bin.checked_sub(channel_group.ifft.dc_bin())?;
-        let right_bin = left_bin + channel_group.ifft.size();
+        let left_bin = center_bin.checked_sub(ifft.dc_bin() - *margin_bin_count)?;
+        let right_bin = left_bin + *signal_bin_count;
         if right_bin > fft.size() {
             // If right bin > fft.size(), skip this channel
             return None;
@@ -334,9 +366,9 @@ impl StreamChunkProcessor {
         // General form: [phasor^0, phasor^1, phasor^2, ...]
         let phasors = [1., phasor];
 
-        let output_sample_rate = sample_rate * channel_group.ifft.size() as f64 / fft.size() as f64;
+        let output_sample_rate = sample_rate * ifft.size() as f64 / fft.size() as f64;
 
-        let overlap_reduce = OverlapReduce::new(channel_group.ifft.size() / 2);
+        let overlap_reduce = OverlapReduce::new(ifft.size() / 2);
 
         let descriptor = ChannelDescriptor {
             sample_rate: output_sample_rate,
@@ -351,16 +383,38 @@ impl StreamChunkProcessor {
             id: id_factory.create(),
             descriptor: Arc::new(descriptor),
             bins,
+            margin_bin_count: *margin_bin_count,
             phasors,
-            ifft: channel_group.ifft.clone(),
+            ifft: ifft.clone(),
             overlap_reduce,
             iq_data: vec![],
         })
     }
 
-    pub fn process_chunk(&mut self, samples: &[Complex<f32>]) {
+    pub fn process_chunk(&mut self, samples: &[Complex<f32>], time: Instant) {
         assert_eq!(samples.len(), self.chunk_size);
         // TODO custom error type
+
+        // Find peak value of data
+        let new_peak = samples
+            .iter()
+            .map(|s| s.re.abs().max(s.im.abs()))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+            .unwrap();
+        // LPF peak
+        if new_peak < self.peak {
+            self.peak = log_mix_f32(self.peak, new_peak, self.peak_alpha);
+        } else {
+            self.peak = new_peak;
+        }
+
+        // Update overload flag
+        if self.peak >= 1. {
+            self.overload_t = time;
+            self.overload = true;
+        } else if time.duration_since(self.overload_t).as_secs_f64() >= self.peak_time_constant {
+            self.overload = false;
+        }
 
         let mut offset_accumulator = Complex::<f32>::ZERO;
         self.spectrum.fill(0.);
@@ -443,13 +497,16 @@ impl StreamChunkProcessor {
             let mut counter = self.counter;
             for one_fft in buffer.chunks_exact(self.fft.size()) {
                 // This is a hot loop
-                let slice = &one_fft[channel.bins.clone()];
-                let start = fft_buffer.len();
-                fft_buffer.extend_from_slice(slice);
+                let start = fft_buffer.len() + channel.margin_bin_count;
+                let end = fft_buffer.len() + channel.ifft.size() - channel.margin_bin_count;
+                // Resize to accomodate IFFT, filling margin with zeros
+                fft_buffer.resize(fft_buffer.len() + channel.ifft.size(), Complex::ZERO);
+                // Copy in FFT data
+                fft_buffer[start..end].clone_from_slice(&one_fft[channel.bins.clone()]);
 
                 // Apply phase correction due to overlap
                 let phasor = channel.phasors[counter as usize];
-                for sample in fft_buffer[start..start + slice.len()].iter_mut() {
+                for sample in fft_buffer[start..end].iter_mut() {
                     *sample *= phasor;
                 }
                 counter = (counter + 1) % 2;
@@ -464,6 +521,8 @@ impl StreamChunkProcessor {
 }
 
 struct ChannelGroup {
+    signal_bin_count: usize,
+    margin_bin_count: usize,
     ifft: Ifft,
 }
 
@@ -472,6 +531,7 @@ pub struct Channel {
     descriptor: Arc<ChannelDescriptor>,
     iq_data: Vec<Complex<f32>>,
     bins: Range<usize>,
+    margin_bin_count: usize,
     phasors: [f32; 2],
     ifft: Ifft,
     overlap_reduce: OverlapReduce<Complex<f32>>,

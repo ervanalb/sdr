@@ -115,9 +115,11 @@ impl eframe::App for SdrApp {
         let processed_results = self.processor.process(&hardware_results);
 
         // Deactivate waterfall streams that don't exist anymore
-        self.waterfall_gpu.retain_active_streams(|stream_id| {
-            processed_results.receive_streams.contains_key(&stream_id)
-        });
+        self.waterfall_gpu.retain_active_streams(
+            &wgpu_render_state.device,
+            &wgpu_render_state.queue,
+            |stream_id| processed_results.receive_streams.contains_key(&stream_id),
+        );
 
         // Process all streams
         for (stream_id, stream) in processed_results.receive_streams.into_iter() {

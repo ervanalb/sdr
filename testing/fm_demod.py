@@ -63,22 +63,22 @@ def demodulate_fm(iq_samples, sample_rate):
 
     amp = np.abs(iq_samples)
     phase_diff = np.diff(np.atan2(np.imag(iq_samples), np.real(iq_samples)))
-    #plt.plot(phase_diff)
     phase_diff = (phase_diff + np.pi) % (2 * np.pi) - np.pi
-    plt.plot(amp / np.max(amp))
-
-    filt = ndimage.median_filter(phase_diff, size=9)
-    resid = phase_diff - filt
-    resid = (resid + np.pi) % (2 * np.pi) - np.pi
-    phase_diff = filt + resid
     plt.plot(phase_diff)
+    plt.plot(amp / np.max(amp))
+    plt.show()
+
+    #filt = ndimage.median_filter(phase_diff, size=9)
+    #resid = phase_diff - filt
+    #resid = (resid + np.pi) % (2 * np.pi) - np.pi
+    #phase_diff = filt + resid
+    #plt.plot(phase_diff)
 
     #phase_diff2 = np.diff(phase_diff)
     #plt.plot(phase_diff2)
     #phase_diff2 = (phase_diff2 + np.pi) % (2 * np.pi) - np.pi
     #phase_diff2 = np.cumsum(phase_diff2)
     #plt.plot(phase_diff2)
-    plt.show()
 
     # The phase difference is proportional to the instantaneous frequency
     # Normalize to [-1, 1] range for audio
