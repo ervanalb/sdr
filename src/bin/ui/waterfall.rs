@@ -1,5 +1,5 @@
 use eframe::wgpu;
-use sdr::waterfall_gpu::ChunkDrawInfo;
+use sdr::stream_history::WaterfallDrawInfo;
 use std::{ops::Range, time::Instant};
 
 const BUFFER_LEN: usize = 4096;
@@ -183,7 +183,7 @@ impl WaterfallRenderer {
 
     pub fn prepare(
         &mut self,
-        chunks: Vec<ChunkDrawInfo>,
+        chunks: Vec<WaterfallDrawInfo>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         uniform_buffer: &wgpu::Buffer,

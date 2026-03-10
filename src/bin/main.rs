@@ -5,7 +5,7 @@ use sdr::band_info::BandsInfo;
 use sdr::channels_gpu::ChannelsGpu;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::Processor;
-use sdr::waterfall_gpu::WaterfallGpu;
+use sdr::stream_history::StreamHistory;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -51,7 +51,7 @@ struct SdrApp {
     hardware_params: HardwareParams,
     processor: Processor,
     viewport_state: ui::canvas::Viewport,
-    waterfall_gpu: WaterfallGpu,
+    stream_history: StreamHistory,
     channels_gpu: ChannelsGpu,
     reference_time: Instant,
     prev_reference_time: Instant,
@@ -76,7 +76,7 @@ impl SdrApp {
             hardware_params: HardwareParams::default(),
             processor: Processor::new(bands_info.clone()),
             viewport_state: ui::canvas::Viewport::default(),
-            waterfall_gpu: WaterfallGpu::new(device),
+            stream_history: StreamHistory::new(device),
             channels_gpu: ChannelsGpu::new(),
             reference_time: now,
             prev_reference_time: now,
@@ -115,7 +115,7 @@ impl eframe::App for SdrApp {
         let processed_results = self.processor.process(&hardware_results);
 
         // Deactivate waterfall streams that don't exist anymore
-        self.waterfall_gpu.retain_active_streams(
+        self.stream_history.retain(
             &wgpu_render_state.device,
             &wgpu_render_state.queue,
             |stream_id| processed_results.receive_streams.contains_key(&stream_id),
@@ -123,7 +123,7 @@ impl eframe::App for SdrApp {
 
         // Process all streams
         for (stream_id, stream) in processed_results.receive_streams.into_iter() {
-            self.waterfall_gpu.add_rows(
+            self.stream_history.push(
                 stream_id,
                 stream.descriptor,
                 stream.spectrum_len,
@@ -136,8 +136,8 @@ impl eframe::App for SdrApp {
                 self.channels_gpu.add_chunks(stream_id, channel_id, channel);
             }
         }
-        self.waterfall_gpu
-            .prune_old_textures(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+        self.stream_history
+            .prune_old_data(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
         self.channels_gpu
             .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 
@@ -265,6 +265,30 @@ impl eframe::App for SdrApp {
                                                         ui.label(format!("{:.1} dB", gain.value));
                                                     }
                                                 }
+
+                                                // Peak meter
+                                                let mut peak = None;
+                                                for active_stream in
+                                                    self.stream_history.active_streams.values()
+                                                {
+                                                    if &active_stream.descriptor.device_id
+                                                        == device_id
+                                                        && active_stream.descriptor.stream_index
+                                                            == stream_index
+                                                    {
+                                                        peak = Some((
+                                                            active_stream.peak,
+                                                            active_stream.overload,
+                                                        ));
+                                                    }
+                                                }
+                                                if let Some((peak, overload)) = peak {
+                                                    ui.label(format!(
+                                                        "Peak: {:.1} dBFS {}",
+                                                        20. * peak.log10(),
+                                                        if overload { "O" } else { "" }
+                                                    ));
+                                                }
                                             },
                                         );
                                     }
@@ -291,7 +315,7 @@ impl eframe::App for SdrApp {
                 ui,
                 "canvas",
                 &mut self.viewport_state,
-                &self.waterfall_gpu,
+                &self.stream_history,
                 &self.channels_gpu,
                 self.reference_time,
                 self.reference_time.duration_since(self.prev_reference_time),

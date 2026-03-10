@@ -433,9 +433,9 @@ impl StreamChunkProcessor {
         // FFT each chunk
         self.fft.process_inplace(&mut buffer);
 
-        // Apply offset correction
+        // Measure & apply offset correction
         for one_fft in buffer.chunks_exact_mut(self.fft.size()) {
-            offset_accumulator += (1. / 3.)
+            offset_accumulator += (1. / 6.)
                 * (-one_fft[self.fft.dc_bin() - 1] + 2. * one_fft[self.fft.dc_bin()]
                     - one_fft[self.fft.dc_bin() + 1]);
             one_fft[self.fft.dc_bin()] -= self.offset;

@@ -11,13 +11,13 @@ use wgpu::{
 
 const TEXTURE_HEIGHT: u32 = 1024;
 
-pub struct WaterfallGpu {
-    active_textures: BTreeMap<StreamId, ActiveTexture>,
-    finished_streams: BTreeMap<StreamId, FinishedStream>,
+pub struct StreamHistory {
+    pub active_streams: BTreeMap<StreamId, ActiveStream>,
+    pub finished_streams: BTreeMap<StreamId, FinishedStream>,
     blank_texture: Texture,
 }
 
-impl WaterfallGpu {
+impl StreamHistory {
     pub fn new(device: &Device) -> Self {
         let blank_texture = device.create_texture(&TextureDescriptor {
             label: Some("Blank Waterfall Texture"),
@@ -35,20 +35,53 @@ impl WaterfallGpu {
         });
 
         Self {
-            active_textures: BTreeMap::new(),
+            active_streams: BTreeMap::new(),
             finished_streams: BTreeMap::new(),
             blank_texture,
         }
     }
 
-    pub fn retain_active_streams(
+    pub fn push(
+        &mut self,
+        stream_id: StreamId,
+        descriptor: Arc<ReceiveStreamDescriptor>,
+        spectrum_len: usize,
+        waterfall_rows: Vec<WaterfallRow>,
+        device: &Device,
+        queue: &Queue,
+    ) {
+        let active_texture = self.active_streams.entry(stream_id).or_insert_with(|| {
+            let start_time = descriptor.start_time;
+            ActiveStream::new(
+                device,
+                descriptor,
+                spectrum_len as u32,
+                start_time,
+                self.blank_texture.clone(),
+            )
+        });
+        for waterfall_row in waterfall_rows.iter() {
+            if let Some(finished_texture) = active_texture.push(device, queue, waterfall_row) {
+                Self::push_finished_texture(
+                    &mut self.finished_streams,
+                    stream_id,
+                    active_texture.descriptor.clone(),
+                    active_texture.min,
+                    active_texture.max,
+                    finished_texture,
+                );
+            }
+        }
+    }
+
+    pub fn retain(
         &mut self,
         device: &Device,
         queue: &Queue,
         mut predicate: impl FnMut(StreamId) -> bool,
     ) {
         let closed: BTreeMap<_, _> = self
-            .active_textures
+            .active_streams
             .extract_if(.., |stream_id, _| !predicate(*stream_id))
             .collect();
 
@@ -72,37 +105,9 @@ impl WaterfallGpu {
         }
     }
 
-    pub fn add_rows(
-        &mut self,
-        stream_id: StreamId,
-        descriptor: Arc<ReceiveStreamDescriptor>,
-        spectrum_len: usize,
-        waterfall_rows: Vec<WaterfallRow>,
-        device: &Device,
-        queue: &Queue,
-    ) {
-        let active_texture = self.active_textures.entry(stream_id).or_insert_with(|| {
-            let start_time = descriptor.start_time;
-            ActiveTexture::new(
-                device,
-                descriptor,
-                spectrum_len as u32,
-                start_time,
-                self.blank_texture.clone(),
-            )
-        });
-        for waterfall_row in waterfall_rows.iter() {
-            if let Some(finished_texture) = active_texture.add_row(device, queue, waterfall_row) {
-                Self::push_finished_texture(
-                    &mut self.finished_streams,
-                    stream_id,
-                    active_texture.descriptor.clone(),
-                    active_texture.min,
-                    active_texture.max,
-                    finished_texture,
-                );
-            }
-        }
+    pub fn prune_old_data(&mut self, time: Instant) {
+        self.finished_streams
+            .retain(|_, stream| stream.prune_old_data(time));
     }
 
     fn push_finished_texture(
@@ -126,22 +131,17 @@ impl WaterfallGpu {
         finished_stream.textures.push(finished_texture);
     }
 
-    pub fn prune_old_textures(&mut self, time: Instant) {
-        self.finished_streams
-            .retain(|_, stream| stream.prune_old_textures(time));
-    }
-
-    pub fn draw_list(&self) -> impl Iterator<Item = ChunkDrawInfo> {
+    pub fn draw_list(&self) -> impl Iterator<Item = WaterfallDrawInfo> {
         // Collect all chunks into a draw list
 
-        self.active_textures
+        self.active_streams
             .values()
             .map(|active_texture| {
                 let freq_min = active_texture.descriptor.frequency
                     - 0.5 * active_texture.descriptor.sample_rate;
                 let freq_max = active_texture.descriptor.frequency
                     + 0.5 * active_texture.descriptor.sample_rate;
-                ChunkDrawInfo {
+                WaterfallDrawInfo {
                     freq_min,
                     freq_max,
                     start_time: active_texture.start_time,
@@ -160,7 +160,7 @@ impl WaterfallGpu {
                 stream
                     .textures
                     .iter()
-                    .map(move |finished_texture| ChunkDrawInfo {
+                    .map(move |finished_texture| WaterfallDrawInfo {
                         freq_min,
                         freq_max,
                         start_time: finished_texture.start_time,
@@ -173,59 +173,27 @@ impl WaterfallGpu {
                         v_end: 1.,
                     })
             }))
-
-        /*
-        self.texture_groups.iter().flat_map(|(_stream_id, group)| {
-            let freq_min = group.descriptor.frequency - 0.5 * group.descriptor.sample_rate;
-            let freq_max = group.descriptor.frequency + 0.5 * group.descriptor.sample_rate;
-            group
-                .finished_textures
-                .iter()
-                .map(move |texture_info| ChunkDrawInfo {
-                    freq_min,
-                    freq_max,
-                    start_time: texture_info.start_time,
-                    end_time: texture_info.end_time,
-                    texture: texture_info.texture.clone(),
-                    prev_texture: texture_info.prev_texture.clone(),
-                    next_texture: texture_info.next_texture.clone(),
-                    min: group.min,
-                    max: group.max,
-                    v_end: 1.,
-                })
-                .chain(Some(ChunkDrawInfo {
-                    freq_min,
-                    freq_max,
-                    start_time: group.active_texture.start_time,
-                    end_time: group.active_texture.end_time,
-                    texture: group.active_texture.texture.clone(),
-                    prev_texture: group.active_texture.prev_texture.clone(),
-                    next_texture: self.blank_texture.clone(),
-                    min: group.min,
-                    max: group.max,
-                    v_end: group.active_texture.current_row as f32 / TEXTURE_HEIGHT as f32,
-                }))
-        })
-        */
     }
 }
 
 #[derive(Debug)]
-struct ActiveTexture {
-    descriptor: Arc<ReceiveStreamDescriptor>,
+pub struct ActiveStream {
+    pub descriptor: Arc<ReceiveStreamDescriptor>,
     prev_texture: Texture,
     texture: Texture,
     current_row: usize,
-    start_time: Instant,
-    end_time: Instant,
-    spectrum_len: u32,
+    pub start_time: Instant,
+    pub end_time: Instant,
+    pub spectrum_len: u32,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
-    min: f32,
-    max: f32,
+    pub min: f32,
+    pub max: f32,
+    pub peak: f32,
+    pub overload: bool,
 }
 
-impl ActiveTexture {
+impl ActiveStream {
     fn new(
         device: &Device,
         descriptor: Arc<ReceiveStreamDescriptor>,
@@ -265,10 +233,12 @@ impl ActiveTexture {
             mip_buffer: vec![0.; (2 * spectrum_len + mip_level_count) as usize],
             min: f32::NAN,
             max: f32::NAN,
+            peak: f32::NAN,
+            overload: false,
         }
     }
 
-    fn new_following(device: &Device, prev: &ActiveTexture) -> Self {
+    fn new_following(device: &Device, prev: &ActiveStream) -> Self {
         Self::new(
             device,
             prev.descriptor.clone(),
@@ -278,7 +248,7 @@ impl ActiveTexture {
         )
     }
 
-    fn add_row(
+    fn push(
         &mut self,
         device: &Device,
         queue: &Queue,
@@ -352,6 +322,8 @@ impl ActiveTexture {
         self.end_time = waterfall_row.time;
         self.min = waterfall_row.min;
         self.max = waterfall_row.max;
+        self.peak = waterfall_row.peak;
+        self.overload = waterfall_row.overload;
 
         finished_texture
     }
@@ -442,23 +414,22 @@ impl ActiveTexture {
     // When this texture fills up, swap it for a new one
     fn swap(&mut self, device: &Device, queue: &Queue) -> Option<FinishedTexture> {
         // Create a new active texture
-        let texture = self.texture.clone();
-        let prev = mem::replace(self, ActiveTexture::new_following(device, self));
-        prev.finish(device, queue, texture)
+        let prev = mem::replace(self, ActiveStream::new_following(device, self));
+        prev.finish(device, queue, self.texture.clone())
     }
 }
 
 #[derive(Debug)]
-struct FinishedStream {
-    descriptor: Arc<ReceiveStreamDescriptor>,
+pub struct FinishedStream {
+    pub descriptor: Arc<ReceiveStreamDescriptor>,
     textures: Vec<FinishedTexture>,
-    min: f32,
-    max: f32,
+    pub min: f32,
+    pub max: f32,
 }
 
 impl FinishedStream {
     // Returns true if there are still chunks
-    fn prune_old_textures(&mut self, time: Instant) -> bool {
+    fn prune_old_data(&mut self, time: Instant) -> bool {
         let mut any_remain = false;
         self.textures.retain(|texture| {
             if texture.end_time > time {
@@ -481,124 +452,8 @@ struct FinishedTexture {
     end_time: Instant,
 }
 
-/*
-#[derive(Debug)]
-struct TextureGroup {
-}
-
-impl TextureGroup {
-    fn add_row(&mut self, device: &Device, queue: &Queue, waterfall_row: WaterfallRow) {
-        if self.active_texture.current_row >= TEXTURE_HEIGHT as usize {
-            self.swap_active_texture(device, queue);
-        }
-
-        self.active_texture.add_row(queue, &waterfall_row.spectrum);
-        self.active_texture.end_time = waterfall_row.time;
-        self.min = waterfall_row.min;
-        self.max = waterfall_row.max;
-    }
-
-    // Returns true if there are still chunks
-    fn prune_old_textures(&mut self, time: Instant) -> bool {
-        let mut any_remain = false;
-        self.finished_textures.retain(|texture| {
-            if texture.end_time > time {
-                any_remain = true;
-                true
-            } else {
-                false
-            }
-        });
-        any_remain || self.active_texture.end_time > time
-    }
-
-    fn swap_active_texture(&mut self, device: &Device, queue: &Queue) {
-        if self.active_texture.current_row < TEXTURE_HEIGHT as usize {
-            // If partial, copy this texture into an appropriately sized one
-            // to free up space
-
-            let mut smaller_size = Extent3d {
-                width: self.active_texture.texture.width(),
-                height: self.active_texture.current_row as u32,
-                depth_or_array_layers: 1,
-            };
-            let mip_level_count = self.active_texture.current_row.ilog2().max(1);
-            let smaller_texture = device.create_texture(&TextureDescriptor {
-                label: Some("Waterfall Texture"),
-                size: smaller_size,
-                mip_level_count,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::R32Float,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Texture copy command encoder"),
-            });
-
-            for mip_level in 0..mip_level_count {
-                encoder.copy_texture_to_texture(
-                    TexelCopyTextureInfo {
-                        texture: &self.active_texture.texture,
-                        mip_level,
-                        origin: Origin3d::ZERO,
-                        aspect: TextureAspect::All,
-                    },
-                    TexelCopyTextureInfo {
-                        texture: &smaller_texture,
-                        mip_level,
-                        origin: Origin3d::ZERO,
-                        aspect: TextureAspect::All,
-                    },
-                    smaller_size,
-                );
-
-                smaller_size = Extent3d {
-                    width: (smaller_size.width / 2).max(1),
-                    height: smaller_size.height / 2,
-                    depth_or_array_layers: 1,
-                };
-            }
-
-            queue.submit(Some(encoder.finish()));
-
-            self.active_texture.texture = smaller_texture;
-        }
-
-        // Create a new active texture
-        let prev_end_time = self.active_texture.end_time;
-        let prev_texture = self.active_texture.texture.clone();
-        let spectrum_len = self.active_texture.spectrum_len;
-        let old_active_texture = std::mem::replace(
-            &mut self.active_texture,
-            ActiveTexture::new(device, spectrum_len, prev_end_time, prev_texture),
-        );
-        let next_texture = self.active_texture.texture.clone();
-
-        self.finished_textures.push(TextureInfo {
-            texture: old_active_texture.texture,
-            prev_texture: old_active_texture.prev_texture,
-            next_texture,
-            start_time: old_active_texture.start_time,
-            end_time: old_active_texture.end_time,
-        });
-    }
-}
-
-#[derive(Debug)]
-struct TextureInfo {
-    texture: Texture,
-    prev_texture: Texture,
-    next_texture: Texture,
-    start_time: Instant,
-    end_time: Instant,
-}
-*/
-
 #[derive(Debug, Clone)]
-pub struct ChunkDrawInfo {
+pub struct WaterfallDrawInfo {
     pub freq_min: f64,
     pub freq_max: f64,
     pub start_time: Instant,

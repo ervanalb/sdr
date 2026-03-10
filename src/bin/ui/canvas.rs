@@ -1,17 +1,15 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::rc::Rc;
-use std::time::{Duration, Instant};
-
+use super::waterfall::WaterfallRenderer;
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
 use sdr::channels_gpu::ChannelsGpu;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
-use sdr::waterfall_gpu::{ChunkDrawInfo, WaterfallGpu};
-
-use super::waterfall::WaterfallRenderer;
+use sdr::stream_history::{StreamHistory, WaterfallDrawInfo};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
@@ -109,7 +107,7 @@ struct Callback {
     viewport_size: egui::Vec2,
     translation: egui::Vec2,
     scale: egui::Vec2,
-    waterfall_chunks: Vec<ChunkDrawInfo>,
+    waterfall_chunks: Vec<WaterfallDrawInfo>,
     reference_time: Instant,
 }
 
@@ -223,7 +221,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
-    waterfall_gpu: &WaterfallGpu,
+    waterfall_gpu: &StreamHistory,
     channels_gpu: &ChannelsGpu,
     reference_time: Instant,
     dt: Duration,
