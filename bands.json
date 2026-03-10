@@ -187,7 +187,10 @@
       "naming": {
         "Frequency": 5
       },
-      "bandwidth": 200e3
+      "bandwidth": 200e3,
+      "modulation": {
+	"type": "FmModulationParameters"
+      }
     },
     {
       "name": "HAM",
@@ -197,7 +200,10 @@
       "naming": {
         "Frequency": 2
       },
-      "bandwidth": 12.5e3
+      "bandwidth": 12.5e3,
+      "modulation": {
+	"type": "FmModulationParameters"
+      }
     },
     {
       "name": "Public Safety",
@@ -207,7 +213,10 @@
       "naming": {
         "Frequency": 2
       },
-      "bandwidth": 12.5e3
+      "bandwidth": 12.5e3,
+      "modulation": {
+	"type": "FmModulationParameters"
+      }
     }
   ],
   "highest_freq": 12e9

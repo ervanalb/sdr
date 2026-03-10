@@ -2,7 +2,7 @@
 
 use eframe::egui;
 use sdr::band_info::BandsInfo;
-use sdr::channels_gpu::ChannelsGpu;
+use sdr::history::History;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::Processor;
 use sdr::stream_history::StreamHistory;
@@ -52,7 +52,7 @@ struct SdrApp {
     processor: Processor,
     viewport_state: ui::canvas::Viewport,
     stream_history: StreamHistory,
-    channels_gpu: ChannelsGpu,
+    history: History,
     reference_time: Instant,
     prev_reference_time: Instant,
     temp_random_instant: Instant,
@@ -77,7 +77,7 @@ impl SdrApp {
             processor: Processor::new(bands_info.clone()),
             viewport_state: ui::canvas::Viewport::default(),
             stream_history: StreamHistory::new(device),
-            channels_gpu: ChannelsGpu::new(),
+            history: History::new(),
             reference_time: now,
             prev_reference_time: now,
             temp_random_instant: now,
@@ -133,12 +133,12 @@ impl eframe::App for SdrApp {
             );
             // Process all channels
             for (channel_id, channel) in stream.channels.into_iter() {
-                self.channels_gpu.add_chunks(stream_id, channel_id, channel);
+                self.history.add_chunks(stream_id, channel_id, channel);
             }
         }
         self.stream_history
             .prune_old_data(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
-        self.channels_gpu
+        self.history
             .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 
         let prev_run = self.hardware_params.run;
@@ -316,7 +316,7 @@ impl eframe::App for SdrApp {
                 "canvas",
                 &mut self.viewport_state,
                 &self.stream_history,
-                &self.channels_gpu,
+                &self.history,
                 self.reference_time,
                 self.reference_time.duration_since(self.prev_reference_time),
                 self.temp_random_instant,

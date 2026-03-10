@@ -1,9 +1,9 @@
 use super::waterfall::WaterfallRenderer;
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
-use sdr::channels_gpu::ChannelsGpu;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
+use sdr::history::History;
 use sdr::stream_history::{StreamHistory, WaterfallDrawInfo};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -222,7 +222,7 @@ pub fn ui(
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
     waterfall_gpu: &StreamHistory,
-    channels_gpu: &ChannelsGpu,
+    history: &History,
     reference_time: Instant,
     dt: Duration,
     temp_random_instant: Instant,
@@ -501,28 +501,24 @@ pub fn ui(
             .duration_since(temp_random_instant)
             .as_secs_f64();
 
-        for (channel_id, channel) in channels_gpu.channels.iter() {
-            let center_frequency = channel.descriptor.center_frequency;
-            let width = channel.descriptor.bandwidth;
-
+        for draw_info in history.draw_list() {
             // Calculate time positions relative to temp_random_instant
             let start_time = offset
-                - channel
-                    .descriptor
+                - draw_info
                     .start_time
                     .duration_since(temp_random_instant)
                     .as_secs_f64();
             let end_time = offset
-                - channel
+                - draw_info
                     .end_time
                     .duration_since(temp_random_instant)
                     .as_secs_f64();
 
             // Convert to screen coordinates
             let left = figure_rect.left()
-                + viewport.screen_space_x((center_frequency - 0.5 * width) as f32);
+                + viewport.screen_space_x(draw_info.freq_min);
             let right = figure_rect.left()
-                + viewport.screen_space_x((center_frequency + 0.5 * width) as f32);
+                + viewport.screen_space_x(draw_info.freq_max);
             let bottom = figure_rect.top() + viewport.screen_space_y(start_time as f32);
             let top = figure_rect.top() + viewport.screen_space_y(end_time as f32);
 
@@ -542,34 +538,8 @@ pub fn ui(
                     visuals.fg_stroke,
                     egui::StrokeKind::Outside,
                 );
-
-                egui::Popup::context_menu(&response)
-                    .id(egui::Id::new(channel_id))
-                    .show(|ui| {
-                        if ui.button("Export IQ data...").clicked() {
-                            ui.close();
-
-                            // Sanitize the channel name for use as a filename
-                            let default_name = format!(
-                                "{}_{}sps.raw",
-                                channel.descriptor.name,
-                                channel.descriptor.sample_rate.round()
-                            )
-                            .replace(" ", "_")
-                            .replace("/", "_");
-
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_file_name(&default_name)
-                                .add_filter("Raw (complex f32 samples)", &["raw"])
-                                .save_file()
-                            {
-                                if let Err(e) = channel.export_iq_data(&path) {
-                                    eprintln!("Failed to export IQ data: {}", e);
-                                }
-                            }
-                        }
-                    });
-                response.on_hover_text(channel.descriptor.name.clone());
+                (draw_info.ui)(&response);
+                response.on_hover_text(draw_info.name);
             }
         }
     }

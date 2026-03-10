@@ -1,9 +1,11 @@
 use crate::band_info::{BandsInfo, ChannelGroupInfo, ChannelInfo};
-use crate::dsp::{Fft, Ifft, OverlapExpand, OverlapReduce, Rechunker, hann_window};
+use crate::dsp::{Fft, Ifft, OverlapExpand, Rechunker, hann_window};
 use crate::hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId};
 use crate::id_factory::IdFactory;
+use crate::modulation::{Demodulator, ModulationParameters};
 use num_complex::Complex;
 use rayon::prelude::*;
+use std::any::Any;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -33,6 +35,7 @@ pub struct ChannelDescriptor {
     pub bandwidth: f64,
     pub tuning_error: f64,
     pub start_time: Instant,
+    pub modulation: Box<dyn ModulationParameters>,
 }
 
 // RESULTS //
@@ -75,21 +78,7 @@ impl std::fmt::Debug for WaterfallRow {
 #[derive(Debug)]
 pub struct ChannelResult {
     pub descriptor: Arc<ChannelDescriptor>,
-    pub iq: Vec<IqChunk>,
-}
-
-pub struct IqChunk {
-    pub time: Instant,
-    pub data: Vec<Complex<f32>>,
-}
-
-impl std::fmt::Debug for IqChunk {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IqChunk")
-            .field("time", &self.time)
-            .field("data.len()", &self.data.len())
-            .finish()
-    }
+    pub demodulation: Vec<Box<dyn Any + Send>>,
 }
 
 // PROCESSOR //
@@ -170,7 +159,7 @@ impl StreamProcessor {
         };
         for msg in data {
             self.rechunker.process(&msg.iq_data, |chunk| {
-                self.processor.process_chunk(&chunk, msg.time);
+                let channel_demodulations = self.processor.process_chunk(&chunk, msg.time);
                 result.waterfall_rows.push(WaterfallRow {
                     time: msg.time,
                     spectrum: self.processor.spectrum.clone(),
@@ -179,19 +168,22 @@ impl StreamProcessor {
                     peak: self.processor.peak,
                     overload: self.processor.overload,
                 });
-                for channel in self.processor.channels.iter() {
+                for (channel_id, demodulation) in channel_demodulations {
+                    let channel = self
+                        .processor
+                        .channels
+                        .iter()
+                        .find(|c| c.id == channel_id)
+                        .unwrap();
                     let channel_result =
                         result
                             .channels
-                            .entry(channel.id)
+                            .entry(channel_id)
                             .or_insert_with(|| ChannelResult {
                                 descriptor: channel.descriptor.clone(),
-                                iq: vec![],
+                                demodulation: vec![],
                             });
-                    channel_result.iq.push(IqChunk {
-                        time: msg.time,
-                        data: channel.iq_data.clone(),
-                    });
+                    channel_result.demodulation.push(demodulation);
                 }
             });
         }
@@ -368,8 +360,6 @@ impl StreamChunkProcessor {
 
         let output_sample_rate = sample_rate * ifft.size() as f64 / fft.size() as f64;
 
-        let overlap_reduce = OverlapReduce::new(ifft.size() / 2);
-
         let descriptor = ChannelDescriptor {
             sample_rate: output_sample_rate,
             name: channel_info.name.clone(),
@@ -377,21 +367,27 @@ impl StreamChunkProcessor {
             bandwidth: channel_group_info.bandwidth,
             tuning_error,
             start_time: time,
+            modulation: channel_group_info.modulation.clone(),
         };
 
         Some(Channel {
             id: id_factory.create(),
             descriptor: Arc::new(descriptor),
+            demodulator: channel_group_info
+                .modulation
+                .create_demodulator(ifft.size()),
             bins,
             margin_bin_count: *margin_bin_count,
+            ifft_size: ifft.size(),
             phasors,
-            ifft: ifft.clone(),
-            overlap_reduce,
-            iq_data: vec![],
         })
     }
 
-    pub fn process_chunk(&mut self, samples: &[Complex<f32>], time: Instant) {
+    pub fn process_chunk(
+        &mut self,
+        samples: &[Complex<f32>],
+        time: Instant,
+    ) -> BTreeMap<ChannelId, Box<dyn Any + Send>> {
         assert_eq!(samples.len(), self.chunk_size);
         // TODO custom error type
 
@@ -490,33 +486,39 @@ impl StreamChunkProcessor {
         }
 
         // Drive each channel
-        self.channels.par_iter_mut().for_each(|channel| {
-            // Aggregate per-channel FFT data in this thread
-            let chunk_slice_len = channel.bins.end - channel.bins.start;
-            let mut fft_buffer = Vec::with_capacity(chunk_slice_len * fft_count);
-            let mut counter = self.counter;
-            for one_fft in buffer.chunks_exact(self.fft.size()) {
-                // This is a hot loop
-                let start = fft_buffer.len() + channel.margin_bin_count;
-                let end = fft_buffer.len() + channel.ifft.size() - channel.margin_bin_count;
-                // Resize to accomodate IFFT, filling margin with zeros
-                fft_buffer.resize(fft_buffer.len() + channel.ifft.size(), Complex::ZERO);
-                // Copy in FFT data
-                fft_buffer[start..end].clone_from_slice(&one_fft[channel.bins.clone()]);
+        let channel_results: BTreeMap<ChannelId, Box<dyn Any + Send>> = self
+            .channels
+            .par_iter_mut()
+            .map(|channel| {
+                // Aggregate per-channel FFT data in this thread
+                let chunk_slice_len = channel.bins.end - channel.bins.start;
+                let mut fft_buffer = Vec::with_capacity(chunk_slice_len * fft_count);
+                let mut counter = self.counter;
+                for one_fft in buffer.chunks_exact(self.fft.size()) {
+                    // This is a hot loop
+                    let start = fft_buffer.len() + channel.margin_bin_count;
+                    let end = fft_buffer.len() + channel.ifft_size - channel.margin_bin_count;
+                    // Resize to accomodate IFFT, filling margin with zeros
+                    fft_buffer.resize(fft_buffer.len() + channel.ifft_size, Complex::ZERO);
+                    // Copy in FFT data
+                    fft_buffer[start..end].clone_from_slice(&one_fft[channel.bins.clone()]);
 
-                // Apply phase correction due to overlap
-                let phasor = channel.phasors[counter as usize];
-                for sample in fft_buffer[start..end].iter_mut() {
-                    *sample *= phasor;
+                    // Apply phase correction due to overlap
+                    let phasor = channel.phasors[counter as usize];
+                    for sample in fft_buffer[start..end].iter_mut() {
+                        *sample *= phasor;
+                    }
+                    counter = (counter + 1) % 2;
                 }
-                counter = (counter + 1) % 2;
-            }
 
-            // Process this channel
-            channel.process(fft_buffer)
-        });
+                // Process this channel
+                (channel.id, channel.demodulator.process(time, fft_buffer))
+            })
+            .collect();
 
         self.counter = (self.counter + (fft_count % 2) as u32) % 2;
+
+        channel_results
     }
 }
 
@@ -529,20 +531,11 @@ struct ChannelGroup {
 pub struct Channel {
     id: ChannelId,
     descriptor: Arc<ChannelDescriptor>,
-    iq_data: Vec<Complex<f32>>,
+    demodulator: Box<dyn Demodulator>,
     bins: Range<usize>,
     margin_bin_count: usize,
+    ifft_size: usize,
     phasors: [f32; 2],
-    ifft: Ifft,
-    overlap_reduce: OverlapReduce<Complex<f32>>,
-}
-
-impl Channel {
-    fn process(&mut self, mut fft_buffer: Vec<Complex<f32>>) {
-        self.ifft.process_inplace(&mut fft_buffer);
-        let iq_buffer = self.overlap_reduce.process(&fft_buffer);
-        self.iq_data = iq_buffer;
-    }
 }
 
 // HELPER FUNCTIONS //
@@ -554,6 +547,8 @@ fn log_mix_f32(x: f32, y: f32, a: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::modulation::fm::FmModulationParameters;
+
     use super::*;
 
     #[test]
@@ -577,6 +572,7 @@ mod tests {
             step,
             naming: crate::band_info::NamingConvention::Number,
             bandwidth: channel_bandwidth,
+            modulation: Box::new(FmModulationParameters {}),
         }];
 
         let time = Instant::now();

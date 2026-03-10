@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::format::format_freq;
+use crate::modulation::ModulationParameters;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BandsInfo {
@@ -37,6 +38,7 @@ pub struct ChannelGroupInfo {
     pub step: f64,
     pub naming: NamingConvention,
     pub bandwidth: f64,
+    pub modulation: Box<dyn ModulationParameters>,
 }
 
 impl ChannelGroupInfo {
