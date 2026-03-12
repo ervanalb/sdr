@@ -165,42 +165,26 @@ impl ModulationHistory for FmHistory {
         let freq_min = (descriptor.center_frequency - 0.5 * descriptor.bandwidth) as f32;
         let freq_max = (descriptor.center_frequency + 0.5 * descriptor.bandwidth) as f32;
         for (transmission_id, transmission) in self.transmissions.iter() {
-            // Convert to screen coordinates
             let (start_time, end_time) = transmission.time_range();
-            let left = figure_rect.left() + viewport.screen_space_x(freq_min);
-            let right = figure_rect.left() + viewport.screen_space_x(freq_max);
-            let bottom = figure_rect.top() + viewport.screen_space_y(start_time);
-            let top = figure_rect.top() + viewport.screen_space_y(end_time);
 
-            // Draw a rectangle around the channel
-            let rect = egui::Rect {
-                min: egui::pos2(left, top),
-                max: egui::pos2(right, bottom),
-            };
+            let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max).show(
+                ui,
+                figure_rect,
+                viewport,
+                egui::Id::new((stream_id, channel_id, transmission_id)),
+                |ui, inspected_time| {
+                    ui.label(format!("Inspecting: {}", inspected_time.format("%H:%M:%S%.3f")));
+                    ui.separator();
 
-            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-            let visuals = ui.visuals().widgets.style(&response);
-            let painter = ui.painter().with_clip_rect(figure_rect);
-
-            painter.rect_stroke(
-                rect,
-                visuals.corner_radius,
-                visuals.fg_stroke,
-                egui::StrokeKind::Outside,
+                    // Find the chunk closest to the inspected time
+                    let chunk_index = transmission.find_nearest_chunk(inspected_time);
+                    let chunk = &transmission.chunks[chunk_index];
+                    ui.label(format!("Chunk index: {}", chunk_index));
+                    ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
+                    ui.label(format!("IQ samples: {}", chunk.iq_data.len()));
+                },
             );
 
-            egui::Popup::menu(&response)
-                .id(egui::Id::new((
-                    stream_id,
-                    channel_id,
-                    transmission_id,
-                    "menu",
-                )))
-                .anchor(egui::PopupAnchor::Pointer)
-                .show(|ui| {
-                    ui.label("Test1");
-                    ui.label("Test2");
-                });
             egui::Popup::context_menu(&response)
                 .id(egui::Id::new((
                     stream_id,
@@ -269,6 +253,15 @@ impl FmTransmission {
             self.chunks.front().unwrap().time,
             self.chunks.back().unwrap().time,
         )
+    }
+
+    fn find_nearest_chunk(&self, time: DateTime<Utc>) -> usize {
+        let index = self.chunks.partition_point(|chunk| chunk.time <= time);
+        if index >= self.chunks.len() {
+            self.chunks.len() - 1
+        } else {
+            index
+        }
     }
 
     fn export_iq_data(&self, path: &std::path::Path) -> Result<(), std::io::Error> {

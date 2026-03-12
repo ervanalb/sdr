@@ -3,7 +3,7 @@ pub mod fm;
 use crate::{
     hardware::StreamId,
     processor::{ChannelDescriptor, ChannelId},
-    ui::Viewport,
+    ui::{StreamTransmission, Viewport},
 };
 use chrono::{DateTime, Utc};
 use dyn_clone::{DynClone, clone_trait_object};
