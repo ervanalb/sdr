@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+const IQ_PLOT_MARGIN: f32 = 1.5;
+
 type TransmissionId = usize;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +189,98 @@ impl ModulationHistory for FmHistory {
                     ui.label(format!("Chunk index: {}", chunk_index));
                     ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
                     ui.label(format!("IQ samples: {}", chunk.iq_data.len()));
+
+                    ui.separator();
+
+                    // IQ Scatter Plot
+                    let num_iq_samples = chunk.iq_data.len();
+                    let stride = if num_iq_samples <= 100 {
+                        1
+                    } else {
+                        num_iq_samples / 100
+                    };
+
+                    // Calculate target max value for scaling
+                    let target_max_val = chunk
+                        .iq_data
+                        .iter()
+                        .step_by(stride)
+                        .map(|c| c.re.abs().max(c.im.abs()))
+                        .fold(0.0f32, f32::max)
+                        * IQ_PLOT_MARGIN;
+
+                    // Store target in memory and animate toward it
+                    let iq_plot_id =
+                        egui::Id::new((stream_id, channel_id, transmission_id, "iq_max"));
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(iq_plot_id, target_max_val));
+                    let animated_max_val = ui.ctx().animate_value_with_time(
+                        iq_plot_id.with("animated"),
+                        target_max_val,
+                        1., // animation time in seconds
+                    );
+
+                    // Create IQ points for plotting
+                    let iq_points: Vec<[f64; 2]> = chunk
+                        .iq_data
+                        .iter()
+                        .step_by(stride)
+                        .map(|c| [c.re as f64, c.im as f64])
+                        .collect();
+
+                    use egui_plot::{Line, Plot, Points};
+                    Plot::new("iq_scatter")
+                        .allow_axis_zoom_drag(false)
+                        .allow_boxed_zoom(false)
+                        .allow_double_click_reset(false)
+                        .allow_drag(false)
+                        .allow_scroll(false)
+                        .allow_zoom(false)
+                        .show_axes(false)
+                        .width(200.0)
+                        .height(200.0)
+                        .auto_bounds(false)
+                        .default_x_bounds(-animated_max_val as f64, animated_max_val as f64)
+                        .default_y_bounds(-animated_max_val as f64, animated_max_val as f64)
+                        .show(ui, |plot_ui| {
+                            plot_ui.points(Points::new("iq", iq_points).radius(2.0));
+                        });
+
+                    ui.separator();
+
+                    // Audio Waveform Plot
+                    let plot_width = 600.0;
+                    let plot_height = 200.0;
+                    let num_audio_samples = chunk.audio_data.len();
+                    let audio_stride =
+                        (num_audio_samples as f32 / plot_width).ceil().max(1.0) as usize;
+
+                    // Create audio points for plotting
+                    let audio_points: Vec<[f64; 2]> = chunk
+                        .audio_data
+                        .iter()
+                        .enumerate()
+                        .step_by(audio_stride)
+                        .map(|(i, &sample)| [i as f64, sample as f64])
+                        .collect();
+
+                    Plot::new("audio_waveform")
+                        .allow_axis_zoom_drag(false)
+                        .allow_boxed_zoom(false)
+                        .allow_double_click_reset(false)
+                        .allow_drag(false)
+                        .allow_scroll(false)
+                        .allow_zoom(false)
+                        .show_axes(false)
+                        .width(plot_width)
+                        .height(plot_height)
+                        .auto_bounds(false)
+                        .default_x_bounds(0., audio_points.len() as f64)
+                        .default_y_bounds(-1., 1.)
+                        .show_grid(false)
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new("audio", audio_points));
+                        });
                 },
             );
 
