@@ -15,20 +15,25 @@ pub type ModulationUiFn<'a> = Box<dyn FnOnce(&Response) + 'a>;
 #[typetag::serde(tag = "type")]
 pub trait ModulationParameters: std::fmt::Debug + Send + Sync + DynClone {
     fn create_demodulator(&self, ifft_size: usize) -> Box<dyn Demodulator>;
-    fn create_history(&self, start_time: Instant) -> Box<dyn ModulationHistory>;
+    fn create_history(&self) -> Box<dyn ModulationHistory>;
 }
 
 clone_trait_object!(ModulationParameters);
 
 pub trait Demodulator: Any + Send + 'static {
-    fn process(&mut self, time: Instant, fft_data: Vec<Complex<f32>>) -> Box<dyn Any + Send>;
+    fn process(
+        &mut self,
+        time: Instant,
+        fft_data: Vec<Complex<f32>>,
+        noise_floor: f32,
+    ) -> Option<Box<dyn Any + Send>>;
 }
 
 pub trait ModulationHistory: Any + Send + 'static {
     fn add(&mut self, demodulation: Box<dyn Any + Send>);
 
     /// Remove history entries older than retain_time and return true if any remain
-    fn prune(&mut self, retain_time: Instant) -> bool;
+    fn prune_old_data(&mut self, retain_time: Instant) -> bool;
 
     /// Remove history entries older than retain_time and return true if any remain
     fn draw_list<'a>(

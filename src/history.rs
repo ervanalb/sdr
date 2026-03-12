@@ -33,7 +33,7 @@ impl History {
                 modulation: channel_result
                     .descriptor
                     .modulation
-                    .create_history(channel_result.descriptor.start_time),
+                    .create_history(),
             });
 
         for demodulation in channel_result.demodulation.into_iter() {
@@ -43,7 +43,7 @@ impl History {
 
     pub fn prune(&mut self, retain_time: Instant) {
         self.channels
-            .retain(|_, history| history.modulation.prune(retain_time));
+            .retain(|_, history| history.modulation.prune_old_data(retain_time));
     }
 
     pub fn draw_list(&self) -> impl Iterator<Item = ChannelDrawInfo<'_>> + '_ {

@@ -302,6 +302,39 @@ impl<T: Clone> Owner<T> {
     }
 }
 
+#[derive(Clone)]
+pub struct FmDemod {
+    /// Center frequency of the signal, in radians per sample
+    omega: f32,
+    last_angle: f32,
+}
+
+impl FmDemod {
+    pub fn new(omega: f32) -> Self {
+        FmDemod {
+            omega,
+            last_angle: 0.,
+        }
+    }
+
+    pub fn process(&mut self, input: &[Complex<f32>]) -> Vec<f32> {
+        if input.is_empty() {
+            return vec![];
+        }
+        input
+            .iter()
+            .map(|sample| {
+                let angle = sample.arg(); // Equivalent to atan2(sample.im, sample.re)
+                let delta_angle = (angle - self.last_angle - self.omega + std::f32::consts::PI)
+                    .rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                self.last_angle = angle;
+                delta_angle
+            })
+            .collect()
+    }
+}
+
 // From https://math.stackexchange.com/a/1105038
 pub fn atan2_approx(y: f32, x: f32) -> f32 {
     let a = x.abs().min(y.abs()) / x.abs().max(y.abs());

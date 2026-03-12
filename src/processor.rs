@@ -489,7 +489,7 @@ impl StreamChunkProcessor {
         let channel_results: BTreeMap<ChannelId, Box<dyn Any + Send>> = self
             .channels
             .par_iter_mut()
-            .map(|channel| {
+            .filter_map(|channel| {
                 // Aggregate per-channel FFT data in this thread
                 let chunk_slice_len = channel.bins.end - channel.bins.start;
                 let mut fft_buffer = Vec::with_capacity(chunk_slice_len * fft_count);
@@ -512,7 +512,10 @@ impl StreamChunkProcessor {
                 }
 
                 // Process this channel
-                (channel.id, channel.demodulator.process(time, fft_buffer))
+                Some((
+                    channel.id,
+                    channel.demodulator.process(time, fft_buffer, self.min)?,
+                ))
             })
             .collect();
 
@@ -572,7 +575,10 @@ mod tests {
             step,
             naming: crate::band_info::NamingConvention::Number,
             bandwidth: channel_bandwidth,
-            modulation: Box::new(FmModulationParameters {}),
+            modulation: Box::new(FmModulationParameters {
+                squelch_db: -100.,
+                squelch_hysteresis_db: 0.,
+            }),
         }];
 
         let time = Instant::now();

@@ -189,7 +189,9 @@
       },
       "bandwidth": 200e3,
       "modulation": {
-	"type": "FmModulationParameters"
+	"type": "FmModulationParameters",
+	"squelch_db": 20,
+	"squelch_hysteresis_db": 5
       }
     },
     {
@@ -202,7 +204,9 @@
       },
       "bandwidth": 12.5e3,
       "modulation": {
-	"type": "FmModulationParameters"
+	"type": "FmModulationParameters",
+	"squelch_db": 20,
+	"squelch_hysteresis_db": 5
       }
     },
     {
@@ -215,7 +219,9 @@
       },
       "bandwidth": 12.5e3,
       "modulation": {
-	"type": "FmModulationParameters"
+	"type": "FmModulationParameters",
+	"squelch_db": 20,
+	"squelch_hysteresis_db": 5
       }
     }
   ],

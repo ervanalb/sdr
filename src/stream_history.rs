@@ -1,6 +1,6 @@
 use crate::hardware::{ReceiveStreamDescriptor, StreamId};
 use crate::processor::WaterfallRow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::sync::Arc;
 use std::time::Instant;
@@ -122,13 +122,13 @@ impl StreamHistory {
             .entry(stream_id)
             .or_insert_with(|| FinishedStream {
                 descriptor,
-                textures: vec![],
+                textures: VecDeque::new(),
                 min: f32::NAN,
                 max: f32::NAN,
             });
         finished_stream.min = min;
         finished_stream.max = max;
-        finished_stream.textures.push(finished_texture);
+        finished_stream.textures.push_back(finished_texture);
     }
 
     pub fn draw_list(&self) -> impl Iterator<Item = WaterfallDrawInfo> {
@@ -422,7 +422,7 @@ impl ActiveStream {
 #[derive(Debug)]
 pub struct FinishedStream {
     pub descriptor: Arc<ReceiveStreamDescriptor>,
-    textures: Vec<FinishedTexture>,
+    textures: VecDeque<FinishedTexture>,
     pub min: f32,
     pub max: f32,
 }
@@ -430,16 +430,9 @@ pub struct FinishedStream {
 impl FinishedStream {
     // Returns true if there are still chunks
     fn prune_old_data(&mut self, time: Instant) -> bool {
-        let mut any_remain = false;
-        self.textures.retain(|texture| {
-            if texture.end_time > time {
-                any_remain = true;
-                true
-            } else {
-                false
-            }
-        });
-        any_remain
+        let first_index = self.textures.partition_point(|texture| texture.end_time <= time);
+        self.textures.drain(..first_index);
+        !self.textures.is_empty()
     }
 }
 
