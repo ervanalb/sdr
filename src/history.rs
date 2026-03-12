@@ -5,7 +5,7 @@ use crate::{
     hardware::StreamId,
     processor::{ChannelId, ChannelResult},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -44,7 +44,13 @@ impl History {
             .retain(|_, history| history.modulation.prune_old_data(retain_time));
     }
 
-    pub fn draw(&self, ui: &mut egui::Ui, figure_rect: egui::Rect, viewport: &Viewport) {
+    pub fn draw(
+        &self,
+        ui: &mut egui::Ui,
+        figure_rect: egui::Rect,
+        viewport: &Viewport,
+        dt: TimeDelta,
+    ) {
         for (&(stream_id, channel_id), history) in self.channels.iter() {
             //let freq_min =
             //    (history.descriptor.center_frequency - 0.5 * history.descriptor.bandwidth) as f32;
@@ -57,6 +63,7 @@ impl History {
                 ui,
                 figure_rect,
                 viewport,
+                dt,
             );
         }
     }

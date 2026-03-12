@@ -4,7 +4,7 @@ use crate::{
     id_factory::IdFactory,
     processor::ChannelDescriptor,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -161,6 +161,7 @@ impl ModulationHistory for FmHistory {
         ui: &mut egui::Ui,
         figure_rect: egui::Rect,
         viewport: &Viewport,
+        dt: TimeDelta,
     ) {
         let freq_min = (descriptor.center_frequency - 0.5 * descriptor.bandwidth) as f32;
         let freq_max = (descriptor.center_frequency + 0.5 * descriptor.bandwidth) as f32;
@@ -171,9 +172,13 @@ impl ModulationHistory for FmHistory {
                 ui,
                 figure_rect,
                 viewport,
+                dt,
                 egui::Id::new((stream_id, channel_id, transmission_id)),
                 |ui, inspected_time| {
-                    ui.label(format!("Inspecting: {}", inspected_time.format("%H:%M:%S%.3f")));
+                    ui.label(format!(
+                        "Inspecting: {}",
+                        inspected_time.format("%H:%M:%S%.3f")
+                    ));
                     ui.separator();
 
                     // Find the chunk closest to the inspected time

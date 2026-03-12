@@ -1,11 +1,5 @@
 use crate::duration_ext::DurationExt;
-use chrono::{DateTime, Duration, Utc};
-
-pub struct Viewport {
-    pub translation: egui::Vec2,
-    pub scale: egui::Vec2,
-    pub reference_time: DateTime<Utc>,
-}
+use chrono::{DateTime, Duration, TimeDelta, Utc};
 
 /// A custom egui widget for drawing a transmission rectangle on a stream
 pub struct StreamTransmission {
@@ -24,6 +18,7 @@ struct StreamTransmissionState {
 struct StreamTransmissionInspector {
     pub time: DateTime<Utc>,
     pub dragging: bool,
+    pub play: bool,
 }
 
 impl StreamTransmission {
@@ -49,6 +44,7 @@ impl StreamTransmission {
         ui: &mut egui::Ui,
         figure_rect: egui::Rect,
         viewport: &Viewport,
+        dt: TimeDelta,
         id: egui::Id,
         mut inspector_content: F,
     ) -> egui::Response
@@ -86,7 +82,7 @@ impl StreamTransmission {
         match &mut state.inspector {
             None => {
                 if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
-                    && rect.contains(pointer_pos)
+                    && response.hovered()
                     && ui.ctx().input(|i| i.pointer.primary_down())
                 {
                     let y = pointer_pos.y - figure_rect.top();
@@ -94,6 +90,7 @@ impl StreamTransmission {
                     state.inspector = Some(StreamTransmissionInspector {
                         time,
                         dragging: true,
+                        play: false,
                     });
                 }
             }
@@ -102,15 +99,17 @@ impl StreamTransmission {
                     if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
                         && ui.ctx().input(|i| i.pointer.primary_down())
                     {
-                        let y = pointer_pos.y - figure_rect.top();
-                        let time = viewport.canvas_y(y);
-                        inspector.time = time;
+                        if !viewport.is_live {
+                            let y = pointer_pos.y - figure_rect.top();
+                            let time = viewport.canvas_y(y);
+                            inspector.time = time;
+                        }
                     } else {
                         inspector.dragging = false;
                     }
                 } else {
                     if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
-                        && rect.contains(pointer_pos)
+                        && response.hovered()
                         && ui.ctx().input(|i| i.pointer.primary_down())
                     {
                         let y = pointer_pos.y - figure_rect.top();
@@ -122,6 +121,13 @@ impl StreamTransmission {
             }
         }
 
+        // Advance inspector if play = true
+        if let Some(inspector) = &mut state.inspector
+            && (inspector.play || inspector.dragging && viewport.is_live)
+        {
+            inspector.time += dt;
+        }
+
         // Close inspector if its time is out of bounds
         if let Some(inspector) = &state.inspector
             && (inspector.time < self.start_time || inspector.time > self.end_time)
@@ -130,7 +136,7 @@ impl StreamTransmission {
         }
 
         let mut close = false;
-        if let Some(inspector) = &state.inspector {
+        if let Some(inspector) = &mut state.inspector {
             // Draw horizontal line across the rectangle in the same color as the outline
             let y = figure_rect.top() + viewport.screen_space_y(inspector.time);
             painter.line_segment(
@@ -151,6 +157,23 @@ impl StreamTransmission {
                             if close_button.clicked() {
                                 close = true;
                             }
+                            let (enabled, play_text) = if inspector.dragging {
+                                if viewport.is_live {
+                                    (false, "PLAYING")
+                                } else {
+                                    (true, "PAUSED")
+                                }
+                            } else {
+                                if inspector.play {
+                                    (true, "PAUSE")
+                                } else {
+                                    (true, "PLAY")
+                                }
+                            };
+                            let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
+                            if play_button.clicked() {
+                                inspector.play = !inspector.play;
+                            }
                         });
                         ui.separator();
                         inspector_content(ui, inspector.time);
@@ -167,12 +190,20 @@ impl StreamTransmission {
     }
 }
 
+pub struct Viewport {
+    pub translation: egui::Vec2,
+    pub scale: egui::Vec2,
+    pub reference_time: DateTime<Utc>,
+    pub is_live: bool,
+}
+
 impl Viewport {
     pub fn new(reference_time: DateTime<Utc>) -> Self {
         Self {
             translation: egui::Vec2::ZERO,
             scale: egui::vec2(1e-3, 1e3),
             reference_time,
+            is_live: false,
         }
     }
 
@@ -183,7 +214,8 @@ impl Viewport {
         if force_live {
             self.translation.y = 0.
         }
-        if self.translation.y < 0. {
+        self.is_live = self.translation.y >= 0.;
+        if !self.is_live {
             // Auto-scroll to keep viewport stationary
             self.translation.y -= self.scale.y * dt;
         }

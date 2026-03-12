@@ -55,8 +55,8 @@ struct SdrApp {
     viewport_state: Viewport,
     stream_history: StreamHistory,
     history: History,
+    prev_time: DateTime<Utc>,
     reference_time: DateTime<Utc>,
-    prev_reference_time: DateTime<Utc>,
     temp_random_instant: DateTime<Utc>,
     bands_info: Rc<RefCell<BandsInfo>>,
 }
@@ -80,8 +80,8 @@ impl SdrApp {
             viewport_state: Viewport::new(now),
             stream_history: StreamHistory::new(device),
             history: History::new(),
+            prev_time: now,
             reference_time: now,
-            prev_reference_time: now,
             temp_random_instant: now,
             bands_info,
         }
@@ -107,10 +107,12 @@ impl eframe::App for SdrApp {
             return;
         };
 
-        self.prev_reference_time = self.reference_time;
+        let now = Utc::now();
+        let dt = now.signed_duration_since(self.prev_time);
         if self.hardware_params.run {
-            self.reference_time = Utc::now();
+            self.reference_time = now;
         }
+        self.prev_time = now;
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
@@ -320,6 +322,7 @@ impl eframe::App for SdrApp {
                 &self.stream_history,
                 &self.history,
                 self.reference_time,
+                dt,
                 self.temp_random_instant,
                 force_live,
                 &mut self.hardware_params,

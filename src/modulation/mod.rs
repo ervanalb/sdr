@@ -5,7 +5,7 @@ use crate::{
     processor::{ChannelDescriptor, ChannelId},
     ui::{StreamTransmission, Viewport},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use dyn_clone::{DynClone, clone_trait_object};
 use egui::Response;
 use num_complex::Complex;
@@ -45,5 +45,6 @@ pub trait ModulationHistory: Any + Send + 'static {
         ui: &mut egui::Ui,
         figure_rect: egui::Rect,
         viewport: &Viewport,
+        dt: TimeDelta,
     );
 }

@@ -1,5 +1,5 @@
 use super::waterfall::WaterfallRenderer;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, TimeDelta, Utc};
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
 use sdr::duration_ext::DurationExt;
@@ -194,6 +194,7 @@ pub fn ui(
     waterfall_gpu: &StreamHistory,
     history: &History,
     reference_time: DateTime<Utc>,
+    dt: TimeDelta,
     temp_random_instant: DateTime<Utc>,
     force_live: bool,
     hardware_params: &mut HardwareParams,
@@ -466,5 +467,5 @@ pub fn ui(
         ));
 
     // Active channels
-    history.draw(ui, figure_rect, viewport);
+    history.draw(ui, figure_rect, viewport, dt);
 }

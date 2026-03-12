@@ -329,7 +329,7 @@ impl FmDemod {
                     .rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI;
                 self.last_angle = angle;
-                delta_angle
+                delta_angle * std::f32::consts::FRAC_1_PI
             })
             .collect()
     }
