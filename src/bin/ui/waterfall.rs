@@ -1,6 +1,7 @@
 use eframe::wgpu;
 use sdr::stream_history::WaterfallDrawInfo;
-use std::{ops::Range, time::Instant};
+use std::ops::Range;
+use chrono::{DateTime, Utc};
 
 const BUFFER_LEN: usize = 4096;
 
@@ -187,7 +188,7 @@ impl WaterfallRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         uniform_buffer: &wgpu::Buffer,
-        reference_time: Instant,
+        reference_time: DateTime<Utc>,
     ) {
         self.draw_calls.clear();
         self.vertices.clear();
@@ -195,10 +196,10 @@ impl WaterfallRenderer {
         for chunk in chunks {
             // Build vertices for all chunks using this texture
             // Calculate time coordinates (Y axis)
-            let y_start = reference_time.duration_since(chunk.end_time).as_secs_f32();
+            let y_start = reference_time.signed_duration_since(chunk.end_time).as_seconds_f32();
             let y_end = reference_time
-                .duration_since(chunk.start_time)
-                .as_secs_f32();
+                .signed_duration_since(chunk.start_time)
+                .as_seconds_f32();
 
             if y_end < y_start {
                 continue;

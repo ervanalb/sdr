@@ -4,6 +4,7 @@ use crate::{
     id_factory::IdFactory,
     processor::ChannelDescriptor,
 };
+use chrono::{DateTime, Utc};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -55,7 +56,7 @@ pub struct FmDemodulator {
 impl Demodulator for FmDemodulator {
     fn process(
         &mut self,
-        time: Instant,
+        time: DateTime<Utc>,
         mut fft_data: Vec<Complex<f32>>,
         noise_floor: f32,
     ) -> Option<Box<dyn Any + Send>> {
@@ -107,23 +108,13 @@ impl Demodulator for FmDemodulator {
 #[derive(Debug)]
 pub struct FmDemodulation {
     pub transmission_id: TransmissionId,
-    pub time: Instant,
+    pub time: DateTime<Utc>,
     pub iq_data: Vec<Complex<f32>>,
     pub audio_data: Vec<f32>,
 }
 
 pub struct FmHistory {
     transmissions: BTreeMap<TransmissionId, FmTransmission>,
-}
-
-pub struct FmTransmission {
-    chunks: VecDeque<FmTransmissionChunk>,
-}
-
-pub struct FmTransmissionChunk {
-    pub time: Instant,
-    pub iq_data: Vec<Complex<f32>>,
-    pub audio_data: Vec<f32>,
 }
 
 impl FmHistory {
@@ -156,81 +147,124 @@ impl ModulationHistory for FmHistory {
         });
     }
 
-    fn prune_old_data(&mut self, retain_time: Instant) -> bool {
+    fn prune_old_data(&mut self, retain_time: DateTime<Utc>) -> bool {
         self.transmissions
             .retain(|_, transmission| transmission.prune_old_data(retain_time));
         !self.transmissions.is_empty()
     }
 
-    fn draw_list<'a>(
-        &'a self,
+    fn draw(
+        &self,
         stream_id: StreamId,
         channel_id: ChannelId,
-        descriptor: &'a Arc<ChannelDescriptor>,
-    ) -> Box<dyn Iterator<Item = (Instant, Instant, ModulationUiFn<'a>)> + 'a> {
-        let iter = self
-            .transmissions
-            .iter()
-            .map(move |(transmission_id, transmission)| {
-                let ui: ModulationUiFn = Box::new(move |response| {
-                    egui::Popup::context_menu(response)
-                        .id(egui::Id::new((stream_id, channel_id, transmission_id)))
-                        .show(|ui| {
-                            if ui.button("Export audio...").clicked() {
-                                ui.close();
+        descriptor: &Arc<ChannelDescriptor>,
+        ui: &mut egui::Ui,
+        figure_rect: egui::Rect,
+        viewport: &Viewport,
+    ) {
+        let freq_min = (descriptor.center_frequency - 0.5 * descriptor.bandwidth) as f32;
+        let freq_max = (descriptor.center_frequency + 0.5 * descriptor.bandwidth) as f32;
+        for (transmission_id, transmission) in self.transmissions.iter() {
+            // Convert to screen coordinates
+            let (start_time, end_time) = transmission.time_range();
+            let left = figure_rect.left() + viewport.screen_space_x(freq_min);
+            let right = figure_rect.left() + viewport.screen_space_x(freq_max);
+            let bottom = figure_rect.top() + viewport.screen_space_y(start_time);
+            let top = figure_rect.top() + viewport.screen_space_y(end_time);
 
-                                // Sanitize the channel name for use as a filename
-                                let default_name = format!(
-                                    "{}_{}sps.raw",
-                                    descriptor.name,
-                                    descriptor.sample_rate.round()
-                                )
-                                .replace(" ", "_")
-                                .replace("/", "_");
+            // Draw a rectangle around the channel
+            let rect = egui::Rect {
+                min: egui::pos2(left, top),
+                max: egui::pos2(right, bottom),
+            };
 
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .set_file_name(&default_name)
-                                    .add_filter("Raw (f32 samples)", &["raw"])
-                                    .save_file()
-                                {
-                                    if let Err(e) = transmission.export_audio_data(&path) {
-                                        eprintln!("Failed to export audio data: {}", e);
-                                    }
-                                }
-                            }
-                            if ui.button("Export IQ data...").clicked() {
-                                ui.close();
+            let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+            let visuals = ui.visuals().widgets.style(&response);
+            let painter = ui.painter().with_clip_rect(figure_rect);
 
-                                // Sanitize the channel name for use as a filename
-                                let default_name = format!(
-                                    "{}_{}sps.raw",
-                                    descriptor.name,
-                                    descriptor.sample_rate.round()
-                                )
-                                .replace(" ", "_")
-                                .replace("/", "_");
+            painter.rect_stroke(
+                rect,
+                visuals.corner_radius,
+                visuals.fg_stroke,
+                egui::StrokeKind::Outside,
+            );
 
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .set_file_name(&default_name)
-                                    .add_filter("Raw (complex f32 samples)", &["raw"])
-                                    .save_file()
-                                {
-                                    if let Err(e) = transmission.export_iq_data(&path) {
-                                        eprintln!("Failed to export IQ data: {}", e);
-                                    }
-                                }
-                            }
-                        });
+            egui::Popup::menu(&response)
+                .id(egui::Id::new((
+                    stream_id,
+                    channel_id,
+                    transmission_id,
+                    "menu",
+                )))
+                .anchor(egui::PopupAnchor::Pointer)
+                .show(|ui| {
+                    ui.label("Test1");
+                    ui.label("Test2");
                 });
-                let (start_time, end_time) = transmission.time_range();
-                (start_time, end_time, ui)
-            });
-        Box::new(iter)
+            egui::Popup::context_menu(&response)
+                .id(egui::Id::new((
+                    stream_id,
+                    channel_id,
+                    transmission_id,
+                    "context_menu",
+                )))
+                .show(|ui| {
+                    if ui.button("Export audio...").clicked() {
+                        ui.close();
+
+                        // Sanitize the channel name for use as a filename
+                        let default_name = format!(
+                            "{}_{}sps.raw",
+                            descriptor.name,
+                            descriptor.sample_rate.round()
+                        )
+                        .replace(" ", "_")
+                        .replace("/", "_");
+
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name(&default_name)
+                            .add_filter("Raw (f32 samples)", &["raw"])
+                            .save_file()
+                        {
+                            if let Err(e) = transmission.export_audio_data(&path) {
+                                eprintln!("Failed to export audio data: {}", e);
+                            }
+                        }
+                    }
+                    if ui.button("Export IQ data...").clicked() {
+                        ui.close();
+
+                        // Sanitize the channel name for use as a filename
+                        let default_name = format!(
+                            "{}_{}sps.raw",
+                            descriptor.name,
+                            descriptor.sample_rate.round()
+                        )
+                        .replace(" ", "_")
+                        .replace("/", "_");
+
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name(&default_name)
+                            .add_filter("Raw (complex f32 samples)", &["raw"])
+                            .save_file()
+                        {
+                            if let Err(e) = transmission.export_iq_data(&path) {
+                                eprintln!("Failed to export IQ data: {}", e);
+                            }
+                        }
+                    }
+                });
+            response.on_hover_text(descriptor.name.clone());
+        }
     }
 }
 
+pub struct FmTransmission {
+    chunks: VecDeque<FmTransmissionChunk>,
+}
+
 impl FmTransmission {
-    fn time_range(&self) -> (Instant, Instant) {
+    fn time_range(&self) -> (DateTime<Utc>, DateTime<Utc>) {
         (
             self.chunks.front().unwrap().time,
             self.chunks.back().unwrap().time,
@@ -268,11 +302,17 @@ impl FmTransmission {
         Ok(())
     }
 
-    fn prune_old_data(&mut self, retain_time: Instant) -> bool {
+    fn prune_old_data(&mut self, retain_time: DateTime<Utc>) -> bool {
         let first_index = self
             .chunks
             .partition_point(|chunk| chunk.time <= retain_time);
         self.chunks.drain(..first_index);
         !self.chunks.is_empty()
     }
+}
+
+pub struct FmTransmissionChunk {
+    pub time: DateTime<Utc>,
+    pub iq_data: Vec<Complex<f32>>,
+    pub audio_data: Vec<f32>,
 }

@@ -3,7 +3,7 @@ use crate::processor::WaterfallRow;
 use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::sync::Arc;
-use std::time::Instant;
+use chrono::{DateTime, Utc};
 use wgpu::{
     Device, Extent3d, Origin3d, Queue, TexelCopyTextureInfo, Texture, TextureAspect,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -105,7 +105,7 @@ impl StreamHistory {
         }
     }
 
-    pub fn prune_old_data(&mut self, time: Instant) {
+    pub fn prune_old_data(&mut self, time: DateTime<Utc>) {
         self.finished_streams
             .retain(|_, stream| stream.prune_old_data(time));
     }
@@ -182,8 +182,8 @@ pub struct ActiveStream {
     prev_texture: Texture,
     texture: Texture,
     current_row: usize,
-    pub start_time: Instant,
-    pub end_time: Instant,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
     pub spectrum_len: u32,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
@@ -198,7 +198,7 @@ impl ActiveStream {
         device: &Device,
         descriptor: Arc<ReceiveStreamDescriptor>,
         spectrum_len: u32,
-        start_time: Instant,
+        start_time: DateTime<Utc>,
         prev_texture: Texture,
     ) -> Self {
         let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
@@ -429,7 +429,7 @@ pub struct FinishedStream {
 
 impl FinishedStream {
     // Returns true if there are still chunks
-    fn prune_old_data(&mut self, time: Instant) -> bool {
+    fn prune_old_data(&mut self, time: DateTime<Utc>) -> bool {
         let first_index = self.textures.partition_point(|texture| texture.end_time <= time);
         self.textures.drain(..first_index);
         !self.textures.is_empty()
@@ -441,16 +441,16 @@ struct FinishedTexture {
     texture: Texture,
     prev_texture: Texture,
     next_texture: Texture,
-    start_time: Instant,
-    end_time: Instant,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
 pub struct WaterfallDrawInfo {
     pub freq_min: f64,
     pub freq_max: f64,
-    pub start_time: Instant,
-    pub end_time: Instant,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
     pub texture: Texture,
     pub prev_texture: Texture,
     pub next_texture: Texture,

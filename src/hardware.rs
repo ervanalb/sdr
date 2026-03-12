@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{JoinHandle, spawn};
-use std::time::{Duration, Instant};
+use chrono::{DateTime, Utc};
 use std::{mem, thread};
 
 const STREAM_CREATION_MESSAGE_CAPACITY: usize = 64;
@@ -31,7 +31,7 @@ pub struct ReceiveStreamDescriptor {
     pub stream_index: usize,
     pub frequency: f64,
     pub sample_rate: f64,
-    pub start_time: Instant,
+    pub start_time: DateTime<Utc>,
 }
 
 // RESULTS //
@@ -49,7 +49,7 @@ pub struct ReceiveStreamResult {
 
 pub struct ReceiveStreamChunk {
     pub iq_data: Vec<Complex<f32>>,
-    pub time: Instant,
+    pub time: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for ReceiveStreamChunk {
@@ -240,7 +240,7 @@ impl Hardware {
     }
 
     pub fn shutdown(mut self) {
-        let polling_period = Duration::from_secs_f64(SHUTDOWN_POLLING_PERIOD);
+        let polling_period = std::time::Duration::from_secs_f64(SHUTDOWN_POLLING_PERIOD);
         let mut params = HardwareParams {
             enumerate: false,
             ..Default::default()
@@ -824,7 +824,7 @@ impl HardwareDeviceRxStream {
             stream.activate(None).unwrap();
 
             'middle: loop {
-                let start_time = Instant::now();
+                let start_time = Utc::now();
 
                 let (stream_sender, receiver) = mpsc::sync_channel(STREAM_MESSAGE_CAPACITY);
                 stream_creation_sender
@@ -912,7 +912,7 @@ impl HardwareDeviceRxStream {
                         &mut [&mut buffer[buffer_ix..]],
                         (STREAM_READ_TIMEOUT * 1e6) as i64,
                     );
-                    let time = Instant::now();
+                    let time = Utc::now();
 
                     match stream_read {
                         Ok(len) => {

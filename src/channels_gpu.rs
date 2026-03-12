@@ -1,6 +1,6 @@
 // TODO: rename this file, it has nothing to do with GPU
 
-use std::time::Instant;
+use chrono::{DateTime, Utc};
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
@@ -35,7 +35,7 @@ impl ChannelsGpu {
         }
     }
 
-    pub fn prune(&mut self, retain_time: Instant) {
+    pub fn prune(&mut self, retain_time: DateTime<Utc>) {
         self.channels.retain(|_, history| {
             history.prune(retain_time);
             !history.chunks.is_empty()
@@ -45,7 +45,7 @@ impl ChannelsGpu {
 
 pub struct ChannelHistory {
     pub descriptor: Arc<ChannelDescriptor>,
-    pub end_time: Instant,
+    pub end_time: DateTime<Utc>,
     chunks: Vec<IqChunk>,
 }
 
@@ -64,7 +64,7 @@ impl ChannelHistory {
         self.chunks.push(chunk);
     }
 
-    fn prune(&mut self, retain_time: Instant) {
+    fn prune(&mut self, retain_time: DateTime<Utc>) {
         self.chunks.retain(|chunk| chunk.time >= retain_time);
     }
 

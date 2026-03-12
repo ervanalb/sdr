@@ -1,14 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use chrono::{DateTime, Duration, Utc};
 use eframe::egui;
 use sdr::band_info::BandsInfo;
-use sdr::history::History;
+use sdr::duration_ext::DurationExt;
 use sdr::hardware::{Hardware, HardwareParams};
+use sdr::history::History;
 use sdr::processor::Processor;
 use sdr::stream_history::StreamHistory;
+use sdr::ui::Viewport;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 mod ui;
 
@@ -50,12 +52,12 @@ struct SdrApp {
     hardware: Option<Hardware>,
     hardware_params: HardwareParams,
     processor: Processor,
-    viewport_state: ui::canvas::Viewport,
+    viewport_state: Viewport,
     stream_history: StreamHistory,
     history: History,
-    reference_time: Instant,
-    prev_reference_time: Instant,
-    temp_random_instant: Instant,
+    reference_time: DateTime<Utc>,
+    prev_reference_time: DateTime<Utc>,
+    temp_random_instant: DateTime<Utc>,
     bands_info: Rc<RefCell<BandsInfo>>,
 }
 
@@ -64,7 +66,7 @@ impl SdrApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         ui::canvas::init(cc);
         let device = &cc.wgpu_render_state.as_ref().unwrap().device;
-        let now = Instant::now();
+        let now = Utc::now();
 
         // Load bands info from JSON file included at compile time
         const BANDS_JSON: &str = include_str!("../../bands.json");
@@ -75,7 +77,7 @@ impl SdrApp {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             processor: Processor::new(bands_info.clone()),
-            viewport_state: ui::canvas::Viewport::default(),
+            viewport_state: Viewport::new(now),
             stream_history: StreamHistory::new(device),
             history: History::new(),
             reference_time: now,
@@ -107,7 +109,7 @@ impl eframe::App for SdrApp {
 
         self.prev_reference_time = self.reference_time;
         if self.hardware_params.run {
-            self.reference_time = Instant::now();
+            self.reference_time = Utc::now();
         }
 
         // Update hardware every frame
@@ -318,7 +320,6 @@ impl eframe::App for SdrApp {
                 &self.stream_history,
                 &self.history,
                 self.reference_time,
-                self.reference_time.duration_since(self.prev_reference_time),
                 self.temp_random_instant,
                 force_live,
                 &mut self.hardware_params,

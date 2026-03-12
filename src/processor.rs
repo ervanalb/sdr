@@ -12,10 +12,13 @@ use std::collections::BTreeMap;
 use std::ops::{DerefMut, Range};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use chrono::{DateTime, Duration, Utc};
+use crate::duration_ext::DurationExt;
 
 const STREAM_TARGET_BIN_SIZE: f64 = 2_500.0; // 2.5 KHz
 const STREAM_TARGET_OUTPUT_PERIOD: f64 = 0.01; // 100 chunks per second
+const STREAM_MIN_QUANTILE: f64 = 0.1;
+const STREAM_MAX_QUANTILE: f64 = 0.99;
 const STREAM_MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const STREAM_PEAK_TIME_CONSTANT: f64 = 1.;
 const STREAM_OFFSET_REJECT_TIME_CONSTANT: f64 = 0.1;
@@ -34,7 +37,7 @@ pub struct ChannelDescriptor {
     pub center_frequency: f64,
     pub bandwidth: f64,
     pub tuning_error: f64,
-    pub start_time: Instant,
+    pub start_time: DateTime<Utc>,
     pub modulation: Box<dyn ModulationParameters>,
 }
 
@@ -54,7 +57,7 @@ pub struct StreamProcessingResult {
 }
 
 pub struct WaterfallRow {
-    pub time: Instant,
+    pub time: DateTime<Utc>,
     pub spectrum: Vec<f32>,
     pub min: f32,
     pub max: f32,
@@ -132,6 +135,8 @@ impl StreamProcessor {
             descriptor.sample_rate,
             STREAM_TARGET_BIN_SIZE,
             STREAM_TARGET_OUTPUT_PERIOD,
+            STREAM_MIN_QUANTILE,
+            STREAM_MAX_QUANTILE,
             STREAM_MIN_MAX_TIME_CONSTANT,
             STREAM_PEAK_TIME_CONSTANT,
             STREAM_OFFSET_REJECT_TIME_CONSTANT,
@@ -159,16 +164,11 @@ impl StreamProcessor {
         };
         for msg in data {
             self.rechunker.process(&msg.iq_data, |chunk| {
-                let channel_demodulations = self.processor.process_chunk(&chunk, msg.time);
-                result.waterfall_rows.push(WaterfallRow {
-                    time: msg.time,
-                    spectrum: self.processor.spectrum.clone(),
-                    min: self.processor.min,
-                    max: self.processor.max,
-                    peak: self.processor.peak,
-                    overload: self.processor.overload,
-                });
+                let (waterfall_row, channel_demodulations) =
+                    self.processor.process_chunk(&chunk, msg.time);
+                result.waterfall_rows.push(waterfall_row);
                 for (channel_id, demodulation) in channel_demodulations {
+                    // TODO this lookup is a little funny, probably all of this should be returned
                     let channel = self
                         .processor
                         .channels
@@ -197,12 +197,13 @@ struct StreamChunkProcessor {
     hann_window: Vec<f32>,
     fft: Fft,
     counter: u32,
-    spectrum: Vec<f32>,
     min: f32,
     max: f32,
     peak: f32,
-    overload_t: Instant,
+    overload_t: DateTime<Utc>,
     overload: bool,
+    min_index: usize,
+    max_index: usize,
     min_max_alpha: f32,
     peak_alpha: f32,
     peak_time_constant: f64,
@@ -218,10 +219,12 @@ impl StreamChunkProcessor {
         sample_rate: f64,
         target_bin_size: f64,
         target_output_period: f64,
+        min_quantile: f64,
+        max_quantile: f64,
         min_max_time_constant: f64,
         peak_time_constant: f64,
         offset_reject_time_constant: f64,
-        time: Instant,
+        time: DateTime<Utc>,
         channel_group_info: &[ChannelGroupInfo],
     ) -> Self {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
@@ -237,6 +240,9 @@ impl StreamChunkProcessor {
 
         let overlap_expand = OverlapExpand::new(fft_size);
         let fft = Fft::new(fft_size);
+
+        let min_index = (min_quantile * fft_size as f64).clamp(0., fft_size as f64 - 1.) as usize;
+        let max_index = (max_quantile * fft_size as f64).clamp(0., fft_size as f64 - 1.) as usize;
 
         let min_max_alpha = (output_period / (min_max_time_constant + output_period)) as f32;
         let peak_alpha = (output_period / (peak_time_constant + output_period)) as f32;
@@ -281,12 +287,13 @@ impl StreamChunkProcessor {
             hann_window: hann_window(fft_size),
             fft,
             counter: 0,
-            spectrum: vec![0.; fft_size],
             min: std::f32::NAN,
             max: std::f32::NAN,
             peak: std::f32::NAN,
             overload_t: time - Duration::from_secs_f64(2. * peak_time_constant),
             overload: false,
+            min_index,
+            max_index,
             min_max_alpha,
             peak_alpha,
             peak_time_constant,
@@ -304,7 +311,7 @@ impl StreamChunkProcessor {
         stream_center_frequency: f64,
         sample_rate: f64,
         fft: &Fft,
-        time: Instant,
+        time: DateTime<Utc>,
         mut id_factory: impl DerefMut<Target = IdFactory>,
     ) -> Option<Channel> {
         let center_frequency = channel_info.center_frequency;
@@ -386,8 +393,8 @@ impl StreamChunkProcessor {
     pub fn process_chunk(
         &mut self,
         samples: &[Complex<f32>],
-        time: Instant,
-    ) -> BTreeMap<ChannelId, Box<dyn Any + Send>> {
+        time: DateTime<Utc>,
+    ) -> (WaterfallRow, BTreeMap<ChannelId, Box<dyn Any + Send>>) {
         assert_eq!(samples.len(), self.chunk_size);
         // TODO custom error type
 
@@ -408,12 +415,12 @@ impl StreamChunkProcessor {
         if self.peak >= 1. {
             self.overload_t = time;
             self.overload = true;
-        } else if time.duration_since(self.overload_t).as_secs_f64() >= self.peak_time_constant {
+        } else if (time - self.overload_t).as_seconds_f64() >= self.peak_time_constant {
             self.overload = false;
         }
 
         let mut offset_accumulator = Complex::<f32>::ZERO;
-        self.spectrum.fill(0.);
+        let mut spectrum = vec![0.; self.fft.size()];
 
         // Process incoming data into overlapping chunks
         let mut buffer = self.overlap_expand.process(&samples);
@@ -441,13 +448,13 @@ impl StreamChunkProcessor {
 
         // Accumulate power, for waterfall
         for one_fft in buffer.chunks_exact(self.fft.size()) {
-            for (&sample, spectrum_sample) in one_fft.iter().zip(self.spectrum.iter_mut()) {
+            for (&sample, spectrum_sample) in one_fft.iter().zip(spectrum.iter_mut()) {
                 *spectrum_sample += sample.re * sample.re + sample.im * sample.im;
             }
         }
 
         let inv_fft_count = 1.0 / (fft_count as f32);
-        for sample in self.spectrum.iter_mut() {
+        for sample in spectrum.iter_mut() {
             *sample *= inv_fft_count;
         }
 
@@ -457,6 +464,20 @@ impl StreamChunkProcessor {
             self.offset = self.offset + self.offset_reject_alpha * (new_offset - self.offset);
         }
 
+        let mut spectrum_for_quantiles = spectrum.clone();
+        let (_, &mut new_min, _) = spectrum_for_quantiles
+            .select_nth_unstable_by(self.min_index, |a, b| {
+                a.partial_cmp(b).unwrap_or(Ordering::Equal)
+            });
+        let (_, &mut new_max, _) = spectrum_for_quantiles
+            .select_nth_unstable_by(self.max_index, |a, b| {
+                a.partial_cmp(b).unwrap_or(Ordering::Equal)
+            });
+
+        let new_min = new_min.max(1e-10);
+        let new_max = new_max.max(1e-10);
+
+        /*
         let new_min = self
             .spectrum
             .iter()
@@ -471,6 +492,7 @@ impl StreamChunkProcessor {
             .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
             .unwrap()
             .max(1e-10);
+        */
 
         // Compute min/max with LPF
         if self.min <= self.max {
@@ -521,7 +543,15 @@ impl StreamChunkProcessor {
 
         self.counter = (self.counter + (fft_count % 2) as u32) % 2;
 
-        channel_results
+        let waterfall_row = WaterfallRow {
+            time: time,
+            spectrum,
+            min: self.min,
+            max: self.max,
+            peak: self.peak,
+            overload: self.overload,
+        };
+        (waterfall_row, channel_results)
     }
 }
 
@@ -581,7 +611,7 @@ mod tests {
             }),
         }];
 
-        let time = Instant::now();
+        let time = Utc::now();
 
         let mut processor = StreamProcessor::new(
             Arc::new(ReceiveStreamDescriptor {

@@ -1,15 +1,17 @@
 use super::waterfall::WaterfallRenderer;
+use chrono::{DateTime, Duration, Utc};
 use eframe::wgpu;
 use sdr::band_info::BandsInfo;
+use sdr::duration_ext::DurationExt;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::history::History;
 use sdr::stream_history::{StreamHistory, WaterfallDrawInfo};
+use sdr::ui::Viewport;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
@@ -108,7 +110,7 @@ struct Callback {
     translation: egui::Vec2,
     scale: egui::Vec2,
     waterfall_chunks: Vec<WaterfallDrawInfo>,
-    reference_time: Instant,
+    reference_time: DateTime<Utc>,
 }
 
 impl egui_wgpu::CallbackTrait for Callback {
@@ -185,47 +187,14 @@ impl egui_wgpu::CallbackTrait for Callback {
     }
 }
 
-pub struct Viewport {
-    pub translation: egui::Vec2,
-    pub scale: egui::Vec2,
-}
-
-impl Default for Viewport {
-    fn default() -> Self {
-        Self {
-            translation: egui::Vec2::ZERO,
-            scale: egui::vec2(1e-3, 1e3),
-        }
-    }
-}
-
-impl Viewport {
-    //fn screen_space(&self, pt: egui::Vec2) -> egui::Vec2 {
-    //    pt * self.scale + self.translation
-    //}
-    fn screen_space_x(&self, x: f32) -> f32 {
-        x * self.scale.x + self.translation.x
-    }
-    fn screen_space_y(&self, y: f32) -> f32 {
-        y * self.scale.y + self.translation.y
-    }
-    fn canvas_x(&self, x: f32) -> f32 {
-        (x - self.translation.x) / self.scale.x
-    }
-    fn canvas_y(&self, y: f32) -> f32 {
-        (y - self.translation.y) / self.scale.y
-    }
-}
-
 pub fn ui(
     ui: &mut egui::Ui,
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
     waterfall_gpu: &StreamHistory,
     history: &History,
-    reference_time: Instant,
-    dt: Duration,
-    temp_random_instant: Instant,
+    reference_time: DateTime<Utc>,
+    temp_random_instant: DateTime<Utc>,
     force_live: bool,
     hardware_params: &mut HardwareParams,
     bands_info: &Rc<RefCell<BandsInfo>>,
@@ -245,13 +214,7 @@ pub fn ui(
     let min_scale = figure_size / overall_size;
     let max_zoom = 1e9;
 
-    if force_live {
-        viewport.translation.y = 0.
-    }
-    if viewport.translation.y < 0. {
-        // Auto-scroll to keep viewport stationary
-        viewport.translation.y -= (viewport.scale.y as f64 * dt.as_secs_f64()) as f32;
-    }
+    viewport.update_reference_time(reference_time, force_live);
 
     // Handle scroll and zoom
     if ui.rect_contains_pointer(ui_rect) {
@@ -376,16 +339,23 @@ pub fn ui(
         let period = AVAILABLE_TIME_GRIDLINES[i];
         let precision = period.log10() as i32;
         // TODO: Reference everything from day or hour start instead of this random instant
-        let offset = reference_time
-            .duration_since(temp_random_instant)
-            .as_secs_f64();
-        let top = ((offset - viewport.canvas_y(0.) as f64) / period).ceil() as i32;
-        let bottom =
-            ((offset - viewport.canvas_y(figure_rect.height()) as f64) / period).floor() as i32;
+        let top = (viewport
+            .canvas_y(0.)
+            .signed_duration_since(temp_random_instant)
+            .as_seconds_f64()
+            / period)
+            .ceil() as i32;
+        let bottom = (viewport
+            .canvas_y(figure_rect.height())
+            .signed_duration_since(temp_random_instant)
+            .as_seconds_f64()
+            / period)
+            .floor() as i32;
 
         for i in bottom..top {
             let val = i as f64 * period;
-            let y = figure_rect.top() + viewport.screen_space_y((offset - val) as f32);
+            let y = figure_rect.top()
+                + viewport.screen_space_y(temp_random_instant + Duration::from_secs_f64(val));
 
             painter.text(
                 egui::pos2(figure_rect.left() - 6., y),
@@ -480,67 +450,21 @@ pub fn ui(
         }
     }
 
-    let painter = ui.painter().with_clip_rect(figure_rect);
-
     // Waterfall
-    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-        figure_rect,
-        Callback {
-            id,
-            viewport_size: figure_size,
-            translation: viewport.translation,
-            scale: viewport.scale,
-            waterfall_chunks: waterfall_gpu.draw_list().collect(),
-            reference_time,
-        },
-    ));
+    ui.painter()
+        .with_clip_rect(figure_rect)
+        .add(egui_wgpu::Callback::new_paint_callback(
+            figure_rect,
+            Callback {
+                id,
+                viewport_size: figure_size,
+                translation: viewport.translation,
+                scale: viewport.scale,
+                waterfall_chunks: waterfall_gpu.draw_list().collect(),
+                reference_time,
+            },
+        ));
 
     // Active channels
-    {
-        let offset = reference_time
-            .duration_since(temp_random_instant)
-            .as_secs_f64();
-
-        for draw_info in history.draw_list() {
-            // Calculate time positions relative to temp_random_instant
-            let start_time = offset
-                - draw_info
-                    .start_time
-                    .duration_since(temp_random_instant)
-                    .as_secs_f64();
-            let end_time = offset
-                - draw_info
-                    .end_time
-                    .duration_since(temp_random_instant)
-                    .as_secs_f64();
-
-            // Convert to screen coordinates
-            let left = figure_rect.left()
-                + viewport.screen_space_x(draw_info.freq_min);
-            let right = figure_rect.left()
-                + viewport.screen_space_x(draw_info.freq_max);
-            let bottom = figure_rect.top() + viewport.screen_space_y(start_time as f32);
-            let top = figure_rect.top() + viewport.screen_space_y(end_time as f32);
-
-            // Draw a rectangle around the channel center frequency
-            let rect = egui::Rect {
-                min: egui::pos2(left, top),
-                max: egui::pos2(right, bottom),
-            };
-
-            if rect.intersects(ui_rect) {
-                let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-                let visuals = ui.visuals().widgets.style(&response);
-
-                painter.rect_stroke(
-                    rect,
-                    visuals.corner_radius,
-                    visuals.fg_stroke,
-                    egui::StrokeKind::Outside,
-                );
-                (draw_info.ui)(&response);
-                response.on_hover_text(draw_info.name);
-            }
-        }
-    }
+    history.draw(ui, figure_rect, viewport);
 }

@@ -30,6 +30,7 @@ rayon = "1.11.0"
 rfd = "0.17.2"
 slotmap = "1.1.1"
 dyn-clone = "1.0.20"
+chrono = "0.4"
 
 [profile.dev]
 opt-level = 3

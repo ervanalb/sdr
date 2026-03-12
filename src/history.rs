@@ -1,12 +1,13 @@
 use crate::modulation::{ModulationHistory, ModulationUiFn};
 use crate::processor::ChannelDescriptor;
+use crate::ui::Viewport;
 use crate::{
     hardware::StreamId,
     processor::{ChannelId, ChannelResult},
 };
+use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 pub struct History {
     pub channels: BTreeMap<(StreamId, ChannelId), ChannelHistory>,
@@ -30,10 +31,7 @@ impl History {
             .entry((stream_id, channel_id))
             .or_insert_with(|| ChannelHistory {
                 descriptor: channel_result.descriptor.clone(),
-                modulation: channel_result
-                    .descriptor
-                    .modulation
-                    .create_history(),
+                modulation: channel_result.descriptor.modulation.create_history(),
             });
 
         for demodulation in channel_result.demodulation.into_iter() {
@@ -41,31 +39,26 @@ impl History {
         }
     }
 
-    pub fn prune(&mut self, retain_time: Instant) {
+    pub fn prune(&mut self, retain_time: DateTime<Utc>) {
         self.channels
             .retain(|_, history| history.modulation.prune_old_data(retain_time));
     }
 
-    pub fn draw_list(&self) -> impl Iterator<Item = ChannelDrawInfo<'_>> + '_ {
-        self.channels
-            .iter()
-            .flat_map(|(&(stream_id, channel_id), history)| {
-                let freq_min = (history.descriptor.center_frequency
-                    - 0.5 * history.descriptor.bandwidth) as f32;
-                let freq_max = (history.descriptor.center_frequency
-                    + 0.5 * history.descriptor.bandwidth) as f32;
-                history
-                    .modulation
-                    .draw_list(stream_id, channel_id, &history.descriptor)
-                    .map(move |(start_time, end_time, ui)| ChannelDrawInfo {
-                        freq_min,
-                        freq_max,
-                        start_time,
-                        end_time,
-                        name: history.descriptor.name.clone(),
-                        ui,
-                    })
-            })
+    pub fn draw(&self, ui: &mut egui::Ui, figure_rect: egui::Rect, viewport: &Viewport) {
+        for (&(stream_id, channel_id), history) in self.channels.iter() {
+            //let freq_min =
+            //    (history.descriptor.center_frequency - 0.5 * history.descriptor.bandwidth) as f32;
+            //let freq_max =
+            //    (history.descriptor.center_frequency + 0.5 * history.descriptor.bandwidth) as f32;
+            history.modulation.draw(
+                stream_id,
+                channel_id,
+                &history.descriptor,
+                ui,
+                figure_rect,
+                viewport,
+            );
+        }
     }
 }
 
@@ -77,8 +70,8 @@ pub struct ChannelHistory {
 pub struct ChannelDrawInfo<'a> {
     pub freq_min: f32,
     pub freq_max: f32,
-    pub start_time: Instant,
-    pub end_time: Instant,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
     pub name: String,
     pub ui: ModulationUiFn<'a>,
 }
