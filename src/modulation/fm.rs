@@ -359,17 +359,13 @@ impl ModulationHistory for FmHistory {
                         ui.close();
 
                         // Sanitize the channel name for use as a filename
-                        let default_name = format!(
-                            "{}_{}sps.raw",
-                            descriptor.name,
-                            descriptor.sample_rate.round()
-                        )
-                        .replace(" ", "_")
-                        .replace("/", "_");
+                        let default_name = format!("{}.wav", descriptor.name,)
+                            .replace(" ", "_")
+                            .replace("/", "_");
 
                         if let Some(path) = rfd::FileDialog::new()
                             .set_file_name(&default_name)
-                            .add_filter("Raw (f32 samples)", &["raw"])
+                            .add_filter("WAV Audio", &["wav"])
                             .save_file()
                         {
                             if let Err(e) = transmission.export_audio_data(&path) {
@@ -443,17 +439,29 @@ impl FmTransmission {
     }
 
     fn export_audio_data(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        use std::io::Write;
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: AUDIO_SAMPLE_RATE as u32,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
 
-        let mut file = std::fs::File::create(path)?;
+        let mut writer = hound::WavWriter::create(path, spec)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         for chunk in &self.chunks {
             for sample in &chunk.audio_data {
-                file.write_all(&sample.to_le_bytes())?;
+                // Convert f32 [-1.0, 1.0] to i16 [-32768, 32767]
+                let sample_i16 = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+                writer
+                    .write_sample(sample_i16)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
             }
         }
 
-        file.flush()?;
+        writer
+            .finalize()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         Ok(())
     }
 
