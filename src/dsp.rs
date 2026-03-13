@@ -1,4 +1,9 @@
-use std::{convert::Infallible, mem, ops::AddAssign, sync::Arc};
+use std::{
+    convert::Infallible,
+    mem,
+    ops::{Add, AddAssign, Mul},
+    sync::Arc,
+};
 
 use num_complex::Complex;
 
@@ -105,28 +110,28 @@ impl<T: Clone + Default> OverlapExpand<T> {
 pub struct OverlapReduce<T> {
     half_chunk_size: usize,
     buffer: Vec<T>,
-    start: bool,
+    //start: bool,
 }
 
 impl<T: Clone + Default + AddAssign> OverlapReduce<T> {
     pub fn new(half_chunk_size: usize) -> Self {
         OverlapReduce {
             half_chunk_size,
-            buffer: Vec::with_capacity(half_chunk_size),
-            start: true,
+            buffer: vec![Default::default(); half_chunk_size],
+            //start: true,
         }
     }
 
-    pub fn process(&mut self, mut input: &[T]) -> Vec<T> {
+    pub fn process(&mut self, input: &[T]) -> Vec<T> {
         if input.is_empty() {
             return vec![];
         }
 
-        if self.start {
-            // Skip first half chunk since it has no valid overlap
-            input = &input[self.half_chunk_size..];
-            self.start = false;
-        }
+        //if self.start {
+        //    // Skip first half chunk since it has no valid overlap
+        //    input = &input[self.half_chunk_size..];
+        //    self.start = false;
+        //}
 
         let mut output = Vec::with_capacity(input.len() / 2);
         let mut chunks = input.chunks_exact(self.half_chunk_size);
@@ -242,6 +247,93 @@ impl Ifft {
     }
 }
 
+#[derive(Clone)]
+pub struct RealFft {
+    fft_plan: Arc<dyn realfft::RealToComplex<f32>>,
+    /// Size of the time-domain (input) data--
+    /// frequency domain (output) data will be of length fft_size / 2 + 1
+    fft_size: usize,
+    fft_scratch: Vec<Complex<f32>>,
+    inv_len: f32,
+}
+
+impl RealFft {
+    pub fn new(fft_size: usize) -> Self {
+        let mut planner = realfft::RealFftPlanner::new();
+        let fft_plan = planner.plan_fft_forward(fft_size);
+        let fft_scratch = vec![Default::default(); fft_plan.get_scratch_len()];
+        RealFft {
+            fft_plan,
+            fft_size,
+            fft_scratch,
+            inv_len: 1. / fft_size as f32,
+        }
+    }
+
+    pub fn process(&mut self, mut data: Vec<f32>) -> Vec<Complex<f32>> {
+        assert!(data.len() % self.fft_size == 0);
+        let spectrum_size = self.fft_size / 2 + 1;
+        let mut output = vec![Complex::ZERO; data.len() / self.fft_size * spectrum_size];
+        for (input_chunk, output_chunk) in data
+            .chunks_exact_mut(self.fft_size)
+            .zip(output.chunks_exact_mut(spectrum_size))
+        {
+            self.fft_plan
+                .process_with_scratch(input_chunk, output_chunk, &mut self.fft_scratch)
+                .unwrap();
+        }
+        for sample in output.iter_mut() {
+            *sample *= self.inv_len;
+        }
+        output
+    }
+
+    pub fn size(&self) -> usize {
+        self.fft_size
+    }
+}
+
+#[derive(Clone)]
+pub struct RealIfft {
+    fft_plan: Arc<dyn realfft::ComplexToReal<f32>>,
+    /// Size of the time-domain (output) data--
+    /// frequency domain (input) data will be of length fft_size / 2 + 1
+    fft_size: usize,
+    fft_scratch: Vec<Complex<f32>>,
+}
+
+impl RealIfft {
+    pub fn new(fft_size: usize) -> Self {
+        let mut planner = realfft::RealFftPlanner::new();
+        let fft_plan = planner.plan_fft_inverse(fft_size);
+        let fft_scratch = vec![Default::default(); fft_plan.get_scratch_len()];
+        RealIfft {
+            fft_plan,
+            fft_size,
+            fft_scratch,
+        }
+    }
+
+    pub fn process(&mut self, mut data: Vec<Complex<f32>>) -> Vec<f32> {
+        let spectrum_size = self.fft_size / 2 + 1;
+        assert!(data.len() % spectrum_size == 0);
+        let mut output = vec![0.; data.len() / spectrum_size * self.fft_size];
+        for (input_chunk, output_chunk) in data
+            .chunks_exact_mut(spectrum_size)
+            .zip(output.chunks_exact_mut(self.fft_size))
+        {
+            self.fft_plan
+                .process_with_scratch(input_chunk, output_chunk, &mut self.fft_scratch)
+                .unwrap();
+        }
+        output
+    }
+
+    pub fn size(&self) -> usize {
+        self.fft_size
+    }
+}
+
 pub fn hann_window(len: usize) -> Vec<f32> {
     let inv_len = 1. / len as f32;
     let center = len as f32 / 2.;
@@ -335,6 +427,73 @@ impl FmDemod {
     }
 }
 
+pub struct CubicInterpolator<T> {
+    ratio: f64,
+    inv_ratio: f64,
+    t: f64,
+    history: [T; 3],
+}
+
+impl<T: Copy + Default + Mul<f32, Output = T> + Add<T, Output = T>> CubicInterpolator<T> {
+    pub fn new(ratio: f64) -> Self {
+        Self {
+            ratio,
+            inv_ratio: 1. / ratio,
+            t: 0.,
+            history: [T::default(); 3],
+        }
+    }
+
+    fn lookup(&self, input: &[T], t: i32) -> T {
+        match t {
+            ..-3 => T::default(),
+            -3 => self.history[0],
+            -2 => self.history[1],
+            -1 => self.history[2],
+            0.. => input.get(t as usize).unwrap_or(&T::default()).clone(),
+        }
+    }
+
+    pub fn process(&mut self, input: &[T]) -> Vec<T> {
+        let output_count = ((input.len() as f64 - self.t) * self.inv_ratio).ceil() as usize;
+        let ratio_f32 = self.ratio as f32;
+        let start_t_f32 = self.t as f32;
+        let output = (0..output_count)
+            .map(|i| {
+                let t = start_t_f32 + (i as f32 * ratio_f32);
+                let i = t.div_euclid(1.) as i32;
+                let t = t.rem_euclid(1.);
+
+                let pt0 = self.lookup(input, i - 3);
+                let pt1 = self.lookup(input, i - 2);
+                let pt2 = self.lookup(input, i - 1);
+                let pt3 = self.lookup(input, i);
+
+                // Basis for the cubic interpolant
+                // from "Cubic Convolution Interpolation for Digital Image Processing"
+                // (Keys, 1981)
+                // This could probably be optimized
+                let b0 = t * (t * (t * -0.5 + 1.) - 0.5);
+                let b1 = t * t * (t * 1.5 - 2.5) + 1.;
+                let b2 = t * (t * (t * -1.5 + 2.) + 0.5);
+                let b3 = t * t * (0.5 * t - 0.5);
+
+                pt0 * b0 + pt1 * b1 + pt2 * b2 + pt3 * b3
+            })
+            .collect();
+
+        // Update history
+        self.history[0] = self.lookup(input, input.len() as i32 - 3);
+        self.history[1] = self.lookup(input, input.len() as i32 - 2);
+        self.history[2] = self.lookup(input, input.len() as i32 - 1);
+
+        // Update t
+        self.t = self.t + output_count as f64 * self.ratio - input.len() as f64;
+
+        output
+    }
+}
+
 // From https://math.stackexchange.com/a/1105038
 pub fn atan2_approx(y: f32, x: f32) -> f32 {
     let a = x.abs().min(y.abs()) / x.abs().max(y.abs());
@@ -409,9 +568,9 @@ mod tests {
         );
 
         let output = overlap_reduce.process(&overlapped);
-        assert_eq!(output.len(), 22);
+        assert_eq!(output.len(), 24);
 
-        assert_eq!(output, (0..22).map(|i| i * 2).collect::<Vec<_>>())
+        assert_eq!(output[2..], (0..22).map(|i| i * 2).collect::<Vec<_>>())
     }
 
     #[test]
@@ -472,6 +631,36 @@ mod tests {
                 i,
                 input,
                 output
+            );
+        }
+    }
+
+    #[test]
+    fn test_cubic_interpolator() {
+        let mut interp = CubicInterpolator::new(1.1);
+
+        let oneshot = interp.process(&[
+            0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16., 17.,
+        ]);
+
+        let mut interp = CubicInterpolator::new(1.1);
+        let mut split = vec![];
+        split.extend(interp.process(&[0., 1., 2.]));
+        split.extend(interp.process(&[3., 4., 5.]));
+        split.extend(interp.process(&[6., 7., 8.]));
+        split.extend(interp.process(&[9., 10., 11.]));
+        split.extend(interp.process(&[12., 13., 14.]));
+        split.extend(interp.process(&[15., 16., 17.]));
+
+        assert_eq!(oneshot.len(), split.len());
+
+        for (i, (a, b)) in oneshot.iter().zip(split.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "Sample {} mismatch: {} != {}",
+                i,
+                a,
+                b
             );
         }
     }

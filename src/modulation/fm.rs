@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    dsp::{FmDemod, Ifft, OverlapReduce},
+    dsp::{
+        CubicInterpolator, FmDemod, Ifft, OverlapExpand, OverlapReduce, RealFft, RealIfft,
+        hann_window,
+    },
     id_factory::IdFactory,
     processor::ChannelDescriptor,
 };
@@ -14,6 +17,8 @@ use std::{
 };
 
 const IQ_PLOT_MARGIN: f32 = 1.5;
+const AUDIO_SAMPLE_RATE: f64 = 48e3;
+const AUDIO_CUTOFF_FREQ: f64 = 22e3;
 
 type TransmissionId = usize;
 
@@ -26,7 +31,18 @@ pub struct FmModulationParameters {
 
 #[typetag::serde]
 impl ModulationParameters for FmModulationParameters {
-    fn create_demodulator(&self, ifft_size: usize) -> Box<dyn Demodulator> {
+    fn create_demodulator(
+        &self,
+        descriptor: &ChannelDescriptor,
+        ifft_size: usize,
+    ) -> Box<dyn Demodulator> {
+        let audio_fft_size = 2
+            * (0.5 * ifft_size as f64 * AUDIO_SAMPLE_RATE / descriptor.sample_rate).ceil() as usize;
+        let audio_signal_bins =
+            (0.5 * ifft_size as f64 * AUDIO_CUTOFF_FREQ / descriptor.sample_rate).round() as usize;
+        let audio_ifft_sample_rate =
+            audio_fft_size as f64 * descriptor.sample_rate / ifft_size as f64;
+
         Box::new(FmDemodulator {
             inv_fft_len: 1. / ifft_size as f32,
             squelch_low: 10_f64.powf(0.1 * (self.squelch_db - self.squelch_hysteresis_db)) as f32,
@@ -34,6 +50,13 @@ impl ModulationParameters for FmModulationParameters {
             ifft: Ifft::new(ifft_size),
             overlap_reduce: OverlapReduce::new(ifft_size / 2),
             fm_demod: FmDemod::new(0.), // TODO compute omega from tuning error
+            demodulated_overlap_expand: OverlapExpand::new(ifft_size),
+            demodulated_hann_window: hann_window(ifft_size),
+            demodulated_fft: RealFft::new(ifft_size),
+            audio_signal_bins,
+            audio_ifft: RealIfft::new(audio_fft_size),
+            audio_overlap_reduce: OverlapReduce::new(audio_fft_size / 2),
+            audio_interpolator: CubicInterpolator::new(audio_ifft_sample_rate / AUDIO_SAMPLE_RATE),
             transmission_id_factory: IdFactory::default(),
             active_transmission: None,
         })
@@ -51,6 +74,13 @@ pub struct FmDemodulator {
     ifft: Ifft,
     overlap_reduce: OverlapReduce<Complex<f32>>,
     fm_demod: FmDemod,
+    demodulated_overlap_expand: OverlapExpand<f32>,
+    demodulated_hann_window: Vec<f32>,
+    demodulated_fft: RealFft,
+    audio_signal_bins: usize,
+    audio_ifft: RealIfft,
+    audio_overlap_reduce: OverlapReduce<f32>,
+    audio_interpolator: CubicInterpolator<f32>,
     transmission_id_factory: IdFactory,
     active_transmission: Option<TransmissionId>,
 }
@@ -96,7 +126,40 @@ impl Demodulator for FmDemodulator {
         let iq_data = self.overlap_reduce.process(&fft_data);
 
         // Demodulate FM by finding angle of each IQ sample
-        let audio_data = self.fm_demod.process(&iq_data);
+        let demodulated = self.fm_demod.process(&iq_data);
+
+        // Overlap
+        let mut demodulated = self.demodulated_overlap_expand.process(&demodulated);
+
+        let fft_count = demodulated.len() / self.ifft.size();
+
+        // Apply Hann window
+        for one_fft in demodulated.chunks_exact_mut(self.ifft.size()) {
+            for (sample, win) in one_fft.iter_mut().zip(self.demodulated_hann_window.iter()) {
+                *sample *= win;
+            }
+        }
+
+        // FFT
+        let demodulated_spectrum = self.demodulated_fft.process(demodulated);
+
+        // Apply AA filter by selecting only bins below the cutoff freq
+        let demodulated_bin_count = self.demodulated_fft.size() / 2 + 1;
+        let audio_bin_count = self.audio_ifft.size() / 2 + 1;
+        let mut audio_spectrum = vec![Complex::ZERO; audio_bin_count * fft_count];
+        for (in_fft, out_fft) in demodulated_spectrum
+            .chunks_exact(demodulated_bin_count)
+            .zip(audio_spectrum.chunks_exact_mut(audio_bin_count))
+        {
+            // Copy in FFT data
+            out_fft[..self.audio_signal_bins].clone_from_slice(&in_fft[..self.audio_signal_bins]);
+        }
+
+        // IFFT (downsamples because IFFT is shorter than FFT)
+        let audio_data = self.audio_ifft.process(audio_spectrum);
+        // Reconstruct audio signal at new sample rate
+        let audio_data = self.audio_overlap_reduce.process(&audio_data);
+        let audio_data = self.audio_interpolator.process(&audio_data);
 
         Some(Box::new(FmDemodulation {
             transmission_id: *active_transmission,

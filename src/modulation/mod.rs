@@ -15,7 +15,7 @@ pub type ModulationUiFn<'a> = Box<dyn FnOnce(&Response) + 'a>;
 
 #[typetag::serde(tag = "type")]
 pub trait ModulationParameters: std::fmt::Debug + Send + Sync + DynClone {
-    fn create_demodulator(&self, ifft_size: usize) -> Box<dyn Demodulator>;
+    fn create_demodulator(&self, descriptor: &ChannelDescriptor, ifft_size: usize) -> Box<dyn Demodulator>;
     fn create_history(&self) -> Box<dyn ModulationHistory>;
 }
 

@@ -32,6 +32,7 @@ slotmap = "1.1.1"
 dyn-clone = "1.0.20"
 chrono = "0.4"
 egui_plot = "0.34.1"
+realfft = "3.5.0"
 
 [profile.dev]
 opt-level = 3
