@@ -1,4 +1,4 @@
-use crate::modulation::{ModulationHistory, ModulationUiFn};
+use crate::modulation::ModulationHistory;
 use crate::processor::ChannelDescriptor;
 use crate::ui::Viewport;
 use crate::{
@@ -74,6 +74,7 @@ pub struct ChannelHistory {
     pub modulation: Box<dyn ModulationHistory>,
 }
 
+/*
 pub struct ChannelDrawInfo<'a> {
     pub freq_min: f32,
     pub freq_max: f32,
@@ -82,3 +83,4 @@ pub struct ChannelDrawInfo<'a> {
     pub name: String,
     pub ui: ModulationUiFn<'a>,
 }
+*/

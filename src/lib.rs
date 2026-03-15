@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod band_info;
 // pub mod channels_gpu; // Replaced by history module
 pub mod dsp;

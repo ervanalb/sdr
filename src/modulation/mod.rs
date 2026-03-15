@@ -7,15 +7,16 @@ use crate::{
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use dyn_clone::{DynClone, clone_trait_object};
-use egui::Response;
 use num_complex::Complex;
 use std::{any::Any, sync::Arc};
 
-pub type ModulationUiFn<'a> = Box<dyn FnOnce(&Response) + 'a>;
-
 #[typetag::serde(tag = "type")]
 pub trait ModulationParameters: std::fmt::Debug + Send + Sync + DynClone {
-    fn create_demodulator(&self, descriptor: &ChannelDescriptor, ifft_size: usize) -> Box<dyn Demodulator>;
+    fn create_demodulator(
+        &self,
+        descriptor: &ChannelDescriptor,
+        ifft_size: usize,
+    ) -> Box<dyn Demodulator>;
     fn create_history(&self) -> Box<dyn ModulationHistory>;
 }
 
@@ -36,7 +37,7 @@ pub trait ModulationHistory: Any + Send + 'static {
     /// Remove history entries older than retain_time and return true if any remain
     fn prune_old_data(&mut self, retain_time: DateTime<Utc>) -> bool;
 
-    /// Remove history entries older than retain_time and return true if any remain
+    /// Draw this channel's history onto the canvas
     fn draw(
         &self,
         stream_id: StreamId,

@@ -1,11 +1,14 @@
 use super::*;
 use crate::{
+    audio::{AudioBuffer, AudioOutput, FeedResult},
     dsp::{
         CubicInterpolator, FmDemod, Ifft, OverlapExpand, OverlapReduce, RealFft, RealIfft,
         hann_window,
     },
+    duration_ext::DurationExt,
     id_factory::IdFactory,
     processor::ChannelDescriptor,
+    ui::{StreamInspectorParameters, StreamInspectorResponse},
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use num_complex::Complex;
@@ -13,12 +16,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
     collections::{BTreeMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 const IQ_PLOT_MARGIN: f32 = 1.5;
 const AUDIO_SAMPLE_RATE: f64 = 48e3;
 const AUDIO_CUTOFF_FREQ: f64 = 22e3;
+const AUDIO_LOOKAHEAD_DURATION: f64 = 0.2;
 
 type TransmissionId = usize;
 
@@ -82,7 +86,7 @@ pub struct FmDemodulator {
     audio_overlap_reduce: OverlapReduce<f32>,
     audio_interpolator: CubicInterpolator<f32>,
     transmission_id_factory: IdFactory,
-    active_transmission: Option<TransmissionId>,
+    active_transmission: Option<(TransmissionId, usize)>,
 }
 
 impl Demodulator for FmDemodulator {
@@ -102,7 +106,7 @@ impl Demodulator for FmDemodulator {
         // TODO: LPF energy?
 
         // Perform squelch, and only continue execution if there is an active transmission
-        let active_transmission = match &mut self.active_transmission {
+        let (active_transmission_id, seq_num) = match &mut self.active_transmission {
             Some(transmission_id) => {
                 if energy < noise_floor * self.squelch_low {
                     self.active_transmission = None;
@@ -114,7 +118,7 @@ impl Demodulator for FmDemodulator {
             None => {
                 if energy > noise_floor * self.squelch_high {
                     let transmission_id = self.transmission_id_factory.create();
-                    self.active_transmission.insert(transmission_id)
+                    self.active_transmission.insert((transmission_id, 0))
                 } else {
                     return None;
                 }
@@ -161,18 +165,24 @@ impl Demodulator for FmDemodulator {
         let audio_data = self.audio_overlap_reduce.process(&audio_data);
         let audio_data = self.audio_interpolator.process(&audio_data);
 
-        Some(Box::new(FmDemodulation {
-            transmission_id: *active_transmission,
+        let result = FmDemodulation {
+            transmission_id: *active_transmission_id,
+            seq_num: *seq_num,
             time,
             iq_data,
             audio_data,
-        }))
+        };
+
+        *seq_num += 1;
+
+        Some(Box::new(result))
     }
 }
 
 #[derive(Debug)]
 pub struct FmDemodulation {
     pub transmission_id: TransmissionId,
+    pub seq_num: usize,
     pub time: DateTime<Utc>,
     pub iq_data: Vec<Complex<f32>>,
     pub audio_data: Vec<f32>,
@@ -194,6 +204,7 @@ impl ModulationHistory for FmHistory {
     fn add(&mut self, demodulation: Box<dyn Any + Send>) {
         let FmDemodulation {
             transmission_id,
+            seq_num,
             time,
             iq_data,
             audio_data,
@@ -206,6 +217,7 @@ impl ModulationHistory for FmHistory {
                 chunks: VecDeque::new(),
             });
         active_transmission.chunks.push_back(FmTransmissionChunk {
+            seq_num,
             time,
             iq_data,
             audio_data,
@@ -239,15 +251,12 @@ impl ModulationHistory for FmHistory {
                 viewport,
                 dt,
                 egui::Id::new((stream_id, channel_id, transmission_id)),
-                |ui, inspected_time| {
-                    ui.label(format!(
-                        "Inspecting: {}",
-                        inspected_time.format("%H:%M:%S%.3f")
-                    ));
+                |ui, StreamInspectorParameters { time, play, seek }, FmUiState { player }| {
+                    ui.label(format!("Inspecting: {}", time.format("%H:%M:%S%.3f")));
                     ui.separator();
 
                     // Find the chunk closest to the inspected time
-                    let chunk_index = transmission.find_nearest_chunk(inspected_time);
+                    let chunk_index = transmission.find_chunk_by_time(time);
                     let chunk = &transmission.chunks[chunk_index];
                     ui.label(format!("Chunk index: {}", chunk_index));
                     ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
@@ -344,6 +353,72 @@ impl ModulationHistory for FmHistory {
                         .show(ui, |plot_ui| {
                             plot_ui.line(Line::new("audio", audio_points));
                         });
+
+                    // Audio output
+                    let mut time_adj = TimeDelta::default();
+
+                    if play {
+                        if let Some(player) = player.as_mut()
+                            && !seek
+                        {
+                            let mut p = player.lock().unwrap();
+
+                            // Feed new audio data to the audio player
+                            let start = transmission.find_chunk_by_seq_num(p.next_seq_num);
+                            let end = transmission.find_chunk_by_time(
+                                time + TimeDelta::from_secs_f64(AUDIO_LOOKAHEAD_DURATION),
+                            );
+                            if end > start {
+                                let next_seq_num = transmission.chunks[end].seq_num;
+
+                                let bufs = transmission.chunks.range(start..end).map(|chunk| {
+                                    AudioBuffer {
+                                        seq_num: chunk.seq_num,
+                                        data: chunk.audio_data.clone(),
+                                    }
+                                });
+
+                                let FeedResult {
+                                    last_played_seq_num,
+                                    underrun,
+                                } = p.audio_output.feed(bufs).unwrap(); // TODO replace unwrap
+                                if underrun {
+                                    eprintln!("Audio underrun!");
+                                }
+                                p.next_seq_num = next_seq_num;
+
+                                // Look up last_played_seq_num and set_time based on it,
+                                // to keep the inspector time (playhead)
+                                // synchronized to the actual audio rate
+                                if let Some(last_played_seq_num) = last_played_seq_num {
+                                    let player_time = transmission.chunks
+                                        [transmission.find_chunk_by_seq_num(last_played_seq_num)]
+                                    .time;
+                                    // Apply strong LPF since we have relatively poor introspection into audio
+                                    let new_adj = (player_time - chunk.time).as_seconds_f32();
+                                    let alpha = 0.0001;
+                                    p.time_adj += alpha * (new_adj - p.time_adj);
+                                    time_adj = TimeDelta::from_secs_f32(p.time_adj);
+                                }
+                            }
+                        } else {
+                            let audio_output = AudioOutput::new().unwrap(); // TODO replace unwrap
+
+                            //audio_output
+                            //    .feed(chunk.seq_num, chunk.audio_data.clone())
+                            //    .unwrap(); // TODO replace unwrap
+
+                            *player = Some(Arc::new(Mutex::new(Player {
+                                audio_output,
+                                next_seq_num: chunk.seq_num,
+                                time_adj: 0.,
+                            })));
+                        }
+                    } else {
+                        *player = None;
+                    }
+
+                    StreamInspectorResponse { time_adj }
                 },
             );
 
@@ -413,8 +488,17 @@ impl FmTransmission {
         )
     }
 
-    fn find_nearest_chunk(&self, time: DateTime<Utc>) -> usize {
-        let index = self.chunks.partition_point(|chunk| chunk.time <= time);
+    fn find_chunk_by_time(&self, time: DateTime<Utc>) -> usize {
+        let index = self.chunks.partition_point(|chunk| chunk.time < time);
+        if index >= self.chunks.len() {
+            self.chunks.len() - 1
+        } else {
+            index
+        }
+    }
+
+    fn find_chunk_by_seq_num(&self, seq_num: usize) -> usize {
+        let index = self.chunks.partition_point(|chunk| chunk.seq_num < seq_num);
         if index >= self.chunks.len() {
             self.chunks.len() - 1
         } else {
@@ -475,7 +559,19 @@ impl FmTransmission {
 }
 
 pub struct FmTransmissionChunk {
+    pub seq_num: usize,
     pub time: DateTime<Utc>,
     pub iq_data: Vec<Complex<f32>>,
     pub audio_data: Vec<f32>,
+}
+
+#[derive(Default, Clone)]
+struct FmUiState {
+    player: Option<Arc<Mutex<Player>>>,
+}
+
+struct Player {
+    audio_output: AudioOutput,
+    next_seq_num: usize,
+    time_adj: f32,
 }

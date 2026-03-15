@@ -181,8 +181,8 @@
   "channels": [
     {
       "name": "FM",
-      "min": 88.1e6,
-      "max": 107.9e6,
+      "min": 88e6,
+      "max": 108e6,
       "step": 200e3,
       "naming": {
         "Frequency": 5
@@ -196,8 +196,8 @@
     },
     {
       "name": "HAM",
-      "min": 420.0125e6,
-      "max": 449.9875e6,
+      "min": 420e6,
+      "max": 450e6,
       "step": 12.5e3,
       "naming": {
         "Frequency": 2
@@ -211,8 +211,8 @@
     },
     {
       "name": "Public Safety",
-      "min": 450.0125e6,
-      "max": 469.9875e6,
+      "min": 450e6,
+      "max": 470e6,
       "step": 12.5e3,
       "naming": {
         "Frequency": 2
@@ -220,7 +220,7 @@
       "bandwidth": 12.5e3,
       "modulation": {
 	"type": "FmModulationParameters",
-	"squelch_db": 20,
+	"squelch_db": 15,
 	"squelch_hysteresis_db": 5
       }
     }

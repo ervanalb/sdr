@@ -46,7 +46,10 @@ impl ChannelGroupInfo {
         let num_channels = if self.step == 0.0 {
             1
         } else {
-            ((self.max - self.min) / self.step).round().max(0.) as usize + 1
+            ((self.max - self.min - self.bandwidth) / self.step)
+                .round()
+                .max(0.) as usize
+                + 1
         };
 
         ChannelInfoIter {
@@ -72,6 +75,7 @@ impl<'a> Iterator for ChannelInfoIter<'a> {
         }
 
         let center_frequency = self.channel_group_info.min
+            + 0.5 * self.channel_group_info.bandwidth
             + (self.current_index as f64 * self.channel_group_info.step);
 
         let name = match self.channel_group_info.naming {
