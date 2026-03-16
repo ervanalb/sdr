@@ -7,7 +7,6 @@ use crate::{
     },
     duration_ext::DurationExt,
     id_factory::IdFactory,
-    processor::ChannelDescriptor,
     ui::{StreamInspectorParameters, StreamInspectorResponse},
 };
 use chrono::{DateTime, TimeDelta, Utc};
@@ -28,18 +27,14 @@ type TransmissionId = usize;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 // #[serde(rename = "fm")] -- Doesn't work?
-pub struct FmModulationParameters {
+pub struct FmProcessorParameters {
     squelch_db: f64,
     squelch_hysteresis_db: f64,
 }
 
 #[typetag::serde]
-impl ModulationParameters for FmModulationParameters {
-    fn create_demodulator(
-        &self,
-        descriptor: &ChannelDescriptor,
-        ifft_size: usize,
-    ) -> Box<dyn Demodulator> {
+impl ProcessorParameters for FmProcessorParameters {
+    fn create_processor(&self) -> Box<dyn Processor> {
         let audio_fft_size = 2
             * (0.5 * ifft_size as f64 * AUDIO_SAMPLE_RATE / descriptor.sample_rate).ceil() as usize;
         let audio_signal_bins =
@@ -47,7 +42,7 @@ impl ModulationParameters for FmModulationParameters {
         let audio_ifft_sample_rate =
             audio_fft_size as f64 * descriptor.sample_rate / ifft_size as f64;
 
-        Box::new(FmDemodulator {
+        Box::new(FmProcessor {
             inv_fft_len: 1. / ifft_size as f32,
             squelch_low: 10_f64.powf(0.1 * (self.squelch_db - self.squelch_hysteresis_db)) as f32,
             squelch_high: 10_f64.powf(0.1 * self.squelch_db) as f32,
@@ -66,12 +61,12 @@ impl ModulationParameters for FmModulationParameters {
         })
     }
 
-    fn create_history(&self) -> Box<dyn ModulationHistory> {
+    fn create_history(&self) -> Box<dyn ProcessorHistory> {
         Box::new(FmHistory::new())
     }
 }
 
-pub struct FmDemodulator {
+pub struct FmProcessor {
     inv_fft_len: f32,
     squelch_low: f32,
     squelch_high: f32,
@@ -89,13 +84,8 @@ pub struct FmDemodulator {
     active_transmission: Option<(TransmissionId, usize)>,
 }
 
-impl Demodulator for FmDemodulator {
-    fn process(
-        &mut self,
-        time: DateTime<Utc>,
-        mut fft_data: Vec<Complex<f32>>,
-        noise_floor: f32,
-    ) -> Option<Box<dyn Any + Send>> {
+impl Processor for FmProcessor {
+    fn process(&mut self, chunk: &PreprocessedChunk) -> Option<Box<dyn Any + Send>> {
         // Measure mean energy in the band
         let energy = fft_data
             .iter()
@@ -165,7 +155,7 @@ impl Demodulator for FmDemodulator {
         let audio_data = self.audio_overlap_reduce.process(&audio_data);
         let audio_data = self.audio_interpolator.process(&audio_data);
 
-        let result = FmDemodulation {
+        let result = ProcessedFm {
             transmission_id: *active_transmission_id,
             seq_num: *seq_num,
             time,
@@ -177,10 +167,14 @@ impl Demodulator for FmDemodulator {
 
         Some(Box::new(result))
     }
+
+    fn reset(&mut self) {
+        todo!()
+    }
 }
 
 #[derive(Debug)]
-pub struct FmDemodulation {
+pub struct ProcessedFm {
     pub transmission_id: TransmissionId,
     pub seq_num: usize,
     pub time: DateTime<Utc>,
@@ -200,15 +194,15 @@ impl FmHistory {
     }
 }
 
-impl ModulationHistory for FmHistory {
-    fn add(&mut self, demodulation: Box<dyn Any + Send>) {
-        let FmDemodulation {
+impl ProcessorHistory for FmHistory {
+    fn push(&mut self, data: Box<dyn Any>) {
+        let ProcessedFm {
             transmission_id,
             seq_num,
             time,
             iq_data,
             audio_data,
-        } = *demodulation.downcast::<FmDemodulation>().unwrap();
+        } = *data.downcast::<ProcessedFm>().unwrap();
 
         let active_transmission = self
             .transmissions
@@ -224,22 +218,12 @@ impl ModulationHistory for FmHistory {
         });
     }
 
-    fn prune_old_data(&mut self, retain_time: DateTime<Utc>) -> bool {
+    fn expire(&mut self, retain_time: DateTime<Utc>) {
         self.transmissions
             .retain(|_, transmission| transmission.prune_old_data(retain_time));
-        !self.transmissions.is_empty()
     }
 
-    fn draw(
-        &self,
-        stream_id: StreamId,
-        channel_id: ChannelId,
-        descriptor: &Arc<ChannelDescriptor>,
-        ui: &mut egui::Ui,
-        figure_rect: egui::Rect,
-        viewport: &Viewport,
-        dt: TimeDelta,
-    ) {
+    fn draw(&self, ui: &mut egui::Ui, figure_rect: egui::Rect, viewport: &Viewport, dt: TimeDelta) {
         let freq_min = (descriptor.center_frequency - 0.5 * descriptor.bandwidth) as f32;
         let freq_max = (descriptor.center_frequency + 0.5 * descriptor.bandwidth) as f32;
         for (transmission_id, transmission) in self.transmissions.iter() {
@@ -473,6 +457,10 @@ impl ModulationHistory for FmHistory {
                 });
             response.on_hover_text(descriptor.name.clone());
         }
+    }
+
+    fn reset(&mut self) {
+        todo!()
     }
 }
 

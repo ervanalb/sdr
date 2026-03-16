@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::{JoinHandle, spawn};
 use std::{mem, thread};
 
-const STREAM_CREATION_MESSAGE_CAPACITY: usize = 64;
-const STREAM_MESSAGE_CAPACITY: usize = 64;
+const STREAM_MESSAGE_CAPACITY: usize = 1024;
 const CONTROL_MESSAGE_CAPACITY: usize = 64;
 const STREAM_READ_TIMEOUT: f64 = 1.;
 const STREAM_CHUNK_PERIOD: f64 = 0.005; // 200 per second
@@ -39,14 +38,13 @@ pub struct ReceiveStreamDescriptor {
 
 #[derive(Debug)]
 pub struct HardwareResult {
+    pub active_streams: Vec<(StreamId, Arc<ReceiveStreamDescriptor>)>,
     pub chunks: Vec<ReceiveStreamChunk>,
-    pub active_streams: Vec<StreamId>,
 }
 
 #[derive(Debug)]
 pub struct ReceiveStreamChunk {
     pub stream_id: StreamId,
-    pub descriptor: Arc<ReceiveStreamDescriptor>,
     pub time: DateTime<Utc>,
     pub chunk: RawIqSamples,
 }
@@ -211,11 +209,10 @@ pub struct HardwareDeviceTxStreamParams {
 
 pub struct Hardware {
     devices: HashMap<HardwareDeviceId, HardwareDevice>,
-    receive_streams: Vec<ReceiveStream>,
-    receive_stream_sender: SyncSender<(ReceiveStreamChunk, Canary)>,
-    receive_stream_receiver: Receiver<(ReceiveStreamChunk, Canary)>,
+    receive_stream_sender: SyncSender<ReceiveStreamOutputMessage>,
+    receive_stream_receiver: Receiver<ReceiveStreamOutputMessage>,
     receive_stream_id_factory: Arc<Mutex<IdFactory>>,
-    receive_stream_canaries: BTreeMap<StreamId, WeakCanary>,
+    active_receive_streams: BTreeMap<StreamId, (Arc<ReceiveStreamDescriptor>, WeakCanary)>,
 }
 
 impl Hardware {
@@ -226,9 +223,8 @@ impl Hardware {
             devices: Default::default(),
             receive_stream_sender,
             receive_stream_receiver,
-            receive_streams: vec![],
             receive_stream_id_factory: Arc::new(Mutex::new(IdFactory::default())),
-            receive_stream_canaries: BTreeMap::new(),
+            active_receive_streams: BTreeMap::new(),
         }
     }
 
@@ -274,26 +270,37 @@ impl Hardware {
         }
 
         // Close out any streams whose canaries have died
-        self.receive_stream_canaries
-            .retain(|_, canary| canary.upgrade().is_some());
+        self.active_receive_streams
+            .retain(|_, (_, canary)| canary.upgrade().is_some());
 
         // Collect chunks & insert new canaries
-        let chunks = self
-            .receive_stream_receiver
+        let mut chunks = vec![];
+        for msg in self.receive_stream_receiver.try_iter() {
+            match msg {
+                ReceiveStreamOutputMessage::NewStream {
+                    stream_id,
+                    descriptor,
+                    canary,
+                } => {
+                    self.active_receive_streams
+                        .insert(stream_id, (Arc::new(descriptor), canary));
+                }
+                ReceiveStreamOutputMessage::Chunk { chunk, _canary } => {
+                    chunks.push(chunk);
+                }
+            }
+        }
+
+        // Remove canary field when returning the result
+        let active_streams: Vec<_> = self
+            .active_receive_streams
             .iter()
-            .map(|(chunk, canary)| {
-                self.receive_stream_canaries
-                    .entry(chunk.stream_id)
-                    .or_insert_with(|| Canary::downgrade(&canary));
-                chunk
-            })
+            .map(|(stream_id, (descriptor, _canary))| (*stream_id, descriptor.clone()))
             .collect();
 
-        let active_streams = self.receive_stream_canaries.keys().copied().collect();
-
         HardwareResult {
-            chunks,
             active_streams,
+            chunks,
         }
     }
 
@@ -323,7 +330,7 @@ struct HardwareDevice {
     device_id: HardwareDeviceId,
     args: soapysdr::Args,
     active: HardwareState<ActiveHardwareDevice>,
-    receive_stream_sender: SyncSender<(ReceiveStreamChunk, Canary)>,
+    receive_stream_sender: SyncSender<ReceiveStreamOutputMessage>,
     receive_stream_id_factory: Arc<Mutex<IdFactory>>,
 }
 
@@ -346,30 +353,6 @@ impl<T> HardwareState<T> {
         };
         val
     }
-
-    fn as_ref(&self) -> HardwareState<&T> {
-        match *self {
-            HardwareState::Inactive => HardwareState::Inactive,
-            HardwareState::Active(ref value) => HardwareState::Active(value),
-            HardwareState::ShuttingDown(ref value) => HardwareState::ShuttingDown(value),
-        }
-    }
-
-    fn as_mut(&mut self) -> HardwareState<&mut T> {
-        match *self {
-            HardwareState::Inactive => HardwareState::Inactive,
-            HardwareState::Active(ref mut value) => HardwareState::Active(value),
-            HardwareState::ShuttingDown(ref mut value) => HardwareState::ShuttingDown(value),
-        }
-    }
-
-    fn active(self) -> Option<T> {
-        if let HardwareState::Active(value) = self {
-            Some(value)
-        } else {
-            None
-        }
-    }
 }
 
 struct ActiveHardwareDevice {
@@ -381,7 +364,7 @@ impl HardwareDevice {
     fn new(
         device_id: HardwareDeviceId,
         args: soapysdr::Args,
-        receive_stream_sender: SyncSender<(ReceiveStreamChunk, Canary)>,
+        receive_stream_sender: SyncSender<ReceiveStreamOutputMessage>,
         receive_stream_id_factory: Arc<Mutex<IdFactory>>,
     ) -> Self {
         HardwareDevice {
@@ -536,30 +519,8 @@ struct HardwareDeviceRxStream {
     sample_rate: f64,
     frequency: f64,
     bandwidth: f64,
-    stream_sender: SyncSender<(ReceiveStreamChunk, Canary)>,
+    stream_sender: SyncSender<ReceiveStreamOutputMessage>,
     stream_id_factory: Arc<Mutex<IdFactory>>,
-}
-
-struct ReceiveStream {
-    stream_id: StreamId,
-    receiver: Receiver<RawStreamChunk>,
-    descriptor: Arc<ReceiveStreamDescriptor>,
-    data: Vec<RawStreamChunk>,
-}
-
-impl ReceiveStream {
-    fn new(
-        stream_id: StreamId,
-        descriptor: ReceiveStreamDescriptor,
-        receiver: Receiver<RawStreamChunk>,
-    ) -> Self {
-        ReceiveStream {
-            stream_id,
-            descriptor: Arc::new(descriptor),
-            receiver,
-            data: vec![],
-        }
-    }
 }
 
 impl HardwareDeviceRxStream {
@@ -567,7 +528,7 @@ impl HardwareDeviceRxStream {
         device_id: HardwareDeviceId,
         device: soapysdr::Device,
         stream_index: usize,
-        stream_sender: SyncSender<(ReceiveStreamChunk, Canary)>,
+        stream_sender: SyncSender<ReceiveStreamOutputMessage>,
         stream_id_factory: Arc<Mutex<IdFactory>>,
     ) -> Self {
         let sample_rate_range = device
@@ -853,7 +814,7 @@ impl HardwareDeviceRxStream {
         mut frequency: f64,
         mut bandwidth: f64,
         gains: HashMap<String, HardwareGain>,
-        stream_sender: SyncSender<(ReceiveStreamChunk, Canary)>,
+        stream_sender: SyncSender<ReceiveStreamOutputMessage>,
         stream_id_factory: Arc<Mutex<IdFactory>>,
     ) {
         info!("Started thread for RX stream {stream_index:?} on device {device_id:?}");
@@ -888,7 +849,7 @@ impl HardwareDeviceRxStream {
                 .unwrap();
 
             let mut stream = match (format, full_scale) {
-                (soapysdr::Format::CS8, 127.) => {
+                (soapysdr::Format::CS8, 128.) => {
                     RxStream::CS8(device.rx_stream::<Complex<i8>>(&[stream_index]).unwrap())
                 }
                 (soapysdr::Format::CF32, 1.) => {
@@ -908,13 +869,21 @@ impl HardwareDeviceRxStream {
                 // it indicates that this stream_id is done
                 // and no more messages will be coming.
                 let canary = Arc::new(());
-                let descriptor = Arc::new(ReceiveStreamDescriptor {
+                let descriptor = ReceiveStreamDescriptor {
                     device_id: device_id.clone(),
                     stream_index,
                     frequency,
                     sample_rate,
                     start_time,
-                });
+                };
+
+                stream_sender
+                    .send(ReceiveStreamOutputMessage::NewStream {
+                        stream_id,
+                        descriptor,
+                        canary: Canary::downgrade(&canary),
+                    })
+                    .unwrap();
 
                 let buffer_size = (sample_rate * STREAM_CHUNK_PERIOD).round() as usize;
                 info!(
@@ -995,15 +964,14 @@ impl HardwareDeviceRxStream {
                                 let chunk =
                                     mem::replace(&mut buffer, stream.create_buffer(buffer_size));
                                 stream_sender
-                                    .send((
-                                        ReceiveStreamChunk {
+                                    .send(ReceiveStreamOutputMessage::Chunk {
+                                        chunk: ReceiveStreamChunk {
                                             stream_id,
-                                            descriptor: descriptor.clone(),
                                             time,
                                             chunk,
                                         },
-                                        canary.clone(),
-                                    ))
+                                        _canary: canary.clone(),
+                                    })
                                     .unwrap();
                                 buffer_ix = 0;
                             }
@@ -1036,6 +1004,18 @@ impl HardwareDeviceTxStream {
         }
     }
     fn update(&mut self, _params: &mut HardwareDeviceTxStreamParams) {}
+}
+
+enum ReceiveStreamOutputMessage {
+    NewStream {
+        stream_id: StreamId,
+        descriptor: ReceiveStreamDescriptor,
+        canary: WeakCanary,
+    },
+    Chunk {
+        chunk: ReceiveStreamChunk,
+        _canary: Canary, // Needed so that messages in the queue will keep the canary alive
+    },
 }
 
 // HELPER FUNCTIONS //

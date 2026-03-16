@@ -6,9 +6,9 @@ pub mod format;
 pub mod hardware;
 //pub mod history; // OLD
 mod id_factory;
-pub mod modulation;
+pub mod processor;
 pub mod preprocessor;
-//pub mod processor; // OLD
+//pub mod processor_old; // OLD
 pub mod raw_history;
 pub mod seqdeque;
 //pub mod stream_history; // OLD

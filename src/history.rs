@@ -3,7 +3,7 @@ use crate::processor::ChannelDescriptor;
 use crate::ui::Viewport;
 use crate::{
     hardware::StreamId,
-    processor::{ChannelId, ChannelResult},
+    processor_old::{ChannelId, ChannelResult},
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use std::collections::BTreeMap;

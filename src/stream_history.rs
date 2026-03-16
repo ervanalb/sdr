@@ -1,5 +1,5 @@
 use crate::hardware::{ReceiveStreamDescriptor, StreamId};
-use crate::processor::WaterfallRow;
+use crate::processor_old::WaterfallRow;
 use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::sync::Arc;

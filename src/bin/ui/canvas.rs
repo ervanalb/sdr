@@ -1,17 +1,11 @@
-use super::waterfall::WaterfallRenderer;
 use chrono::{DateTime, Duration, TimeDelta, Utc};
-use eframe::wgpu;
 use sdr::band_info::BandsInfo;
 use sdr::duration_ext::DurationExt;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
-use sdr::history::History;
-use sdr::stream_history::{StreamHistory, WaterfallDrawInfo};
+use sdr::raw_history::RawHistory;
 use sdr::ui::Viewport;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::hash::Hash;
-use std::rc::Rc;
 
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
@@ -71,136 +65,19 @@ fn paint_elided_text(
     }
 }
 
-pub struct StaticResources {
-    target_format: wgpu::TextureFormat,
-    instances: HashMap<egui::Id, CanvasResources>,
-}
-
-struct CanvasResources {
-    viewport_uniform_buffer: wgpu::Buffer,
-    waterfall_renderer: WaterfallRenderer,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ViewportUniforms {
-    viewport_size: [f32; 2],
-    translation: [f32; 2],
-    scale: [f32; 2],
-    _padding: [f32; 2],
-}
-
-pub fn init(cc: &eframe::CreationContext<'_>) {
-    let wgpu_render_state = cc.wgpu_render_state.as_ref().unwrap();
-    let target_format = wgpu_render_state.target_format;
-
-    wgpu_render_state
-        .renderer
-        .write()
-        .callback_resources
-        .insert(StaticResources {
-            target_format,
-            instances: HashMap::new(),
-        });
-}
-
-struct Callback {
-    id: egui::Id,
-    viewport_size: egui::Vec2,
-    translation: egui::Vec2,
-    scale: egui::Vec2,
-    waterfall_chunks: Vec<WaterfallDrawInfo>,
-    reference_time: DateTime<Utc>,
-}
-
-impl egui_wgpu::CallbackTrait for Callback {
-    fn prepare(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        _egui_encoder: &mut wgpu::CommandEncoder,
-        callback_resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
-        let static_resources: &mut StaticResources = callback_resources.get_mut().unwrap();
-        let target_format = static_resources.target_format;
-
-        // Get or create canvas resources
-        let resources = static_resources
-            .instances
-            .entry(self.id)
-            .or_insert_with(|| {
-                // Create uniform buffer
-                let viewport_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Viewport Uniform Buffer"),
-                    size: std::mem::size_of::<ViewportUniforms>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-
-                // Create waterfall renderer
-                let waterfall_renderer = WaterfallRenderer::new(device, target_format);
-
-                CanvasResources {
-                    viewport_uniform_buffer,
-                    waterfall_renderer,
-                }
-            });
-
-        // Update uniform buffer with viewport parameters
-        let uniforms = ViewportUniforms {
-            viewport_size: [self.viewport_size.x, self.viewport_size.y],
-            translation: [self.translation.x, self.translation.y],
-            scale: [self.scale.x, self.scale.y],
-            _padding: [0.0; 2],
-        };
-        queue.write_buffer(
-            &resources.viewport_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[uniforms]),
-        );
-
-        // Prepare waterfall draw calls
-        resources.waterfall_renderer.prepare(
-            self.waterfall_chunks.clone(),
-            device,
-            queue,
-            &resources.viewport_uniform_buffer,
-            self.reference_time,
-        );
-
-        Vec::new()
-    }
-
-    fn paint(
-        &self,
-        _info: egui::PaintCallbackInfo,
-        render_pass: &mut wgpu::RenderPass<'static>,
-        callback_resources: &egui_wgpu::CallbackResources,
-    ) {
-        let static_resources: &StaticResources = callback_resources.get().unwrap();
-
-        if let Some(resources) = static_resources.instances.get(&self.id) {
-            // Draw waterfall
-            resources.waterfall_renderer.render(render_pass);
-        }
-    }
-}
-
 pub fn ui(
     ui: &mut egui::Ui,
     id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
-    waterfall_gpu: &StreamHistory,
-    history: &History,
+    history: &RawHistory,
     reference_time: DateTime<Utc>,
     dt: TimeDelta,
     temp_random_instant: DateTime<Utc>,
     force_live: bool,
     hardware_params: &mut HardwareParams,
-    bands_info: &Rc<RefCell<BandsInfo>>,
+    bands_info: &BandsInfo,
 ) {
-    let highest_freq = { bands_info.borrow().highest_freq };
+    let highest_freq = bands_info.highest_freq;
 
     let id = ui.id().with(&id_source);
     let ui_size = ui.available_size();
@@ -417,7 +294,6 @@ pub fn ui(
 
     // Bands
     {
-        let bands_info = bands_info.borrow();
         let visuals = ui.visuals().widgets.noninteractive;
         for (bands_or_allocations, offset) in
             [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
@@ -451,21 +327,6 @@ pub fn ui(
         }
     }
 
-    // Waterfall
-    ui.painter()
-        .with_clip_rect(figure_rect)
-        .add(egui_wgpu::Callback::new_paint_callback(
-            figure_rect,
-            Callback {
-                id,
-                viewport_size: figure_size,
-                translation: viewport.translation,
-                scale: viewport.scale,
-                waterfall_chunks: waterfall_gpu.draw_list().collect(),
-                reference_time,
-            },
-        ));
-
-    // Active channels
+    // Draw processors
     history.draw(ui, figure_rect, viewport, dt);
 }

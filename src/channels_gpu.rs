@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     hardware::StreamId,
-    processor::{ChannelDescriptor, ChannelId, ChannelResult},
+    processor_old::{ChannelDescriptor, ChannelId, ChannelResult},
 };
 
 pub struct ChannelsGpu {

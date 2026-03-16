@@ -5,12 +5,11 @@ use eframe::egui;
 use sdr::band_info::BandsInfo;
 use sdr::duration_ext::DurationExt;
 use sdr::hardware::{Hardware, HardwareParams};
-use sdr::history::History;
-use sdr::processor::Processor;
-use sdr::stream_history::StreamHistory;
+use sdr::processor::ProcessorParameters;
+use sdr::raw_history::{ProcessorId, RawHistory};
 use sdr::ui::Viewport;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 mod ui;
 
@@ -51,36 +50,31 @@ fn main() -> eframe::Result<()> {
 struct SdrApp {
     hardware: Option<Hardware>,
     hardware_params: HardwareParams,
-    processor: Processor,
     viewport_state: Viewport,
-    stream_history: StreamHistory,
-    history: History,
+    processor_parameters: BTreeMap<ProcessorId, Arc<dyn ProcessorParameters>>,
+    history: RawHistory,
     prev_time: DateTime<Utc>,
     reference_time: DateTime<Utc>,
     temp_random_instant: DateTime<Utc>,
-    bands_info: Rc<RefCell<BandsInfo>>,
+    bands_info: BandsInfo,
 }
 
 impl SdrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        ui::canvas::init(cc);
-        let device = &cc.wgpu_render_state.as_ref().unwrap().device;
+        // TODO: call static method ui_init() on all potential processors
         let now = Utc::now();
 
         // Load bands info from JSON file included at compile time
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
-        let bands_info = Rc::new(RefCell::new(bands_info));
 
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
-            raw_history: RawHistory::new(),
-            processor: Processor::new(bands_info.clone()),
             viewport_state: Viewport::new(now),
-            stream_history: StreamHistory::new(device),
-            history: History::new(),
+            processor_parameters: BTreeMap::new(),
+            history: RawHistory::new(),
             prev_time: now,
             reference_time: now,
             temp_random_instant: now,
@@ -117,11 +111,12 @@ impl eframe::App for SdrApp {
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
-        self.raw_history.extend(hardware_results.chunks.into_iter());
-        self.raw_history
+        self.history.update(hardware_results);
+        self.history.process(&mut self.processor_parameters);
+        self.history
             .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
-        let processed_results = self.processor.process(&hardware_results);
 
+        /*
         // Deactivate waterfall streams that don't exist anymore
         self.stream_history.retain(
             &wgpu_render_state.device,
@@ -148,6 +143,7 @@ impl eframe::App for SdrApp {
             .prune_old_data(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
         self.history
             .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+        */
 
         let prev_run = self.hardware_params.run;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -275,6 +271,8 @@ impl eframe::App for SdrApp {
                                                 }
 
                                                 // Peak meter
+                                                // TODO: fix by moving into hardware
+                                                /*
                                                 let mut peak = None;
                                                 for active_stream in
                                                     self.stream_history.active_streams.values()
@@ -297,6 +295,7 @@ impl eframe::App for SdrApp {
                                                         if overload { "O" } else { "" }
                                                     ));
                                                 }
+                                                */
                                             },
                                         );
                                     }
@@ -323,7 +322,6 @@ impl eframe::App for SdrApp {
                 ui,
                 "canvas",
                 &mut self.viewport_state,
-                &self.stream_history,
                 &self.history,
                 self.reference_time,
                 dt,
