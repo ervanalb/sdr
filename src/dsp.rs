@@ -81,9 +81,9 @@ impl<T: Clone + Default> OverlapExpand<T> {
         }
     }
 
-    pub fn process(&mut self, input: &[T]) -> Vec<T> {
+    pub fn process(&mut self, input: &[T]) -> Box<[T]> {
         if input.is_empty() {
-            return vec![];
+            return Box::new([]);
         }
         let mut output = Vec::with_capacity(input.len() * 2);
         let (first_chunk, input) = input.split_at(self.chunk_size);
@@ -102,7 +102,8 @@ impl<T: Clone + Default> OverlapExpand<T> {
         // Remember the last half chunk for the next call to process()
         self.prev_half_chunk
             .clone_from_slice(&output[output.len() - self.chunk_size / 2..]);
-        output
+
+        output.into_boxed_slice()
     }
 }
 
@@ -122,9 +123,9 @@ impl<T: Clone + Default + AddAssign> OverlapReduce<T> {
         }
     }
 
-    pub fn process(&mut self, input: &[T]) -> Vec<T> {
+    pub fn process(&mut self, input: &[T]) -> Box<[T]> {
         if input.is_empty() {
-            return vec![];
+            return Box::new([]);
         }
 
         //if self.start {
@@ -150,7 +151,7 @@ impl<T: Clone + Default + AddAssign> OverlapReduce<T> {
         assert!(chunks.remainder().is_empty());
         assert!(!self.buffer.is_empty()); // even number of half-chunks
 
-        output
+        output.into_boxed_slice()
     }
 }
 
@@ -334,7 +335,7 @@ impl RealIfft {
     }
 }
 
-pub fn hann_window(len: usize) -> Vec<f32> {
+pub fn hann_window(len: usize) -> Box<[f32]> {
     let inv_len = 1. / len as f32;
     let center = len as f32 / 2.;
     (0..len)
@@ -575,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_overlap_multiple_calls() {
-        let input: Vec<u32> = (0..24).collect();
+        let input: Box<[u32]> = (0..24).collect();
 
         let mut overlapped_from_chunks = vec![];
         let mut output_from_chunks = vec![];
@@ -604,8 +605,8 @@ mod tests {
             output_bulk = overlap_reduce.process(&overlapped_from_chunks);
         }
 
-        assert_eq!(overlapped_from_chunks, overlapped_bulk,);
-        assert_eq!(output_from_chunks, output_bulk,);
+        assert_eq!(overlapped_from_chunks.into_boxed_slice(), overlapped_bulk,);
+        assert_eq!(output_from_chunks.into_boxed_slice(), output_bulk,);
     }
 
     #[test]

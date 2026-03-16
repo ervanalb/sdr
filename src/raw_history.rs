@@ -1,11 +1,12 @@
 use crate::{
     hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId},
-    preprocessor::Preprocessor,
+    preprocessor::StreamPreprocessor,
     processor::{Processor, ProcessorHistory, ProcessorParameters},
     seqdeque::SeqDeque,
     ui::Viewport,
 };
 use chrono::{DateTime, TimeDelta, Utc};
+use num_complex::Complex;
 use rayon::prelude::*;
 use std::{
     any::Any,
@@ -55,7 +56,7 @@ impl RawHistory {
             // The actual buffers are behind Arc, so only metadata is copied.
             let mut chunks = SeqDeque::new();
             let mut streams;
-            let mut preprocessor = Preprocessor::new();
+            let mut preprocessors = BTreeMap::new();
             let mut preprocessor_next_seq_num: usize = 0;
             let mut processors = BTreeMap::<ProcessorId, ChildThreadProcessorState>::new();
 
@@ -88,7 +89,7 @@ impl RawHistory {
 
                     // Reset the preprocessor if its next_seq_num is earlier than the start of history.
                     if preprocessor_next_seq_num < chunks.start_index() {
-                        preprocessor.reset();
+                        preprocessors.clear();
                         preprocessor_next_seq_num = chunks.start_index();
                     }
 
@@ -115,7 +116,7 @@ impl RawHistory {
                     if processors.values().any(|processor_state| {
                         processor_state.next_seq_num < preprocessor_next_seq_num
                     }) {
-                        preprocessor.reset();
+                        preprocessors.clear();
                         processing_start_index = chunks.start_index();
                     } else {
                         processing_start_index = preprocessor_next_seq_num;
@@ -150,7 +151,9 @@ impl RawHistory {
                         while let Some(&(stream_end_seq_num, stream_id)) = stream_ends.last()
                             && stream_end_seq_num == seq_num
                         {
-                            preprocessor.end_stream(stream_id);
+                            preprocessors
+                                .remove(&stream_id)
+                                .expect("Closed a stream that didn't exist");
                             preprocessed_stream_ends.push(stream_id);
                             stream_ends.pop();
                         }
@@ -161,15 +164,24 @@ impl RawHistory {
                             stream_starts.last()
                             && stream_start_seq_num == seq_num
                         {
-                            let preprocessed_stream_descriptor =
-                                preprocessor.start_stream(stream_id, descriptor);
-                            preprocessed_stream_starts
-                                .push((stream_id, preprocessed_stream_descriptor));
+                            preprocessors.entry(stream_id).or_insert_with(|| {
+                                let (processor, descriptor) = StreamPreprocessor::new(descriptor);
+                                preprocessed_stream_starts.push((stream_id, descriptor));
+                                processor
+                            });
                             stream_starts.pop();
                         }
 
                         // Preprocess
-                        let preprocessed_chunk = preprocessor.process_chunk(chunk);
+                        let stream_processor = preprocessors
+                            .get_mut(&chunk.stream_id)
+                            .expect("Stream's preprocessor does not exist");
+                        let preprocessed_data = stream_processor.process(&chunk.chunk);
+                        let preprocessed_chunk = PreprocessedChunk {
+                            stream_id: chunk.stream_id,
+                            time: chunk.time,
+                            chunk: preprocessed_data,
+                        };
 
                         // Collect each processor that has work to do for this chunk
                         let work: Vec<_> = processors
@@ -421,4 +433,10 @@ struct ProcessingOutputMessage {
 pub enum ProcessingOutputMessageType {
     Reset,
     Data(Box<dyn Any + Send>),
+}
+
+pub struct PreprocessedChunk {
+    pub stream_id: StreamId,
+    pub time: DateTime<Utc>,
+    pub chunk: Box<[Complex<f32>]>,
 }

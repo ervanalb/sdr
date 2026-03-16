@@ -54,15 +54,9 @@ pub enum RawIqSamples {
     CF32(Box<[Complex<f32>]>),
 }
 
-// TODO:
-//impl RawIqSamples {
-//    pub fn to_cf32(&self) {
-//        match self {
-//            CS8(samples) => samples.map(|sample| (1. / 127.) * sample as f32)
-//            CF32(samples) => samples.map(|sample| (1. / 127.) * sample as f32)
-//        }
-//    }
-//}
+impl RawIqSamples {
+    pub fn to_cf32(&self) {}
+}
 
 impl std::fmt::Debug for RawIqSamples {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -961,6 +955,7 @@ impl HardwareDeviceRxStream {
                         Ok(len) => {
                             buffer_ix += len;
                             if buffer_ix >= buffer_size {
+                                // TODO: peak monitoring & offset correction
                                 let chunk =
                                     mem::replace(&mut buffer, stream.create_buffer(buffer_size));
                                 stream_sender

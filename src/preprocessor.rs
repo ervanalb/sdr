@@ -1,53 +1,86 @@
-use std::{collections::BTreeMap, sync::Arc};
-
-use chrono::{DateTime, Utc};
+use crate::{
+    dsp::{Fft, OverlapExpand, hann_window},
+    hardware::{RawIqSamples, ReceiveStreamDescriptor},
+};
 use num_complex::Complex;
+use std::mem;
 
-use crate::hardware::{ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId};
-
-pub struct Preprocessor {
-    streams: BTreeMap<StreamId, StreamPreprocessor>,
-}
-
-impl Preprocessor {
-    pub fn new() -> Preprocessor {
-        Preprocessor {
-            streams: BTreeMap::new(),
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.streams.clear();
-    }
-
-    pub fn start_stream(
-        &mut self,
-        stream_id: usize,
-        descriptor: &ReceiveStreamDescriptor,
-    ) -> PreprocessedStreamDescriptor {
-        todo!()
-    }
-
-    pub fn process_chunk(&mut self, chunk: &ReceiveStreamChunk) -> PreprocessedChunk {
-        todo!()
-    }
-
-    pub fn end_stream(&mut self, stream_id: usize) {
-        todo!()
-    }
-}
+const TARGET_BIN_SIZE: f64 = 2.5e3; // 2.5 KHz
 
 pub struct PreprocessedStreamDescriptor {
-    descriptor: Arc<ReceiveStreamDescriptor>,
+    pub descriptor: ReceiveStreamDescriptor,
+    pub fft_size: usize,
 }
 
 pub struct StreamPreprocessor {
-    descriptor: Arc<ReceiveStreamDescriptor>,
+    fft_size: usize,
+    buffer: Vec<Complex<f32>>,
+    overlap_expand: OverlapExpand<Complex<f32>>,
+    hann_window: Box<[f32]>,
+    fft: Fft,
 }
 
-#[derive(Debug)]
-pub struct PreprocessedChunk {
-    pub stream_id: StreamId,
-    pub time: DateTime<Utc>,
-    pub data: Box<Complex<f32>>,
+impl StreamPreprocessor {
+    pub fn new(
+        descriptor: &ReceiveStreamDescriptor,
+    ) -> (StreamPreprocessor, PreprocessedStreamDescriptor) {
+        // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
+        let min_fft_size = (descriptor.sample_rate / TARGET_BIN_SIZE).ceil() as usize;
+        let fft_size = min_fft_size.next_power_of_two();
+
+        let overlap_expand = OverlapExpand::new(fft_size);
+        let fft = Fft::new(fft_size);
+
+        let processor = StreamPreprocessor {
+            fft_size,
+            buffer: vec![],
+            overlap_expand,
+            hann_window: hann_window(fft_size),
+            fft,
+        };
+        let descriptor = PreprocessedStreamDescriptor {
+            descriptor: descriptor.clone(),
+            fft_size,
+        };
+        (processor, descriptor)
+    }
+
+    pub fn process(&mut self, data: &RawIqSamples) -> Box<[Complex<f32>]> {
+        // Convert data to Complex<f32>
+        match data {
+            RawIqSamples::CS8(samples) => {
+                self.buffer.extend(samples.iter().map(|&sample| {
+                    (1. / 127.)
+                        * Complex {
+                            re: sample.re as f32,
+                            im: sample.im as f32,
+                        }
+                }));
+            }
+            RawIqSamples::CF32(samples) => {
+                self.buffer.extend(samples);
+            }
+        }
+
+        // Split off an integer number of FFTs
+        let split_pt = self.buffer.len() / self.fft_size * self.fft_size;
+        let mut samples = self.buffer.split_off(split_pt);
+        mem::swap(&mut self.buffer, &mut samples); // split_off works the opposite way from what we want
+
+        // Process incoming data into overlapping chunks
+        let mut samples = self.overlap_expand.process(&samples);
+
+        // Apply Hann window
+        for one_fft in samples.chunks_exact_mut(self.fft.size()) {
+            for (sample, win) in one_fft.iter_mut().zip(self.hann_window.iter()) {
+                *sample *= win;
+            }
+        }
+
+        // FFT
+        self.fft.process_inplace(&mut samples);
+
+        // Return result
+        samples
+    }
 }
