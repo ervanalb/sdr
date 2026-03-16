@@ -1,13 +1,15 @@
 pub mod audio;
 pub mod band_info;
-// pub mod channels_gpu; // Replaced by history module
 pub mod dsp;
 pub mod duration_ext;
 pub mod format;
 pub mod hardware;
-pub mod history;
+//pub mod history; // OLD
 mod id_factory;
 pub mod modulation;
-pub mod processor;
-pub mod stream_history;
+pub mod preprocessor;
+//pub mod processor; // OLD
+pub mod raw_history;
+pub mod seqdeque;
+//pub mod stream_history; // OLD
 pub mod ui;

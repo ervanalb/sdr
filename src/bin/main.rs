@@ -76,6 +76,7 @@ impl SdrApp {
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
+            raw_history: RawHistory::new(),
             processor: Processor::new(bands_info.clone()),
             viewport_state: Viewport::new(now),
             stream_history: StreamHistory::new(device),
@@ -116,6 +117,9 @@ impl eframe::App for SdrApp {
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
+        self.raw_history.extend(hardware_results.chunks.into_iter());
+        self.raw_history
+            .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
         let processed_results = self.processor.process(&hardware_results);
 
         // Deactivate waterfall streams that don't exist anymore

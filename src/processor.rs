@@ -1,7 +1,7 @@
 use crate::band_info::{BandsInfo, ChannelGroupInfo, ChannelInfo};
 use crate::dsp::{Fft, Ifft, OverlapExpand, Rechunker, hann_window};
 use crate::duration_ext::DurationExt;
-use crate::hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId};
+use crate::hardware::{HardwareResult, RawStreamChunk, ReceiveStreamDescriptor, StreamId};
 use crate::id_factory::IdFactory;
 use crate::modulation::{Demodulator, ModulationParameters};
 use chrono::{DateTime, Duration, Utc};
@@ -155,7 +155,7 @@ impl StreamProcessor {
         self.processor.chunk_size
     }
 
-    pub fn process(&mut self, data: &[ReceiveStreamChunk]) -> StreamProcessingResult {
+    pub fn process(&mut self, data: &[RawStreamChunk]) -> StreamProcessingResult {
         let mut result = StreamProcessingResult {
             descriptor: self.descriptor.clone(),
             spectrum_len: self.processor.fft.size(),
