@@ -73,8 +73,8 @@ impl Processor for WaterfallProcessor {
                         stream_id,
                         spectrum_len,
                         start_time: descriptor.start_time,
-                        frequency: descriptor.frequency,
-                        sample_rate: descriptor.sample_rate,
+                        freq_min: descriptor.frequency - 0.5 * descriptor.sample_rate,
+                        freq_max: descriptor.frequency + 0.5 * descriptor.sample_rate,
                     })
                     .ok();
             }
@@ -200,8 +200,8 @@ pub enum WaterfallMessage {
         stream_id: StreamId,
         spectrum_len: u32,
         start_time: DateTime<Utc>,
-        frequency: f64,
-        sample_rate: f64,
+        freq_min: f64,
+        freq_max: f64,
     },
     EndStream(StreamId),
     PushRow {
@@ -270,16 +270,16 @@ impl ProcessorHistory for WaterfallHistory {
                     stream_id,
                     spectrum_len,
                     start_time,
-                    frequency,
-                    sample_rate,
+                    freq_min,
+                    freq_max,
                 } => match self.active_streams.entry(stream_id) {
                     Entry::Vacant(e) => {
                         e.insert(ActiveStream::new(
                             &self.device,
                             spectrum_len,
                             start_time,
-                            frequency,
-                            sample_rate,
+                            freq_min,
+                            freq_max,
                             self.blank_texture.clone(),
                         ));
                     }
@@ -296,31 +296,40 @@ impl ProcessorHistory for WaterfallHistory {
                     let freq_max = active_texture.freq_max;
                     let min = active_texture.min;
                     let max = active_texture.max;
-                    if let Some(finished_texture) =
-                        active_texture.finish(&self.device, &self.queue, self.blank_texture.clone())
-                    {
-                        Self::push_finished_texture(
-                            &mut self.finished_streams,
-                            freq_min,
-                            freq_max,
-                            stream_id,
-                            min,
-                            max,
-                            finished_texture,
-                        );
-                    }
+                    let finished_texture = active_texture.finish(
+                        &self.device,
+                        &self.queue,
+                        self.blank_texture.clone(),
+                    );
+                    Self::update_finished(
+                        &mut self.finished_streams,
+                        freq_min,
+                        freq_max,
+                        stream_id,
+                        min,
+                        max,
+                        finished_texture,
+                    );
                 }
                 WaterfallMessage::PushRow {
                     stream_id,
                     waterfall_row,
                 } => {
-                    Self::push(
-                        &mut self.active_streams,
+                    let active_texture = self
+                        .active_streams
+                        .get_mut(&stream_id)
+                        .expect("Tried to push a waterfall row to a stream that doesn't exist");
+
+                    let finished_texture =
+                        active_texture.push(&self.device, &self.queue, waterfall_row);
+                    Self::update_finished(
                         &mut self.finished_streams,
-                        &self.device,
-                        &self.queue,
+                        active_texture.freq_min,
+                        active_texture.freq_max,
                         stream_id,
-                        waterfall_row,
+                        active_texture.min,
+                        active_texture.max,
+                        finished_texture,
                     );
                 }
             }
@@ -393,52 +402,40 @@ impl ProcessorHistory for WaterfallHistory {
 }
 
 impl WaterfallHistory {
-    fn push(
-        active_streams: &mut BTreeMap<StreamId, ActiveStream>,
-        finished_streams: &mut BTreeMap<StreamId, FinishedStream>,
-        device: &Device,
-        queue: &Queue,
-        stream_id: StreamId,
-        waterfall_row: WaterfallRow,
-    ) {
-        let active_texture = active_streams
-            .get_mut(&stream_id)
-            .expect("Tried to push a waterfall row to a stream that doesn't exist");
-
-        if let Some(finished_texture) = active_texture.push(device, queue, waterfall_row) {
-            Self::push_finished_texture(
-                finished_streams,
-                active_texture.freq_min,
-                active_texture.freq_max,
-                stream_id,
-                active_texture.min,
-                active_texture.max,
-                finished_texture,
-            );
-        }
-    }
-
-    fn push_finished_texture(
+    fn update_finished(
         finished_streams: &mut BTreeMap<StreamId, FinishedStream>,
         freq_min: f64,
         freq_max: f64,
         stream_id: StreamId,
         min: f32,
         max: f32,
-        finished_texture: FinishedTexture,
+        finished_texture: Option<FinishedTexture>,
     ) {
-        let finished_stream = finished_streams
-            .entry(stream_id)
-            .or_insert_with(|| FinishedStream {
-                freq_min,
-                freq_max,
-                textures: VecDeque::new(),
-                min: f32::NAN,
-                max: f32::NAN,
-            });
-        finished_stream.min = min;
-        finished_stream.max = max;
-        finished_stream.textures.push_back(finished_texture);
+        match finished_streams.entry(stream_id) {
+            Entry::Occupied(mut e) => {
+                let finished_stream = e.get_mut();
+                // Even if we don't have a new finished texture to push,
+                // update the min & max values
+                finished_stream.min = min;
+                finished_stream.max = max;
+                if let Some(finished_texture) = finished_texture {
+                    finished_stream.textures.push_back(finished_texture);
+                }
+            }
+            Entry::Vacant(e) => {
+                if let Some(finished_texture) = finished_texture {
+                    let mut textures = VecDeque::new();
+                    textures.push_back(finished_texture);
+                    e.insert(FinishedStream {
+                        freq_min,
+                        freq_max,
+                        textures,
+                        min,
+                        max,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -463,8 +460,8 @@ impl ActiveStream {
         device: &Device,
         spectrum_len: u32,
         start_time: DateTime<Utc>,
-        frequency: f64,
-        sample_rate: f64,
+        freq_min: f64,
+        freq_max: f64,
         prev_texture: Texture,
     ) -> Self {
         let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
@@ -486,8 +483,8 @@ impl ActiveStream {
         });
 
         Self {
-            freq_min: frequency - 0.5 * sample_rate,
-            freq_max: frequency - 0.5 * sample_rate,
+            freq_min,
+            freq_max,
             prev_texture,
             texture,
             current_row: 0,
