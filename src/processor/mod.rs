@@ -1,4 +1,4 @@
-//pub mod fm;
+pub mod fm;
 pub mod waterfall;
 
 use crate::{hardware::StreamId, preprocessor::PreprocessedStreamDescriptor, ui::Viewport};

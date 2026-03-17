@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
-const SAMPLE_RATE: f64 = 48000.;
+pub const SAMPLE_RATE: f64 = 48000.;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AudioError {
@@ -17,16 +17,7 @@ pub struct FeedResult {
 
 pub struct AudioBuffer {
     pub seq_num: usize,
-    pub data: Vec<f32>,
-}
-
-impl AudioBuffer {
-    pub fn new(len: usize) -> AudioBuffer {
-        AudioBuffer {
-            seq_num: 0, // Will get overwritten
-            data: Vec::with_capacity(len),
-        }
-    }
+    pub data: Box<[f32]>,
 }
 
 enum AudioResponse {
@@ -76,7 +67,7 @@ impl AudioOutput {
                                     .send(AudioResponse::Played(buffer.seq_num))
                                     .unwrap();
                                 underrun = false;
-                                buffer.data
+                                buffer.data.into_vec()
                             }
                             Err(TryRecvError::Empty) => {
                                 // No buffer available - underrun

@@ -1,6 +1,6 @@
 use std::{
     collections::{VecDeque, vec_deque::Iter},
-    ops::{Bound, RangeBounds},
+    ops::{Bound, Index, IndexMut, RangeBounds},
 };
 
 #[derive(Clone, Default)]
@@ -62,5 +62,53 @@ impl<T> SeqDeque<T> {
         let start = range.start_bound().sub_offset(self.1);
         let end = range.end_bound().sub_offset(self.1);
         self.0.range((start, end))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn front(&self) -> Option<&T> {
+        self.0.front()
+    }
+
+    pub fn back(&self) -> Option<&T> {
+        self.0.back()
+    }
+
+    pub fn iter(&self) -> Iter<'_, T> {
+        self.0.iter()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.start_index() && index < self.end_index() {
+            Some(&self.0[index - self.1])
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= self.start_index() && index < self.end_index() {
+            Some(&mut self.0[index - self.1])
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> Index<usize> for SeqDeque<T> {
+    type Output = T;
+
+    #[inline]
+    fn index(&self, index: usize) -> &T {
+        &self.0[index - self.1]
+    }
+}
+
+impl<T> IndexMut<usize> for SeqDeque<T> {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        &mut self.0[index - self.1]
     }
 }

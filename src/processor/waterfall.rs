@@ -25,7 +25,7 @@ const MAX_QUANTILE: f64 = 0.99;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-// #[serde(rename = "fm")] -- Doesn't work?
+// #[serde(rename = "waterfall")] -- Doesn't work?
 pub struct WaterfallProcessorParameters {}
 
 #[typetag::serde]

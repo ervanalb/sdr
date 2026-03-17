@@ -5,6 +5,7 @@ use eframe::egui;
 use sdr::band_info::BandsInfo;
 use sdr::duration_ext::DurationExt;
 use sdr::hardware::{Hardware, HardwareParams};
+use sdr::processor::fm::FmProcessorParameters;
 use sdr::processor::waterfall::WaterfallProcessorParameters;
 use sdr::processor::{CreationContext, ProcessorParameters};
 use sdr::raw_history::{ProcessorId, RawHistory};
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 mod ui;
 
-const CANVAS_DURATION: f64 = 120.;
+const CANVAS_DURATION: f64 = 20.;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
@@ -72,6 +73,15 @@ impl SdrApp {
 
         let mut processor_parameters = BTreeMap::<ProcessorId, Arc<dyn ProcessorParameters>>::new();
         processor_parameters.insert(0, Arc::new(WaterfallProcessorParameters {}));
+        processor_parameters.insert(
+            1,
+            Arc::new(FmProcessorParameters {
+                frequency: 90.9e6,
+                bandwidth: 200e3,
+                squelch_db: -100.,
+                squelch_hysteresis_db: 3.,
+            }),
+        );
 
         Self {
             hardware: Some(Hardware::new()),

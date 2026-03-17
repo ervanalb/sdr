@@ -160,8 +160,7 @@ pub struct Fft {
     fft_plan: Arc<dyn rustfft::Fft<f32>>,
     fft_size: usize,
     fft_scratch: Vec<Complex<f32>>,
-    inv_len_f64: f64, // used for freq2bin & friends
-    inv_len: f32,     // used for normalization
+    inv_len: f32,
 }
 
 impl Fft {
@@ -173,18 +172,8 @@ impl Fft {
             fft_plan,
             fft_size,
             fft_scratch,
-            inv_len_f64: 1. / fft_size as f64,
             inv_len: 1. / fft_size as f32,
         }
-    }
-
-    pub fn bin2freq(&self, bin: usize) -> f64 {
-        (bin as f64 - (self.fft_size / 2) as f64) * self.inv_len_f64
-    }
-
-    pub fn freq2bin(&self, freq: f64) -> usize {
-        let bin = ((freq * self.fft_size as f64) + (self.fft_size / 2) as f64).round();
-        bin as usize
     }
 
     pub fn process_inplace(&mut self, data: &mut [Complex<f32>]) {
@@ -198,10 +187,6 @@ impl Fft {
         for sample in data.iter_mut() {
             *sample *= self.inv_len;
         }
-    }
-
-    pub fn dc_bin(&self) -> usize {
-        (self.fft_size + 1) / 2
     }
 
     pub fn size(&self) -> usize {
@@ -228,10 +213,6 @@ impl Ifft {
         }
     }
 
-    pub fn dc_bin(&self) -> usize {
-        (self.fft_size + 1) / 2
-    }
-
     pub fn process_inplace(&mut self, data: &mut [Complex<f32>]) {
         let mut chunks = data.chunks_exact_mut(self.size());
         while let Some(chunk) = chunks.next() {
@@ -246,6 +227,18 @@ impl Ifft {
     pub fn size(&self) -> usize {
         self.fft_size
     }
+}
+
+pub fn fft_bin2freq(fft_size: usize, bin: usize) -> f64 {
+    (bin as f64 - (fft_size / 2) as f64) / fft_size as f64
+}
+
+pub fn fft_freq2bin(fft_size: usize, freq: f64) -> usize {
+    ((freq * fft_size as f64) + (fft_size / 2) as f64).round() as usize
+}
+
+pub fn fft_dc_bin(fft_size: usize) -> usize {
+    (fft_size + 1) / 2
 }
 
 #[derive(Clone)]
@@ -271,10 +264,11 @@ impl RealFft {
         }
     }
 
-    pub fn process(&mut self, mut data: Vec<f32>) -> Vec<Complex<f32>> {
+    pub fn process(&mut self, mut data: Box<[f32]>) -> Box<[Complex<f32>]> {
         assert!(data.len() % self.fft_size == 0);
         let spectrum_size = self.fft_size / 2 + 1;
-        let mut output = vec![Complex::ZERO; data.len() / self.fft_size * spectrum_size];
+        let mut output =
+            vec![Complex::ZERO; data.len() / self.fft_size * spectrum_size].into_boxed_slice();
         for (input_chunk, output_chunk) in data
             .chunks_exact_mut(self.fft_size)
             .zip(output.chunks_exact_mut(spectrum_size))
@@ -315,10 +309,10 @@ impl RealIfft {
         }
     }
 
-    pub fn process(&mut self, mut data: Vec<Complex<f32>>) -> Vec<f32> {
+    pub fn process(&mut self, mut data: Box<[Complex<f32>]>) -> Box<[f32]> {
         let spectrum_size = self.fft_size / 2 + 1;
         assert!(data.len() % spectrum_size == 0);
-        let mut output = vec![0.; data.len() / spectrum_size * self.fft_size];
+        let mut output = vec![0.; data.len() / spectrum_size * self.fft_size].into_boxed_slice();
         for (input_chunk, output_chunk) in data
             .chunks_exact_mut(spectrum_size)
             .zip(output.chunks_exact_mut(self.fft_size))
@@ -403,9 +397,9 @@ pub struct FmDemod {
 }
 
 impl FmDemod {
-    pub fn new(omega: f32) -> Self {
+    pub fn new(tuning_error: f64) -> Self {
         FmDemod {
-            omega,
+            omega: (-tuning_error * std::f64::consts::TAU) as f32,
             last_angle: 0.,
         }
     }
@@ -455,7 +449,7 @@ impl<T: Copy + Default + Mul<f32, Output = T> + Add<T, Output = T>> CubicInterpo
         }
     }
 
-    pub fn process(&mut self, input: &[T]) -> Vec<T> {
+    pub fn process(&mut self, input: &[T]) -> Box<[T]> {
         let output_count = ((input.len() as f64 - self.t) * self.inv_ratio).ceil() as usize;
         let ratio_f32 = self.ratio as f32;
         let start_t_f32 = self.t as f32;
