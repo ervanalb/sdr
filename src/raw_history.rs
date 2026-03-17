@@ -1,7 +1,7 @@
 use crate::{
     hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId},
     preprocessor::StreamPreprocessor,
-    processor::{Processor, ProcessorHistory, ProcessorParameters},
+    processor::{CreationContext, Processor, ProcessorHistory, ProcessorParameters},
     seqdeque::SeqDeque,
     ui::Viewport,
 };
@@ -14,7 +14,7 @@ use std::{
     ops::Range,
     sync::{
         Arc,
-        mpsc::{Receiver, Sender, channel},
+        mpsc::{Sender, channel},
     },
     thread::{JoinHandle, spawn},
 };
@@ -30,17 +30,15 @@ pub struct RawHistory {
     last_processor_history_start: usize,
     last_processor_history_end: usize,
     processing_thread_sender: Sender<ProcessingInputMessage>,
-    processing_thread_receiver: Receiver<ProcessingOutputMessage>,
-    processing_thread_handle: Option<JoinHandle<()>>,
+    _processing_thread_handle: JoinHandle<()>,
 }
 
 impl RawHistory {
     pub fn new() -> RawHistory {
         let (main_thread_sender, child_thread_receiver) = channel::<ProcessingInputMessage>();
-        let (child_thread_sender, main_thread_receiver) = channel::<ProcessingOutputMessage>();
 
         // For the thread
-        let processing_thread_handle = spawn(move || {
+        let _processing_thread_handle = spawn(move || {
             // We maintain a carbon copy of the history inside of the processing thread
             // to avoid lock contention in the radio hardware threads--
             // they write to the one in the main thread,
@@ -90,16 +88,10 @@ impl RawHistory {
 
                     // Reset any processors whose next_seq_num is earlier than the start of history.
                     // Also send a message so that processor's history will get reset too.
-                    for (processor_id, processor_state) in processors.iter_mut() {
+                    for processor_state in processors.values_mut() {
                         if processor_state.next_seq_num < chunks.start_index() {
                             processor_state.processor.reset();
                             processor_state.next_seq_num = chunks.start_index();
-                            child_thread_sender
-                                .send(ProcessingOutputMessage {
-                                    processor_id: *processor_id,
-                                    msg_type: ProcessingOutputMessageType::Reset,
-                                })
-                                .unwrap();
                         }
                     }
 
@@ -172,6 +164,7 @@ impl RawHistory {
                             .get_mut(&chunk.stream_id)
                             .expect("Stream's preprocessor does not exist");
                         let preprocessed_data = stream_processor.process(&chunk.chunk);
+                        preprocessor_next_seq_num = seq_num + 1;
 
                         // Collect each processor that has work to do for this chunk
                         let work: Vec<_> = processors
@@ -179,7 +172,7 @@ impl RawHistory {
                             .filter(|processor_state| processor_state.next_seq_num <= seq_num)
                             .map(|processor_state| {
                                 // Advance this processor's seq_num
-                                processor_state.next_seq_num = seq_num;
+                                processor_state.next_seq_num = seq_num + 1;
                                 &mut processor_state.processor
                             })
                             .collect();
@@ -224,8 +217,7 @@ impl RawHistory {
             last_processor_history_start: 0,
             last_processor_history_end: 0,
             processing_thread_sender: main_thread_sender,
-            processing_thread_receiver: main_thread_receiver,
-            processing_thread_handle: Some(processing_thread_handle),
+            _processing_thread_handle,
         }
     }
 
@@ -263,6 +255,7 @@ impl RawHistory {
     pub fn process(
         &mut self,
         processor_parameters: &mut BTreeMap<ProcessorId, Arc<dyn ProcessorParameters>>,
+        cc: &CreationContext<'_>,
     ) {
         // 1. Add & remove any processor states, as per processor_params
 
@@ -280,7 +273,7 @@ impl RawHistory {
         let mut new_processors = vec![];
         for (processor_id, processor_parameters) in processor_parameters.iter() {
             if let Entry::Vacant(e) = self.processors.entry(*processor_id) {
-                let (processor, history) = processor_parameters.create_processor();
+                let (processor, history) = processor_parameters.create_processor(cc);
                 e.insert(MainThreadProcessorState {
                     last_parameters: processor_parameters.clone(),
                     history,
@@ -362,8 +355,10 @@ impl RawHistory {
         viewport: &Viewport,
         dt: TimeDelta,
     ) {
-        for processor in self.processors.values() {
-            processor.history.draw(ui, figure_rect, viewport, dt);
+        for (processor_id, processor) in self.processors.iter() {
+            processor
+                .history
+                .draw(ui, egui::Id::new(processor_id), figure_rect, viewport, dt);
         }
     }
 }
@@ -390,11 +385,6 @@ struct ProcessingInputMessage {
     new_chunks: Vec<Arc<ReceiveStreamChunk>>,
     chunks_start: usize,
     streams: BTreeMap<StreamId, StreamHistory>,
-}
-
-struct ProcessingOutputMessage {
-    processor_id: ProcessorId,
-    msg_type: ProcessingOutputMessageType,
 }
 
 pub enum ProcessingOutputMessageType {

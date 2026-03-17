@@ -5,7 +5,8 @@ use eframe::egui;
 use sdr::band_info::BandsInfo;
 use sdr::duration_ext::DurationExt;
 use sdr::hardware::{Hardware, HardwareParams};
-use sdr::processor::ProcessorParameters;
+use sdr::processor::waterfall::WaterfallProcessorParameters;
+use sdr::processor::{CreationContext, ProcessorParameters};
 use sdr::raw_history::{ProcessorId, RawHistory};
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
@@ -62,18 +63,21 @@ struct SdrApp {
 impl SdrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        // TODO: call static method ui_init() on all potential processors
+        sdr::processor::waterfall::static_init(cc);
         let now = Utc::now();
 
         // Load bands info from JSON file included at compile time
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
 
+        let mut processor_parameters = BTreeMap::<ProcessorId, Arc<dyn ProcessorParameters>>::new();
+        processor_parameters.insert(0, Arc::new(WaterfallProcessorParameters {}));
+
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: Viewport::new(now),
-            processor_parameters: BTreeMap::new(),
+            processor_parameters,
             history: RawHistory::new(),
             prev_time: now,
             reference_time: now,
@@ -112,7 +116,13 @@ impl eframe::App for SdrApp {
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
         self.history.update(hardware_results);
-        self.history.process(&mut self.processor_parameters);
+        self.history.process(
+            &mut self.processor_parameters,
+            &CreationContext {
+                device: &wgpu_render_state.device,
+                queue: &wgpu_render_state.queue,
+            },
+        );
         self.history
             .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 

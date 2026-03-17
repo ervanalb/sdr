@@ -1,7 +1,8 @@
-use eframe::wgpu;
-use sdr::stream_history::WaterfallDrawInfo;
-use std::ops::Range;
 use chrono::{DateTime, Utc};
+use eframe::wgpu;
+use std::ops::Range;
+
+use crate::processor::waterfall::WaterfallDrawInfo;
 
 const BUFFER_LEN: usize = 4096;
 
@@ -196,7 +197,9 @@ impl WaterfallRenderer {
         for chunk in chunks {
             // Build vertices for all chunks using this texture
             // Calculate time coordinates (Y axis)
-            let y_start = reference_time.signed_duration_since(chunk.end_time).as_seconds_f32();
+            let y_start = reference_time
+                .signed_duration_since(chunk.end_time)
+                .as_seconds_f32();
             let y_end = reference_time
                 .signed_duration_since(chunk.start_time)
                 .as_seconds_f32();

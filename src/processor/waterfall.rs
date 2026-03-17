@@ -2,14 +2,16 @@ use crate::{
     dsp::log_mix_f32,
     hardware::StreamId,
     preprocessor::PreprocessedStreamDescriptor,
-    processor::{Processor, ProcessorHistory, ProcessorParameters},
+    processor::{CreationContext, Processor, ProcessorHistory, ProcessorParameters},
+    ui::Viewport,
+    waterfall_renderer::WaterfallRenderer,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, VecDeque, btree_map::Entry},
+    collections::{BTreeMap, HashMap, VecDeque, btree_map::Entry},
     mem,
     sync::mpsc::{Receiver, Sender, channel},
 };
@@ -28,11 +30,14 @@ pub struct WaterfallProcessorParameters {}
 
 #[typetag::serde]
 impl ProcessorParameters for WaterfallProcessorParameters {
-    fn create_processor(&self) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
+    fn create_processor(
+        &self,
+        cc: &CreationContext<'_>,
+    ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         let (sender, receiver) = channel();
         (
             Box::new(WaterfallProcessor::new(sender)),
-            Box::new(WaterfallHistory::new(receiver)),
+            Box::new(WaterfallHistory::new(cc.device, cc.queue, receiver)),
         )
     }
 }
@@ -54,7 +59,7 @@ impl WaterfallProcessor {
 impl Processor for WaterfallProcessor {
     fn reset(&mut self) {
         self.streams.clear();
-        self.sender.send(WaterfallMessage::Reset);
+        self.sender.send(WaterfallMessage::Reset).ok();
     }
 
     fn start_stream(&mut self, stream_id: usize, descriptor: &PreprocessedStreamDescriptor) {
@@ -63,11 +68,15 @@ impl Processor for WaterfallProcessor {
                 let processor = StreamProcessor::new(descriptor);
                 let spectrum_len = processor.fft_size as u32;
                 e.insert(processor);
-                self.sender.send(WaterfallMessage::StartStream {
-                    stream_id,
-                    spectrum_len,
-                    start_time: descriptor.start_time,
-                });
+                self.sender
+                    .send(WaterfallMessage::StartStream {
+                        stream_id,
+                        spectrum_len,
+                        start_time: descriptor.start_time,
+                        frequency: descriptor.frequency,
+                        sample_rate: descriptor.sample_rate,
+                    })
+                    .ok();
             }
             Entry::Occupied(_) => {
                 panic!("start_stream() called with a stream that already exists");
@@ -92,17 +101,21 @@ impl Processor for WaterfallProcessor {
             min,
             max,
         };
-        self.sender.send(WaterfallMessage::PushRow {
-            stream_id,
-            waterfall_row,
-        });
+        self.sender
+            .send(WaterfallMessage::PushRow {
+                stream_id,
+                waterfall_row,
+            })
+            .ok();
     }
 
     fn end_stream(&mut self, stream_id: usize) {
         self.streams
             .remove(&stream_id)
             .expect("end_stream() called with a stream that doesn't exist");
-        self.sender.send(WaterfallMessage::EndStream(stream_id));
+        self.sender
+            .send(WaterfallMessage::EndStream(stream_id))
+            .ok();
     }
 }
 
@@ -181,12 +194,14 @@ impl StreamProcessor {
     }
 }
 
-enum WaterfallMessage {
+pub enum WaterfallMessage {
     Reset,
     StartStream {
         stream_id: StreamId,
         spectrum_len: u32,
         start_time: DateTime<Utc>,
+        frequency: f64,
+        sample_rate: f64,
     },
     EndStream(StreamId),
     PushRow {
@@ -216,7 +231,7 @@ pub struct WaterfallHistory {
 }
 
 impl WaterfallHistory {
-    pub fn new(receiver: Receiver<WaterfallMessage>) -> Self {
+    pub fn new(device: &Device, queue: &Queue, receiver: Receiver<WaterfallMessage>) -> Self {
         let blank_texture = device.create_texture(&TextureDescriptor {
             label: Some("Blank Waterfall Texture"),
             size: Extent3d {
@@ -233,8 +248,8 @@ impl WaterfallHistory {
         });
 
         WaterfallHistory {
-            device: todo!(),
-            queue: todo!(),
+            device: device.clone(),
+            queue: queue.clone(),
             receiver,
             active_streams: BTreeMap::new(),
             finished_streams: BTreeMap::new(),
@@ -255,12 +270,16 @@ impl ProcessorHistory for WaterfallHistory {
                     stream_id,
                     spectrum_len,
                     start_time,
+                    frequency,
+                    sample_rate,
                 } => match self.active_streams.entry(stream_id) {
                     Entry::Vacant(e) => {
                         e.insert(ActiveStream::new(
                             &self.device,
                             spectrum_len,
                             start_time,
+                            frequency,
+                            sample_rate,
                             self.blank_texture.clone(),
                         ));
                     }
@@ -273,6 +292,8 @@ impl ProcessorHistory for WaterfallHistory {
                         .active_streams
                         .remove(&stream_id)
                         .expect("Tried to end a stream that doesn't exist");
+                    let freq_min = active_texture.freq_min;
+                    let freq_max = active_texture.freq_max;
                     let min = active_texture.min;
                     let max = active_texture.max;
                     if let Some(finished_texture) =
@@ -280,6 +301,8 @@ impl ProcessorHistory for WaterfallHistory {
                     {
                         Self::push_finished_texture(
                             &mut self.finished_streams,
+                            freq_min,
+                            freq_max,
                             stream_id,
                             min,
                             max,
@@ -304,18 +327,68 @@ impl ProcessorHistory for WaterfallHistory {
         }
     }
 
-    fn expire(&mut self, _retain_time: DateTime<chrono::Utc>) {
-        todo!()
+    fn expire(&mut self, retain_time: DateTime<chrono::Utc>) {
+        self.finished_streams
+            .retain(|_, stream| stream.prune_old_data(retain_time));
     }
 
     fn draw(
         &self,
-        _ui: &mut egui::Ui,
-        _figure_rect: egui::Rect,
-        _viewport: &crate::ui::Viewport,
-        _dt: chrono::TimeDelta,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        figure_rect: egui::Rect,
+        viewport: &Viewport,
+        _dt: TimeDelta,
     ) {
-        todo!()
+        // Collect all chunks into a draw list
+
+        let draw_list = self
+            .active_streams
+            .values()
+            .map(|active_texture| WaterfallDrawInfo {
+                freq_min: active_texture.freq_min,
+                freq_max: active_texture.freq_max,
+                start_time: active_texture.start_time,
+                end_time: active_texture.end_time,
+                texture: active_texture.texture.clone(),
+                prev_texture: active_texture.prev_texture.clone(),
+                next_texture: self.blank_texture.clone(),
+                min: active_texture.min,
+                max: active_texture.max,
+                v_end: active_texture.current_row as f32 / TEXTURE_HEIGHT as f32,
+            })
+            .chain(self.finished_streams.values().flat_map(|stream| {
+                stream
+                    .textures
+                    .iter()
+                    .map(move |finished_texture| WaterfallDrawInfo {
+                        freq_min: stream.freq_min,
+                        freq_max: stream.freq_max,
+                        start_time: finished_texture.start_time,
+                        end_time: finished_texture.end_time,
+                        texture: finished_texture.texture.clone(),
+                        prev_texture: finished_texture.prev_texture.clone(),
+                        next_texture: finished_texture.next_texture.clone(),
+                        min: stream.min,
+                        max: stream.max,
+                        v_end: 1.,
+                    })
+            }))
+            .collect();
+
+        ui.painter()
+            .with_clip_rect(figure_rect)
+            .add(egui_wgpu::Callback::new_paint_callback(
+                figure_rect,
+                Callback {
+                    id,
+                    viewport_size: figure_rect.size(),
+                    translation: viewport.translation,
+                    scale: viewport.scale,
+                    waterfall_chunks: draw_list,
+                    reference_time: viewport.reference_time,
+                },
+            ));
     }
 }
 
@@ -335,6 +408,8 @@ impl WaterfallHistory {
         if let Some(finished_texture) = active_texture.push(device, queue, waterfall_row) {
             Self::push_finished_texture(
                 finished_streams,
+                active_texture.freq_min,
+                active_texture.freq_max,
                 stream_id,
                 active_texture.min,
                 active_texture.max,
@@ -345,6 +420,8 @@ impl WaterfallHistory {
 
     fn push_finished_texture(
         finished_streams: &mut BTreeMap<StreamId, FinishedStream>,
+        freq_min: f64,
+        freq_max: f64,
         stream_id: StreamId,
         min: f32,
         max: f32,
@@ -353,6 +430,8 @@ impl WaterfallHistory {
         let finished_stream = finished_streams
             .entry(stream_id)
             .or_insert_with(|| FinishedStream {
+                freq_min,
+                freq_max,
                 textures: VecDeque::new(),
                 min: f32::NAN,
                 max: f32::NAN,
@@ -365,6 +444,8 @@ impl WaterfallHistory {
 
 #[derive(Debug)]
 pub struct ActiveStream {
+    pub freq_min: f64,
+    pub freq_max: f64,
     prev_texture: Texture,
     texture: Texture,
     current_row: usize,
@@ -382,6 +463,8 @@ impl ActiveStream {
         device: &Device,
         spectrum_len: u32,
         start_time: DateTime<Utc>,
+        frequency: f64,
+        sample_rate: f64,
         prev_texture: Texture,
     ) -> Self {
         let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
@@ -403,6 +486,8 @@ impl ActiveStream {
         });
 
         Self {
+            freq_min: frequency - 0.5 * sample_rate,
+            freq_max: frequency - 0.5 * sample_rate,
             prev_texture,
             texture,
             current_row: 0,
@@ -423,6 +508,8 @@ impl ActiveStream {
             device,
             prev.spectrum_len,
             prev.end_time,
+            prev.freq_min,
+            prev.freq_max,
             prev.texture.clone(),
         )
     }
@@ -598,6 +685,8 @@ impl ActiveStream {
 
 #[derive(Debug)]
 pub struct FinishedStream {
+    pub freq_min: f64,
+    pub freq_max: f64,
     textures: VecDeque<FinishedTexture>,
     pub min: f32,
     pub max: f32,
@@ -605,10 +694,11 @@ pub struct FinishedStream {
 
 impl FinishedStream {
     // Returns true if there are still chunks
-    fn prune_old_data(&mut self, time: DateTime<Utc>) -> bool {
+    fn prune_old_data(&mut self, retain_time: DateTime<Utc>) -> bool {
+        // TODO: actually shrink textures with data older than retain_time
         let first_index = self
             .textures
-            .partition_point(|texture| texture.end_time <= time);
+            .partition_point(|texture| texture.end_time <= retain_time);
         self.textures.drain(..first_index);
         !self.textures.is_empty()
     }
@@ -623,8 +713,21 @@ struct FinishedTexture {
     end_time: DateTime<Utc>,
 }
 
-// OLD WATERFALL STUFF, FOR REFERENCE
-/*
+#[derive(Debug, Clone)]
+pub struct WaterfallDrawInfo {
+    pub freq_min: f64,
+    pub freq_max: f64,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub texture: Texture,
+    pub prev_texture: Texture,
+    pub next_texture: Texture,
+    pub min: f32,
+    pub max: f32,
+    pub v_end: f32, // for active (partially filled) texture, the highest valid V component of UV coordinate
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 pub struct StaticResources {
     target_format: wgpu::TextureFormat,
@@ -645,7 +748,7 @@ struct ViewportUniforms {
     _padding: [f32; 2],
 }
 
-pub fn init(cc: &eframe::CreationContext<'_>) {
+pub fn static_init(cc: &eframe::CreationContext<'_>) {
     let wgpu_render_state = cc.wgpu_render_state.as_ref().unwrap();
     let target_format = wgpu_render_state.target_format;
 
@@ -741,22 +844,3 @@ impl egui_wgpu::CallbackTrait for Callback {
         }
     }
 }
-
-// DRAW WATERFALL
-    // Waterfall
-    ui.painter()
-        .with_clip_rect(figure_rect)
-        .add(egui_wgpu::Callback::new_paint_callback(
-            figure_rect,
-            Callback {
-                id,
-                viewport_size: figure_size,
-                translation: viewport.translation,
-                scale: viewport.scale,
-                waterfall_chunks: waterfall_gpu.draw_list().collect(),
-                reference_time,
-            },
-        ));
-
-
-*/
