@@ -6,23 +6,18 @@ use crate::{
     ui::Viewport,
 };
 use chrono::{DateTime, TimeDelta, Utc};
-use num_complex::Complex;
 use rayon::prelude::*;
 use std::{
     any::Any,
     cmp::Reverse,
     collections::{BTreeMap, btree_map::Entry},
     ops::Range,
-    panic,
     sync::{
         Arc,
-        mpsc::{Receiver, SyncSender, TryRecvError, sync_channel},
+        mpsc::{Receiver, Sender, channel},
     },
     thread::{JoinHandle, spawn},
 };
-
-const PROCESSING_INPUT_CHANNEL_SIZE: usize = 100;
-const PROCESSING_OUTPUT_CHANNEL_SIZE: usize = 100;
 
 pub type ProcessorId = usize;
 
@@ -34,17 +29,15 @@ pub struct RawHistory {
     processors: BTreeMap<ProcessorId, MainThreadProcessorState>,
     last_processor_history_start: usize,
     last_processor_history_end: usize,
-    processing_thread_sender: SyncSender<ProcessingInputMessage>,
+    processing_thread_sender: Sender<ProcessingInputMessage>,
     processing_thread_receiver: Receiver<ProcessingOutputMessage>,
     processing_thread_handle: Option<JoinHandle<()>>,
 }
 
 impl RawHistory {
     pub fn new() -> RawHistory {
-        let (main_thread_sender, child_thread_receiver) =
-            sync_channel::<ProcessingInputMessage>(PROCESSING_INPUT_CHANNEL_SIZE);
-        let (child_thread_sender, main_thread_receiver) =
-            sync_channel::<ProcessingOutputMessage>(PROCESSING_OUTPUT_CHANNEL_SIZE);
+        let (main_thread_sender, child_thread_receiver) = channel::<ProcessingInputMessage>();
+        let (child_thread_sender, main_thread_receiver) = channel::<ProcessingOutputMessage>();
 
         // For the thread
         let processing_thread_handle = spawn(move || {
@@ -69,20 +62,22 @@ impl RawHistory {
                     chunks.remove_front(msg.chunks_start);
                     streams = msg.streams;
 
-                    // Add and remove any processor states
-                    if let Some(processor_parameters) = msg.processor_parameters {
-                        // Remove:
-                        processors.retain(|&processor_id, _| {
-                            processor_parameters.contains_key(&processor_id)
-                        });
-
-                        // Add:
-                        for (processor_id, processor_parameters) in processor_parameters.iter() {
-                            if let Entry::Vacant(e) = processors.entry(*processor_id) {
+                    // Add and remove any processor states that have changed
+                    for processor_id in msg.removed_processors {
+                        processors
+                            .remove(&processor_id)
+                            .expect("Tried to remove a non-existant processor");
+                    }
+                    for (processor_id, processor) in msg.new_processors {
+                        match processors.entry(processor_id) {
+                            Entry::Vacant(e) => {
                                 e.insert(ChildThreadProcessorState {
-                                    processor: processor_parameters.create_processor(),
+                                    processor,
                                     next_seq_num: chunks.start_index(),
                                 });
+                            }
+                            Entry::Occupied(_) => {
+                                panic!("Tried to add a processor that already exists");
                             }
                         }
                     }
@@ -100,7 +95,7 @@ impl RawHistory {
                             processor_state.processor.reset();
                             processor_state.next_seq_num = chunks.start_index();
                             child_thread_sender
-                                .try_send(ProcessingOutputMessage {
+                                .send(ProcessingOutputMessage {
                                     processor_id: *processor_id,
                                     msg_type: ProcessingOutputMessageType::Reset,
                                 })
@@ -177,27 +172,20 @@ impl RawHistory {
                             .get_mut(&chunk.stream_id)
                             .expect("Stream's preprocessor does not exist");
                         let preprocessed_data = stream_processor.process(&chunk.chunk);
-                        let preprocessed_chunk = PreprocessedChunk {
-                            stream_id: chunk.stream_id,
-                            time: chunk.time,
-                            chunk: preprocessed_data,
-                        };
 
                         // Collect each processor that has work to do for this chunk
                         let work: Vec<_> = processors
-                            .iter_mut()
-                            .filter(|(_processor_id, processor_state)| {
-                                processor_state.next_seq_num <= seq_num
-                            })
-                            .map(|(processor_id, processor_state)| {
+                            .values_mut()
+                            .filter(|processor_state| processor_state.next_seq_num <= seq_num)
+                            .map(|processor_state| {
                                 // Advance this processor's seq_num
                                 processor_state.next_seq_num = seq_num;
-                                (*processor_id, &mut processor_state.processor)
+                                &mut processor_state.processor
                             })
                             .collect();
 
                         // Run work in parallel, sending back the result
-                        work.into_par_iter().for_each(|(processor_id, processor)| {
+                        work.into_par_iter().for_each(|processor| {
                             // End streams
                             for stream_id in preprocessed_stream_ends.iter() {
                                 processor.end_stream(*stream_id);
@@ -208,15 +196,12 @@ impl RawHistory {
                                 processor.start_stream(*stream_id, descriptor);
                             }
 
-                            // Process & send message
-                            if let Some(result) = processor.process_chunk(&preprocessed_chunk) {
-                                child_thread_sender
-                                    .try_send(ProcessingOutputMessage {
-                                        processor_id,
-                                        msg_type: ProcessingOutputMessageType::Data(result),
-                                    })
-                                    .unwrap();
-                            }
+                            // Process
+                            processor.process_chunk(
+                                chunk.stream_id,
+                                chunk.time,
+                                &preprocessed_data,
+                            );
                         });
 
                         // After processing each chunk, see if we have received new parameters.
@@ -281,25 +266,26 @@ impl RawHistory {
     ) {
         // 1. Add & remove any processor states, as per processor_params
 
-        let mut processors_changed = false;
-
         // Remove:
+        let mut removed_processors = vec![];
         self.processors.retain(|&processor_id, _| {
             let keep = processor_parameters.contains_key(&processor_id);
             if !keep {
-                processors_changed = true;
+                removed_processors.push(processor_id);
             }
             keep
         });
 
         // Add:
-        for (processor_id, processor) in processor_parameters.iter() {
+        let mut new_processors = vec![];
+        for (processor_id, processor_parameters) in processor_parameters.iter() {
             if let Entry::Vacant(e) = self.processors.entry(*processor_id) {
+                let (processor, history) = processor_parameters.create_processor();
                 e.insert(MainThreadProcessorState {
-                    last_parameters: processor.clone(),
-                    history: processor.create_history(),
+                    last_parameters: processor_parameters.clone(),
+                    history,
                 });
-                processors_changed = true;
+                new_processors.push((*processor_id, processor));
             }
         }
 
@@ -309,38 +295,17 @@ impl RawHistory {
             processor_parameters.insert(*processor_id, processor_state.last_parameters.clone());
         }
 
-        // 2. Read & apply all results from the processing thread
-        while let Some(msg) = match self.processing_thread_receiver.try_recv() {
-            Ok(msg) => Some(msg),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => {
-                // Propagate panic
-                panic::resume_unwind(
-                    self.processing_thread_handle
-                        .take()
-                        .unwrap()
-                        .join()
-                        .unwrap_err(),
-                );
-            }
-        } {
-            if let Some(processor_state) = self.processors.get_mut(&msg.processor_id) {
-                match msg.msg_type {
-                    ProcessingOutputMessageType::Reset => {
-                        processor_state.history.reset();
-                    }
-                    ProcessingOutputMessageType::Data(data) => {
-                        processor_state.history.push(data);
-                    }
-                }
-            }
+        // 2. Update each processor history (e.g. receive processed data from thread)
+        for processor_state in self.processors.values_mut() {
+            processor_state.history.update();
         }
 
         // 3. Send history & parameter updates to the processing thread
         let chunks_start = self.chunks.start_index();
         let history_end = self.chunks.end_index();
         // Don't bother sending a message if nothing changed
-        if processors_changed
+        if !removed_processors.is_empty()
+            || !new_processors.is_empty()
             || chunks_start != self.last_processor_history_start
             || history_end != self.last_processor_history_end
         {
@@ -351,12 +316,13 @@ impl RawHistory {
                 .collect();
 
             let msg = ProcessingInputMessage {
-                processor_parameters: processors_changed.then(|| processor_parameters.clone()),
+                removed_processors,
+                new_processors,
                 new_chunks,
                 chunks_start,
                 streams: self.streams.clone(),
             };
-            self.processing_thread_sender.try_send(msg).unwrap();
+            self.processing_thread_sender.send(msg).unwrap();
 
             self.last_processor_history_start = chunks_start;
             self.last_processor_history_end = history_end;
@@ -419,7 +385,8 @@ pub struct ChildThreadProcessorState {
 }
 
 struct ProcessingInputMessage {
-    processor_parameters: Option<BTreeMap<ProcessorId, Arc<dyn ProcessorParameters>>>,
+    removed_processors: Vec<ProcessorId>,
+    new_processors: Vec<(ProcessorId, Box<dyn Processor>)>,
     new_chunks: Vec<Arc<ReceiveStreamChunk>>,
     chunks_start: usize,
     streams: BTreeMap<StreamId, StreamHistory>,
@@ -433,10 +400,4 @@ struct ProcessingOutputMessage {
 pub enum ProcessingOutputMessageType {
     Reset,
     Data(Box<dyn Any + Send>),
-}
-
-pub struct PreprocessedChunk {
-    pub stream_id: StreamId,
-    pub time: DateTime<Utc>,
-    pub chunk: Box<[Complex<f32>]>,
 }

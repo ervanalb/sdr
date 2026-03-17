@@ -1,14 +1,20 @@
 use crate::{
     dsp::{Fft, OverlapExpand, hann_window},
-    hardware::{RawIqSamples, ReceiveStreamDescriptor},
+    hardware::{HardwareDeviceId, RawIqSamples, ReceiveStreamDescriptor},
 };
+use chrono::{DateTime, Utc};
 use num_complex::Complex;
 use std::mem;
 
 const TARGET_BIN_SIZE: f64 = 2.5e3; // 2.5 KHz
 
 pub struct PreprocessedStreamDescriptor {
-    pub descriptor: ReceiveStreamDescriptor,
+    pub device_id: HardwareDeviceId,
+    pub stream_index: usize,
+    pub frequency: f64,
+    pub sample_rate: f64,
+    pub start_time: DateTime<Utc>,
+    pub chunk_period: f64,
     pub fft_size: usize,
 }
 
@@ -39,7 +45,12 @@ impl StreamPreprocessor {
             fft,
         };
         let descriptor = PreprocessedStreamDescriptor {
-            descriptor: descriptor.clone(),
+            device_id: descriptor.device_id.clone(),
+            stream_index: descriptor.stream_index,
+            frequency: descriptor.frequency,
+            sample_rate: descriptor.sample_rate,
+            start_time: descriptor.start_time,
+            chunk_period: descriptor.chunk_period,
             fft_size,
         };
         (processor, descriptor)

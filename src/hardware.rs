@@ -32,6 +32,7 @@ pub struct ReceiveStreamDescriptor {
     pub frequency: f64,
     pub sample_rate: f64,
     pub start_time: DateTime<Utc>,
+    pub chunk_period: f64,
 }
 
 // RESULTS //
@@ -869,6 +870,7 @@ impl HardwareDeviceRxStream {
                     frequency,
                     sample_rate,
                     start_time,
+                    chunk_period: STREAM_CHUNK_PERIOD,
                 };
 
                 stream_sender

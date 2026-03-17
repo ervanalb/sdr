@@ -549,6 +549,11 @@ pub fn powf_approx(base: f32, exponent: f32) -> f32 {
     1. + (base - 1.) * exponent
 }
 
+pub fn log_mix_f32(x: f32, y: f32, a: f32) -> f32 {
+    (x * (y / x).powf(a)).max(1e-10)
+    //(x * powf_approx(y / x, a)).max(1e-10)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

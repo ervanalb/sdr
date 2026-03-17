@@ -1,32 +1,32 @@
 //pub mod fm;
 pub mod waterfall;
 
-use crate::{
-    preprocessor::{PreprocessedChunk, PreprocessedStreamDescriptor},
-    ui::Viewport,
-};
+use crate::{hardware::StreamId, preprocessor::PreprocessedStreamDescriptor, ui::Viewport};
 use chrono::{DateTime, TimeDelta, Utc};
 use dyn_clone::{DynClone, clone_trait_object};
-use std::any::Any;
+use num_complex::Complex;
 
 clone_trait_object!(ProcessorParameters);
 
 #[typetag::serde(tag = "type")]
 pub trait ProcessorParameters: std::fmt::Debug + Send + Sync + DynClone {
-    fn create_history(&self) -> Box<dyn ProcessorHistory>;
-    fn create_processor(&self) -> Box<dyn Processor>;
+    fn create_processor(&self) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>);
 }
 
 pub trait Processor: Send {
     fn reset(&mut self);
-    fn start_stream(&mut self, stream_id: usize, descriptor: &PreprocessedStreamDescriptor);
-    fn process_chunk(&mut self, chunk: &PreprocessedChunk) -> Option<Box<dyn Any + Send>>;
-    fn end_stream(&mut self, stream_id: usize);
+    fn start_stream(&mut self, stream_id: StreamId, descriptor: &PreprocessedStreamDescriptor);
+    fn process_chunk(
+        &mut self,
+        stream_id: StreamId,
+        time: DateTime<Utc>,
+        preprocessed_data: &[Complex<f32>],
+    );
+    fn end_stream(&mut self, stream_id: StreamId);
 }
 
 pub trait ProcessorHistory {
-    fn push(&mut self, data: Box<dyn Any>);
-    fn reset(&mut self);
+    fn update(&mut self);
     fn expire(&mut self, retain_time: DateTime<Utc>);
 
     /// Draw this processor history onto the canvas
