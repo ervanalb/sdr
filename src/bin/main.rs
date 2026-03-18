@@ -141,35 +141,6 @@ impl eframe::App for SdrApp {
         self.history
             .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 
-        /*
-        // Deactivate waterfall streams that don't exist anymore
-        self.stream_history.retain(
-            &wgpu_render_state.device,
-            &wgpu_render_state.queue,
-            |stream_id| processed_results.receive_streams.contains_key(&stream_id),
-        );
-
-        // Process all streams
-        for (stream_id, stream) in processed_results.receive_streams.into_iter() {
-            self.stream_history.push(
-                stream_id,
-                stream.descriptor,
-                stream.spectrum_len,
-                stream.waterfall_rows,
-                &wgpu_render_state.device,
-                &wgpu_render_state.queue,
-            );
-            // Process all channels
-            for (channel_id, channel) in stream.channels.into_iter() {
-                self.history.add_chunks(stream_id, channel_id, channel);
-            }
-        }
-        self.stream_history
-            .prune_old_data(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
-        self.history
-            .prune(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
-        */
-
         let prev_run = self.hardware_params.run;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
