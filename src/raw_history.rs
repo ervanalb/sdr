@@ -1,5 +1,6 @@
 use crate::{
     hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId},
+    id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
     processor::{CreationContext, Processor, ProcessorHistory, ProcessorParameters},
     seqdeque::SeqDeque,
@@ -20,12 +21,14 @@ use std::{
 };
 
 pub type ProcessorId = usize;
+type ProcessorInstanceId = usize;
 
 pub struct RawHistory {
     streams: BTreeMap<StreamId, StreamHistory>,
     chunks: SeqDeque<Arc<ReceiveStreamChunk>>,
 
     // TODO: consider moving these to a separate module
+    instance_id_factory: IdFactory,
     processors: BTreeMap<ProcessorId, MainThreadProcessorState>,
     last_processor_history_start: usize,
     last_processor_history_end: usize,
@@ -49,7 +52,7 @@ impl RawHistory {
             let mut streams;
             let mut preprocessors = BTreeMap::new();
             let mut preprocessor_next_seq_num: usize = 0;
-            let mut processors = BTreeMap::<ProcessorId, ChildThreadProcessorState>::new();
+            let mut processors = BTreeMap::<ProcessorInstanceId, ChildThreadProcessorState>::new();
 
             while let Ok(mut msg) = child_thread_receiver.recv() {
                 'interrupted: loop {
@@ -61,13 +64,13 @@ impl RawHistory {
                     streams = msg.streams;
 
                     // Add and remove any processor states that have changed
-                    for processor_id in msg.removed_processors {
+                    for instance_id in msg.removed_processors {
                         processors
-                            .remove(&processor_id)
+                            .remove(&instance_id)
                             .expect("Tried to remove a non-existant processor");
                     }
-                    for (processor_id, processor) in msg.new_processors {
-                        match processors.entry(processor_id) {
+                    for (instance_id, processor) in msg.new_processors {
+                        match processors.entry(instance_id) {
                             Entry::Vacant(e) => {
                                 e.insert(ChildThreadProcessorState {
                                     processor,
@@ -213,6 +216,7 @@ impl RawHistory {
             chunks: SeqDeque::new(),
             streams: BTreeMap::new(),
 
+            instance_id_factory: IdFactory::default(),
             processors: BTreeMap::new(),
             last_processor_history_start: 0,
             last_processor_history_end: 0,
@@ -254,17 +258,17 @@ impl RawHistory {
 
     pub fn process(
         &mut self,
-        processor_parameters: &mut BTreeMap<ProcessorId, Arc<dyn ProcessorParameters>>,
+        processor_parameters: &mut BTreeMap<ProcessorId, ProcessorParameters>,
         cc: &CreationContext<'_>,
     ) {
         // 1. Add & remove any processor states, as per processor_params
 
         // Remove:
         let mut removed_processors = vec![];
-        self.processors.retain(|&processor_id, _| {
+        self.processors.retain(|&processor_id, processor_state| {
             let keep = processor_parameters.contains_key(&processor_id);
             if !keep {
-                removed_processors.push(processor_id);
+                removed_processors.push(processor_state.instance_id);
             }
             keep
         });
@@ -274,18 +278,34 @@ impl RawHistory {
         for (processor_id, processor_parameters) in processor_parameters.iter() {
             if let Entry::Vacant(e) = self.processors.entry(*processor_id) {
                 let (processor, history) = processor_parameters.create_processor(cc);
+                let instance_id = self.instance_id_factory.create();
                 e.insert(MainThreadProcessorState {
+                    instance_id,
                     last_parameters: processor_parameters.clone(),
                     history,
                 });
-                new_processors.push((*processor_id, processor));
+                new_processors.push((instance_id, processor));
             }
         }
 
-        // Processors aren't allowed to change params without being assigned a new ID,
-        // so enforce this by setting all params to their previous values
-        for (processor_id, processor_state) in self.processors.iter() {
-            processor_parameters.insert(*processor_id, processor_state.last_parameters.clone());
+        // See if a processor's parameters have changed.
+        // Any parameter change invalidates the processor,
+        // and it will need to be removed & re-created with a new instance ID.
+        for (processor_id, processor_state) in self.processors.iter_mut() {
+            let parameters = processor_parameters.get_mut(processor_id).unwrap();
+            if parameters == &processor_state.last_parameters {
+                // No change
+                continue;
+            }
+            removed_processors.push(processor_state.instance_id);
+            let instance_id = self.instance_id_factory.create();
+            let (processor, history) = parameters.create_processor(cc);
+            *processor_state = MainThreadProcessorState {
+                instance_id,
+                last_parameters: parameters.clone(),
+                history,
+            };
+            new_processors.push((instance_id, processor));
         }
 
         // 2. Update each processor history (e.g. receive processed data from thread)
@@ -370,7 +390,8 @@ pub struct StreamHistory {
 }
 
 pub struct MainThreadProcessorState {
-    last_parameters: Arc<dyn ProcessorParameters>,
+    instance_id: ProcessorInstanceId,
+    last_parameters: ProcessorParameters,
     history: Box<dyn ProcessorHistory>,
 }
 

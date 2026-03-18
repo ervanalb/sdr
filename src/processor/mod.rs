@@ -1,19 +1,28 @@
 pub mod fm;
 pub mod waterfall;
+use fm::FmProcessorParameters;
+use waterfall::WaterfallProcessorParameters;
 
 use crate::{hardware::StreamId, preprocessor::PreprocessedStreamDescriptor, ui::Viewport};
 use chrono::{DateTime, TimeDelta, Utc};
-use dyn_clone::{DynClone, clone_trait_object};
 use num_complex::Complex;
 
-clone_trait_object!(ProcessorParameters);
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcessorParameters {
+    Waterfall(WaterfallProcessorParameters),
+    Fm(FmProcessorParameters),
+}
 
-#[typetag::serde(tag = "type")]
-pub trait ProcessorParameters: std::fmt::Debug + Send + Sync + DynClone {
-    fn create_processor(
+impl ProcessorParameters {
+    pub fn create_processor(
         &self,
         cc: &CreationContext<'_>,
-    ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>);
+    ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
+        match self {
+            ProcessorParameters::Waterfall(p) => p.create_processor(cc),
+            ProcessorParameters::Fm(p) => p.create_processor(cc),
+        }
+    }
 }
 
 pub trait Processor: Send {

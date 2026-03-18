@@ -21,7 +21,7 @@ use crate::{
     hardware::StreamId,
     id_factory::IdFactory,
     preprocessor::PreprocessedStreamDescriptor,
-    processor::{CreationContext, Processor, ProcessorHistory, ProcessorParameters},
+    processor::{CreationContext, Processor, ProcessorHistory},
     seqdeque::SeqDeque,
     ui::{StreamInspectorParameters, StreamInspectorResponse, StreamTransmission, Viewport},
 };
@@ -31,7 +31,7 @@ type TransmissionId = usize;
 pub const CHANNEL_MARGIN: f64 = 0.05; // Add 5% of channel bandwidth as margin on each side
 const AUDIO_CUTOFF_FREQ: f64 = 22e3;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 // #[serde(rename = "fm")] -- Doesn't work?
 pub struct FmProcessorParameters {
     pub frequency: f64,
@@ -40,9 +40,8 @@ pub struct FmProcessorParameters {
     pub squelch_hysteresis_db: f64,
 }
 
-#[typetag::serde]
-impl ProcessorParameters for FmProcessorParameters {
-    fn create_processor(
+impl FmProcessorParameters {
+    pub fn create_processor(
         &self,
         _cc: &CreationContext<'_>,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
@@ -345,6 +344,35 @@ pub enum FmMessage {
     },
 }
 
+impl std::fmt::Debug for FmMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reset => write!(f, "Reset"),
+            Self::StartTransmission {
+                transmission_id,
+                sample_rate,
+            } => f
+                .debug_struct("StartTransmission")
+                .field("transmission_id", transmission_id)
+                .field("sample_rate", sample_rate)
+                .finish(),
+            Self::EndTransmission(arg0) => f.debug_tuple("EndTransmission").field(arg0).finish(),
+            Self::PushChunk {
+                transmission_id,
+                time,
+                iq_data,
+                audio_data,
+            } => f
+                .debug_struct("PushChunk")
+                .field("transmission_id", transmission_id)
+                .field("time", time)
+                .field("iq_data.len()", &iq_data.len())
+                .field("audio_data.len()", &audio_data.len())
+                .finish(),
+        }
+    }
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 pub struct FmHistory {
@@ -384,10 +412,10 @@ impl ProcessorHistory for FmHistory {
                     }
                 },
                 FmMessage::EndTransmission(transmission_id) => {
-                    let _ = self
-                        .transmissions
-                        .remove(&transmission_id)
-                        .expect("Tried to end a transmission that doesn't exist");
+                    self.transmissions
+                        .get_mut(&transmission_id)
+                        .expect("Tried to end a transmission that doesn't exist")
+                        .active = false;
                 }
                 FmMessage::PushChunk {
                     transmission_id,
@@ -400,7 +428,7 @@ impl ProcessorHistory for FmHistory {
                         .get_mut(&transmission_id)
                         .expect("Tried to push to a transmission that doesn't exist");
 
-                    transmission.push(time, iq_data, audio_data); // TODO
+                    transmission.push(time, iq_data, audio_data);
                 }
             }
         }
@@ -422,6 +450,9 @@ impl ProcessorHistory for FmHistory {
         let freq_min = (self.frequency - 0.5 * self.bandwidth) as f32;
         let freq_max = (self.frequency + 0.5 * self.bandwidth) as f32;
         for (transmission_id, transmission) in self.transmissions.iter() {
+            if transmission.chunks.is_empty() {
+                continue;
+            }
             let (start_time, end_time) = transmission.time_range();
 
             let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max).show(
@@ -642,6 +673,7 @@ impl ProcessorHistory for FmHistory {
 }
 
 pub struct FmTransmission {
+    active: bool,
     sample_rate: f64,
     chunks: SeqDeque<FmTransmissionChunk>,
 }
@@ -649,6 +681,7 @@ pub struct FmTransmission {
 impl FmTransmission {
     fn new(sample_rate: f64) -> FmTransmission {
         FmTransmission {
+            active: true,
             sample_rate,
             chunks: SeqDeque::new(),
         }
@@ -667,7 +700,7 @@ impl FmTransmission {
             .chunks
             .partition_point(|chunk| chunk.time <= retain_time);
         self.chunks.remove_front(first_index);
-        !self.chunks.is_empty()
+        self.active || !self.chunks.is_empty()
     }
 
     fn time_range(&self) -> (DateTime<Utc>, DateTime<Utc>) {

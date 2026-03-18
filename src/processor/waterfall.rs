@@ -2,7 +2,7 @@ use crate::{
     dsp::log_mix_f32,
     hardware::StreamId,
     preprocessor::PreprocessedStreamDescriptor,
-    processor::{CreationContext, Processor, ProcessorHistory, ProcessorParameters},
+    processor::{CreationContext, Processor, ProcessorHistory},
     ui::Viewport,
     waterfall_renderer::WaterfallRenderer,
 };
@@ -24,13 +24,11 @@ const MIN_QUANTILE: f64 = 0.1;
 const MAX_QUANTILE: f64 = 0.99;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-// #[serde(rename = "waterfall")] -- Doesn't work?
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WaterfallProcessorParameters {}
 
-#[typetag::serde]
-impl ProcessorParameters for WaterfallProcessorParameters {
-    fn create_processor(
+impl WaterfallProcessorParameters {
+    pub fn create_processor(
         &self,
         cc: &CreationContext<'_>,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {

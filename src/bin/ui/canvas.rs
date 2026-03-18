@@ -5,7 +5,6 @@ use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::raw_history::RawHistory;
 use sdr::ui::Viewport;
-use std::hash::Hash;
 
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
@@ -67,7 +66,6 @@ fn paint_elided_text(
 
 pub fn ui(
     ui: &mut egui::Ui,
-    id_source: impl Hash + std::fmt::Debug,
     viewport: &mut Viewport,
     history: &RawHistory,
     reference_time: DateTime<Utc>,
@@ -79,7 +77,6 @@ pub fn ui(
 ) {
     let highest_freq = bands_info.highest_freq;
 
-    let id = ui.id().with(&id_source);
     let ui_size = ui.available_size();
     let (ui_rect, response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
     let figure_rect = ui_rect

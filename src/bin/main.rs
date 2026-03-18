@@ -11,7 +11,6 @@ use sdr::processor::{CreationContext, ProcessorParameters};
 use sdr::raw_history::{ProcessorId, RawHistory};
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 mod ui;
 
@@ -53,7 +52,7 @@ struct SdrApp {
     hardware: Option<Hardware>,
     hardware_params: HardwareParams,
     viewport_state: Viewport,
-    processor_parameters: BTreeMap<ProcessorId, Arc<dyn ProcessorParameters>>,
+    processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
     history: RawHistory,
     prev_time: DateTime<Utc>,
     reference_time: DateTime<Utc>,
@@ -71,12 +70,18 @@ impl SdrApp {
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
 
-        let mut processor_parameters = BTreeMap::<ProcessorId, Arc<dyn ProcessorParameters>>::new();
-        processor_parameters.insert(0, Arc::new(WaterfallProcessorParameters {}));
+        let mut processor_parameters = BTreeMap::<ProcessorId, ProcessorParameters>::new();
+        processor_parameters.insert(
+            0,
+            ProcessorParameters::Waterfall(WaterfallProcessorParameters {}),
+        );
+
+        let tmp_freq = 90.9e6;
+
         processor_parameters.insert(
             1,
-            Arc::new(FmProcessorParameters {
-                frequency: 90.9e6,
+            ProcessorParameters::Fm(FmProcessorParameters {
+                frequency: tmp_freq,
                 bandwidth: 200e3,
                 squelch_db: -100.,
                 squelch_hysteresis_db: 3.,
@@ -336,11 +341,17 @@ impl eframe::App for SdrApp {
             ui.heading("Waterfall Display");
             ui.separator();
 
-            // Get draw list from waterfall GPU
+            // TEMP
+            let freq = match self.processor_parameters.get_mut(&1).unwrap() {
+                ProcessorParameters::Fm(p) => &mut p.frequency,
+                _ => panic!(),
+            };
+            ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
+            // END TEMP
+
             let force_live = self.hardware_params.run && !prev_run;
             self::ui::canvas::ui(
                 ui,
-                "canvas",
                 &mut self.viewport_state,
                 &self.history,
                 self.reference_time,
