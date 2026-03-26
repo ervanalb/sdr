@@ -14,7 +14,7 @@ pub struct PreprocessedStreamDescriptor {
     pub frequency: f64,
     pub sample_rate: f64,
     pub start_time: DateTime<Utc>,
-    pub chunk_period: f64,
+    pub chunk_size: usize,
     pub fft_size: usize,
 }
 
@@ -50,7 +50,7 @@ impl StreamPreprocessor {
             frequency: descriptor.frequency,
             sample_rate: descriptor.sample_rate,
             start_time: descriptor.start_time,
-            chunk_period: descriptor.chunk_period,
+            chunk_size: descriptor.chunk_size,
             fft_size,
         };
         (processor, descriptor)

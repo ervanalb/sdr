@@ -1,104 +1,184 @@
 use crate::{
-    hardware::{HardwareResult, ReceiveStreamChunk, ReceiveStreamDescriptor, StreamId},
+    hardware::{HardwareResult, RawIqSamples, ReceiveStreamDescriptor, StreamId},
+    id_factory::IdFactory,
     seqdeque::SeqDeque,
 };
 use chrono::{DateTime, Utc};
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    ops::Range,
+    collections::{BTreeMap, BTreeSet, HashSet},
+    rc::{Rc, Weak},
     sync::Arc,
 };
 
-pub use crate::analysis::ProcessorId;
+pub type ClipId = usize;
+pub type RecordingId = usize;
+
+#[derive(Clone, Debug)]
+pub struct StreamDescriptor {
+    pub frequency: f64,
+    pub sample_rate: f64,
+    pub chunk_size: usize,
+}
+
+impl From<&ReceiveStreamDescriptor> for StreamDescriptor {
+    fn from(desc: &ReceiveStreamDescriptor) -> Self {
+        StreamDescriptor {
+            frequency: desc.frequency,
+            sample_rate: desc.sample_rate,
+            chunk_size: desc.chunk_size,
+        }
+    }
+}
+
+pub struct Clip {
+    pub descriptor: StreamDescriptor,
+    pub start_time: f64,
+    pub chunks: SeqDeque<Chunk>,
+}
+
+#[derive(Clone)]
+pub struct Chunk {
+    pub data: Arc<RawIqSamples>,
+}
 
 pub struct Document {
-    streams: BTreeMap<StreamId, StreamHistory>,
-    chunks: SeqDeque<Arc<ReceiveStreamChunk>>,
+    clip_id_factory: IdFactory,
+    recording_id_factory: IdFactory,
+    pub clips: BTreeMap<ClipId, Clip>,
+    recordings: BTreeMap<RecordingId, RecordingInfo>,
+    pub active_clips: BTreeSet<ClipId>,
+}
+
+struct RecordingInfo {
+    canary: Weak<RecordingId>,
+    wall_clock_start_time: DateTime<Utc>,
+    document_start_time: f64,
+    stream_to_clip: BTreeMap<StreamId, ClipId>,
 }
 
 impl Document {
     pub fn new() -> Document {
         Document {
-            chunks: SeqDeque::new(),
-            streams: BTreeMap::new(),
+            clip_id_factory: IdFactory::default(),
+            recording_id_factory: IdFactory::default(),
+            clips: BTreeMap::new(),
+            recordings: BTreeMap::new(),
+            active_clips: BTreeSet::new(),
         }
     }
 
-    pub fn update(&mut self, result: HardwareResult) {
-        if result.chunks.is_empty() {
-            return; // Avoid inserting zero-length spans
-        }
+    pub fn update(&mut self) {
+        self.active_clips.clear();
 
-        // Add new messages
-        let start = self.chunks.end_index();
-        for chunk in result.chunks {
-            self.chunks.push_back(Arc::new(chunk));
-        }
-        let end = self.chunks.end_index();
-
-        // Update stream spans
-        for (stream_id, descriptor) in result.active_streams.iter() {
-            match self.streams.entry(*stream_id) {
-                Entry::Occupied(mut e) => {
-                    // If this stream is already active,
-                    // update the end of its span
-                    e.get_mut().span.end = end;
+        // Remove dead recordings and collect active clip IDs
+        self.recordings.retain(|_, recording_info| {
+            if recording_info.canary.upgrade().is_some() {
+                // Recording is still alive--
+                // mark its clips as active
+                for &clip_id in recording_info.stream_to_clip.values() {
+                    self.active_clips.insert(clip_id);
                 }
-                Entry::Vacant(e) => {
-                    // Add this new stream to the document
-                    e.insert(StreamHistory {
-                        descriptor: descriptor.clone(),
-                        span: start..end,
-                    });
-                }
-            }
-        }
-    }
-
-
-    pub fn expire(&mut self, retain_time: DateTime<Utc>) {
-        let new_start = self
-            .chunks
-            .partition_point(|chunk| chunk.time < retain_time);
-
-        // Remove old chunks
-        self.chunks.remove_front(new_start);
-
-        // Remove and/or update stream spans
-        self.streams.retain(|_stream_id, stream_history| {
-            if new_start >= stream_history.span.end {
-                false // discard
+                true
             } else {
-                if new_start > stream_history.span.start {
-                    // adjust the span start
-                    stream_history.span.start = new_start;
-                }
-                true // keep
+                // Recording has been dropped
+                false
             }
         });
     }
 
-    pub fn chunks_start_index(&self) -> usize {
-        self.chunks.start_index()
+    pub fn record(
+        &mut self,
+        wall_clock_start_time: DateTime<Utc>,
+        document_start_time: f64,
+    ) -> Rc<RecordingId> {
+        let recording_id = self.recording_id_factory.create();
+        let recording_id_rc = Rc::new(recording_id);
+
+        self.recordings.insert(
+            recording_id,
+            RecordingInfo {
+                canary: Rc::downgrade(&recording_id_rc),
+                wall_clock_start_time,
+                document_start_time,
+                stream_to_clip: BTreeMap::new(),
+            },
+        );
+
+        recording_id_rc
     }
 
-    pub fn chunks_end_index(&self) -> usize {
-        self.chunks.end_index()
+    pub fn update_recording(&mut self, recording_id: &Rc<RecordingId>, result: HardwareResult) {
+        if result.chunks.is_empty() {
+            return;
+        }
+
+        let recording = self
+            .recordings
+            .get_mut(&**recording_id)
+            .expect("Recording not found");
+
+        // Group chunks by stream_id
+        for chunk in result.chunks {
+            // Get or create clip for this stream
+            let clip_id = *recording
+                .stream_to_clip
+                .entry(chunk.stream_id)
+                .or_insert_with(|| {
+                    // Find the descriptor for this stream_id
+                    let descriptor = result
+                        .active_streams
+                        .iter()
+                        .find(|(id, _)| *id == chunk.stream_id)
+                        .expect("Chunk received for stream without descriptor")
+                        .1
+                        .as_ref();
+
+                    // Calculate clip start time: document start + elapsed wall-clock time
+                    let elapsed_seconds = chunk
+                        .time
+                        .signed_duration_since(recording.wall_clock_start_time)
+                        .as_seconds_f64();
+                    let clip_start_time = recording.document_start_time + elapsed_seconds;
+
+                    let clip_id = self.clip_id_factory.create();
+                    self.clips.insert(
+                        clip_id,
+                        Clip {
+                            descriptor: StreamDescriptor::from(descriptor),
+                            start_time: clip_start_time,
+                            chunks: SeqDeque::new(),
+                        },
+                    );
+                    clip_id
+                });
+
+            let clip = self.clips.get_mut(&clip_id).unwrap();
+            clip.chunks.push_back(Chunk {
+                data: Arc::new(chunk.chunk),
+            });
+        }
     }
 
-    pub fn chunks_range(&self, range: impl std::ops::RangeBounds<usize>) -> impl Iterator<Item = &Arc<ReceiveStreamChunk>> {
-        self.chunks.range(range)
-    }
+    pub fn expire(&mut self, retain_time: f64) {
+        // Remove chunks that are older than retain_time
+        self.clips.retain(|clip_id, clip| {
+            // Calculate elapsed time from clip start to retain_time
+            if retain_time > clip.start_time {
+                // Convert retain_time to retain_index
+                // (the index into clip.chunks where retain_time sits)
+                // by shifting & scaling by the chunk rate
+                let retain_index = clip.chunks.start_index() as f64
+                    + (retain_time - clip.start_time) * clip.descriptor.sample_rate
+                        / clip.descriptor.chunk_size as f64;
+                let retain_index = retain_index.floor() as usize;
+                let retain_index = retain_index.min(clip.chunks.end_index());
+                clip.chunks.remove_front(retain_index);
 
-    pub fn streams(&self) -> &BTreeMap<StreamId, StreamHistory> {
-        &self.streams
+                // Retain empty clips that are part of an active recording
+                !clip.chunks.is_empty() || self.active_clips.contains(clip_id)
+            } else {
+                true
+            }
+        });
     }
-
 }
-
-#[derive(Clone, Debug)]
-pub struct StreamHistory {
-    pub descriptor: Arc<ReceiveStreamDescriptor>,
-    pub span: Range<usize>,
-}
-

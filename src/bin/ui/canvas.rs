@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, TimeDelta, Utc};
-use sdr::analysis::Analysis;
+// use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
 use sdr::document::Document;
 use sdr::duration_ext::DurationExt;
@@ -68,8 +68,8 @@ fn paint_elided_text(
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
-    _history: &Document,
-    analysis: &Analysis,
+    _document: &Document,
+    // analysis: &Analysis,
     reference_time: DateTime<Utc>,
     dt: TimeDelta,
     temp_random_instant: DateTime<Utc>,
@@ -327,5 +327,5 @@ pub fn ui(
     }
 
     // Draw processors
-    analysis.draw(ui, figure_rect, viewport, dt);
+    // analysis.draw(ui, figure_rect, viewport, dt);
 }

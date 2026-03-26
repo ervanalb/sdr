@@ -32,7 +32,7 @@ pub struct ReceiveStreamDescriptor {
     pub frequency: f64,
     pub sample_rate: f64,
     pub start_time: DateTime<Utc>,
-    pub chunk_period: f64,
+    pub chunk_size: usize,
 }
 
 // RESULTS //
@@ -864,13 +864,14 @@ impl HardwareDeviceRxStream {
                 // it indicates that this stream_id is done
                 // and no more messages will be coming.
                 let canary = Arc::new(());
+                let chunk_size = (STREAM_CHUNK_PERIOD * sample_rate).round() as usize;
                 let descriptor = ReceiveStreamDescriptor {
                     device_id: device_id.clone(),
                     stream_index,
                     frequency,
                     sample_rate,
                     start_time,
-                    chunk_period: STREAM_CHUNK_PERIOD,
+                    chunk_size,
                 };
 
                 stream_sender

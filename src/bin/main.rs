@@ -2,16 +2,17 @@
 
 use chrono::{DateTime, Duration, Utc};
 use eframe::egui;
-use sdr::analysis::{Analysis, ProcessorId};
+// use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
-use sdr::document::Document;
+use sdr::document::{Document, RecordingId};
 use sdr::duration_ext::DurationExt;
 use sdr::hardware::{Hardware, HardwareParams};
-use sdr::processor::fm::FmProcessorParameters;
-use sdr::processor::waterfall::WaterfallProcessorParameters;
-use sdr::processor::{CreationContext, ProcessorParameters};
+// use sdr::processor::fm::FmProcessorParameters;
+// use sdr::processor::waterfall::WaterfallProcessorParameters;
+// use sdr::processor::{CreationContext, ProcessorParameters};
 use sdr::ui::Viewport;
-use std::collections::BTreeMap;
+use std::rc::Rc;
+// use std::collections::BTreeMap;
 
 mod ui;
 
@@ -53,9 +54,10 @@ struct SdrApp {
     hardware: Option<Hardware>,
     hardware_params: HardwareParams,
     viewport_state: Viewport,
-    processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
+    // processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
     document: Document,
-    analysis: Analysis,
+    recording: Option<Rc<RecordingId>>,
+    // analysis: Analysis,
     prev_time: DateTime<Utc>,
     reference_time: DateTime<Utc>,
     temp_random_instant: DateTime<Utc>,
@@ -65,38 +67,39 @@ struct SdrApp {
 impl SdrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        sdr::processor::waterfall::static_init(cc);
+        // sdr::processor::waterfall::static_init(cc);
         let now = Utc::now();
 
         // Load bands info from JSON file included at compile time
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
 
-        let mut processor_parameters = BTreeMap::<ProcessorId, ProcessorParameters>::new();
-        processor_parameters.insert(
-            0,
-            ProcessorParameters::Waterfall(WaterfallProcessorParameters {}),
-        );
+        // let mut processor_parameters = BTreeMap::<ProcessorId, ProcessorParameters>::new();
+        // processor_parameters.insert(
+        //     0,
+        //     ProcessorParameters::Waterfall(WaterfallProcessorParameters {}),
+        // );
 
-        let tmp_freq = 90.9e6;
+        // let tmp_freq = 90.9e6;
 
-        processor_parameters.insert(
-            1,
-            ProcessorParameters::Fm(FmProcessorParameters {
-                frequency: tmp_freq,
-                bandwidth: 200e3,
-                squelch_db: -100.,
-                squelch_hysteresis_db: 3.,
-            }),
-        );
+        // processor_parameters.insert(
+        //     1,
+        //     ProcessorParameters::Fm(FmProcessorParameters {
+        //         frequency: tmp_freq,
+        //         bandwidth: 200e3,
+        //         squelch_db: -100.,
+        //         squelch_hysteresis_db: 3.,
+        //     }),
+        // );
 
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: Viewport::new(now),
-            processor_parameters,
+            // processor_parameters,
             document: Document::new(),
-            analysis: Analysis::new(),
+            recording: None,
+            // analysis: Analysis::new(),
             prev_time: now,
             reference_time: now,
             temp_random_instant: now,
@@ -133,19 +136,29 @@ impl eframe::App for SdrApp {
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
-        self.document.update(hardware_results);
-        self.analysis.process(
-            &mut self.processor_parameters,
-            &CreationContext {
-                device: &wgpu_render_state.device,
-                queue: &wgpu_render_state.queue,
-            },
-            &self.document,
-        );
-        self.document
-            .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
-        self.analysis
-            .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+
+        // Update document too
+        self.document.update();
+
+        // Add new content to the document
+        if let Some(recording_id) = &self.recording {
+            self.document
+                .update_recording(recording_id, hardware_results);
+        }
+
+        // Expire old chunks
+        //self.document.expire(0.0); // TODO: calculate proper retain time
+
+        // self.analysis.process(
+        //     &mut self.processor_parameters,
+        //     &CreationContext {
+        //         device: &wgpu_render_state.device,
+        //         queue: &wgpu_render_state.queue,
+        //     },
+        //     &self.document,
+        // );
+        // self.analysis
+        //     .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 
         let prev_run = self.hardware_params.run;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -168,6 +181,15 @@ impl eframe::App for SdrApp {
                 ui.separator();
 
                 ui.checkbox(&mut self.hardware_params.run, "Run");
+
+                let mut record_enabled = self.recording.is_some();
+                if ui.checkbox(&mut record_enabled, "Record").changed() {
+                    if record_enabled && self.recording.is_none() {
+                        self.recording = Some(self.document.record(now, 0.0));
+                    } else if !record_enabled {
+                        self.recording = None;
+                    }
+                }
 
                 if ui.button("Enumerate Devices").clicked() {
                     self.hardware_params.enumerate = true;
@@ -318,12 +340,12 @@ impl eframe::App for SdrApp {
             ui.heading("Waterfall Display");
             ui.separator();
 
-            // TEMP
-            let freq = match self.processor_parameters.get_mut(&1).unwrap() {
-                ProcessorParameters::Fm(p) => &mut p.frequency,
-                _ => panic!(),
-            };
-            ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
+            // TEMP - commented out while analysis is disabled
+            // let freq = match self.processor_parameters.get_mut(&1).unwrap() {
+            //     ProcessorParameters::Fm(p) => &mut p.frequency,
+            //     _ => panic!(),
+            // };
+            // ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
             // END TEMP
 
             let force_live = self.hardware_params.run && !prev_run;
@@ -331,7 +353,7 @@ impl eframe::App for SdrApp {
                 ui,
                 &mut self.viewport_state,
                 &self.document,
-                &self.analysis,
+                // &self.analysis,
                 self.reference_time,
                 dt,
                 self.temp_random_instant,

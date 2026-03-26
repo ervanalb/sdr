@@ -132,8 +132,9 @@ impl StreamProcessor {
         let min_index = (MIN_QUANTILE * fft_size as f64).clamp(0., fft_size as f64 - 1.) as usize;
         let max_index = (MAX_QUANTILE * fft_size as f64).clamp(0., fft_size as f64 - 1.) as usize;
 
+        let chunk_period = descriptor.chunk_size as f64 / descriptor.sample_rate;
         let min_max_alpha =
-            (descriptor.chunk_period / (MIN_MAX_TIME_CONSTANT + descriptor.chunk_period)) as f32;
+            (chunk_period / (MIN_MAX_TIME_CONSTANT + chunk_period)) as f32;
 
         StreamProcessor {
             fft_size,
