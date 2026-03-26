@@ -1,5 +1,7 @@
+pub mod analysis;
 pub mod audio;
 pub mod band_info;
+pub mod document;
 pub mod dsp;
 pub mod duration_ext;
 pub mod format;
@@ -7,7 +9,6 @@ pub mod hardware;
 mod id_factory;
 pub mod preprocessor;
 pub mod processor;
-pub mod raw_history;
 pub mod seqdeque;
 pub mod ui;
 pub mod waterfall_renderer;

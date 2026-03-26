@@ -1,9 +1,10 @@
 use chrono::{DateTime, Duration, TimeDelta, Utc};
+use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
+use sdr::document::Document;
 use sdr::duration_ext::DurationExt;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
-use sdr::raw_history::RawHistory;
 use sdr::ui::Viewport;
 
 const SCROLL_SPEED: f32 = 1.0;
@@ -67,7 +68,8 @@ fn paint_elided_text(
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
-    history: &RawHistory,
+    _history: &Document,
+    analysis: &Analysis,
     reference_time: DateTime<Utc>,
     dt: TimeDelta,
     temp_random_instant: DateTime<Utc>,
@@ -325,5 +327,5 @@ pub fn ui(
     }
 
     // Draw processors
-    history.draw(ui, figure_rect, viewport, dt);
+    analysis.draw(ui, figure_rect, viewport, dt);
 }

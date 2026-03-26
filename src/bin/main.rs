@@ -2,13 +2,14 @@
 
 use chrono::{DateTime, Duration, Utc};
 use eframe::egui;
+use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
+use sdr::document::Document;
 use sdr::duration_ext::DurationExt;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::fm::FmProcessorParameters;
 use sdr::processor::waterfall::WaterfallProcessorParameters;
 use sdr::processor::{CreationContext, ProcessorParameters};
-use sdr::raw_history::{ProcessorId, RawHistory};
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
 
@@ -53,7 +54,8 @@ struct SdrApp {
     hardware_params: HardwareParams,
     viewport_state: Viewport,
     processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
-    history: RawHistory,
+    document: Document,
+    analysis: Analysis,
     prev_time: DateTime<Utc>,
     reference_time: DateTime<Utc>,
     temp_random_instant: DateTime<Utc>,
@@ -93,7 +95,8 @@ impl SdrApp {
             hardware_params: HardwareParams::default(),
             viewport_state: Viewport::new(now),
             processor_parameters,
-            history: RawHistory::new(),
+            document: Document::new(),
+            analysis: Analysis::new(),
             prev_time: now,
             reference_time: now,
             temp_random_instant: now,
@@ -130,15 +133,18 @@ impl eframe::App for SdrApp {
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
-        self.history.update(hardware_results);
-        self.history.process(
+        self.document.update(hardware_results);
+        self.analysis.process(
             &mut self.processor_parameters,
             &CreationContext {
                 device: &wgpu_render_state.device,
                 queue: &wgpu_render_state.queue,
             },
+            &self.document,
         );
-        self.history
+        self.document
+            .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
+        self.analysis
             .expire(self.reference_time - Duration::from_secs_f64(CANVAS_DURATION));
 
         let prev_run = self.hardware_params.run;
@@ -324,7 +330,8 @@ impl eframe::App for SdrApp {
             self::ui::canvas::ui(
                 ui,
                 &mut self.viewport_state,
-                &self.history,
+                &self.document,
+                &self.analysis,
                 self.reference_time,
                 dt,
                 self.temp_random_instant,
