@@ -15,8 +15,6 @@ use std::rc::Rc;
 
 mod ui;
 
-const CANVAS_DURATION: f64 = 20.;
-
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
@@ -58,9 +56,8 @@ struct SdrApp {
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
     prev_time: DateTime<Utc>,
-    reference_time: DateTime<Utc>,
-    document_time: f64,
     bands_info: BandsInfo,
+    playhead: f64,
 }
 
 impl SdrApp {
@@ -100,9 +97,8 @@ impl SdrApp {
             recording: None,
             analysis: Analysis::new(),
             prev_time: now,
-            reference_time: now,
-            document_time: 0.0,
             bands_info,
+            playhead: 0.,
         }
     }
 }
@@ -129,10 +125,6 @@ impl eframe::App for SdrApp {
         let now = Utc::now();
         let dt_duration = now.signed_duration_since(self.prev_time);
         let dt = dt_duration.as_seconds_f64();
-        if self.hardware_params.run {
-            self.reference_time = now;
-            self.document_time += dt;
-        }
         self.prev_time = now;
 
         // Update hardware every frame
@@ -148,7 +140,8 @@ impl eframe::App for SdrApp {
         self.document.update();
 
         // Expire old chunks
-        //self.document.expire(0.0); // TODO: calculate proper retain time
+        // TODO: bring back expire
+        //self.document.expire(todo!());
 
         self.analysis.process(
             &mut self.processor_parameters,
@@ -158,9 +151,9 @@ impl eframe::App for SdrApp {
             },
             &self.document,
         );
-        self.analysis.expire(self.document_time - CANVAS_DURATION);
+        // TODO: bring back expire
+        //self.analysis.expire(todo!());
 
-        let prev_run = self.hardware_params.run;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -180,12 +173,10 @@ impl eframe::App for SdrApp {
                 ui.heading("Hardware Control");
                 ui.separator();
 
-                ui.checkbox(&mut self.hardware_params.run, "Run");
-
                 let mut record_enabled = self.recording.is_some();
                 if ui.checkbox(&mut record_enabled, "Record").changed() {
                     if record_enabled && self.recording.is_none() {
-                        self.recording = Some(self.document.record(now, self.document_time));
+                        self.recording = Some(self.document.record(now, self.playhead));
                     } else if !record_enabled {
                         self.recording = None;
                     }
@@ -346,15 +337,13 @@ impl eframe::App for SdrApp {
             };
             ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
 
-            let force_live = self.hardware_params.run && !prev_run;
             self::ui::canvas::ui(
                 ui,
                 &mut self.viewport_state,
                 &self.document,
                 &self.analysis,
-                self.document_time,
+                &mut self.playhead,
                 dt,
-                force_live,
                 &mut self.hardware_params,
                 &self.bands_info,
             );

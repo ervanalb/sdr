@@ -68,9 +68,8 @@ pub fn ui(
     viewport: &mut Viewport,
     _document: &Document,
     analysis: &Analysis,
-    reference_time: f64,
+    _playhead: &mut f64,
     dt: f64,
-    force_live: bool,
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
 ) {
@@ -87,8 +86,6 @@ pub fn ui(
     let overall_size = egui::vec2(highest_freq as f32, 120.);
     let min_scale = figure_size / overall_size;
     let max_zoom = 1e9;
-
-    viewport.update_reference_time(reference_time, force_live);
 
     // Handle scroll and zoom
     if ui.rect_contains_pointer(ui_rect) {

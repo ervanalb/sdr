@@ -1,4 +1,4 @@
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct IdFactory(usize);
 
 impl IdFactory {

@@ -21,7 +21,7 @@ pub struct ClipDescriptor {
     pub chunk_size: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Clip {
     pub descriptor: ClipDescriptor,
     pub chunks: SeqDeque<Chunk>,
@@ -32,14 +32,16 @@ pub struct Chunk {
     pub data: Arc<RawIqSamples>,
 }
 
+#[derive(Debug)]
 pub struct Document {
+    pub clips: BTreeMap<ClipId, Clip>,
+    pub active_clips: BTreeSet<ClipId>,
     clip_id_factory: IdFactory,
     recording_id_factory: IdFactory,
-    pub clips: BTreeMap<ClipId, Clip>,
     recordings: BTreeMap<RecordingId, RecordingInfo>,
-    pub active_clips: BTreeSet<ClipId>,
 }
 
+#[derive(Debug)]
 struct RecordingInfo {
     canary: Weak<RecordingId>,
     wall_clock_start_time: DateTime<Utc>,

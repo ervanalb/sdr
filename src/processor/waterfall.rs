@@ -113,10 +113,6 @@ pub struct ClipProcessor {
     min_max_alpha: f32,
     min: f32,
     max: f32,
-    start_time: f64,
-    chunk_size: usize,
-    sample_rate: f64,
-    chunk_count: usize,
 }
 
 impl ClipProcessor {
@@ -135,10 +131,6 @@ impl ClipProcessor {
             min_max_alpha,
             min: f32::NAN,
             max: f32::NAN,
-            start_time: descriptor.start_time,
-            chunk_size: descriptor.chunk_size,
-            sample_rate: descriptor.sample_rate,
-            chunk_count: 0,
         }
     }
 

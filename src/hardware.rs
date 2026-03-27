@@ -120,7 +120,6 @@ pub struct RawStreamChunk {
 
 #[derive(Clone, Debug)]
 pub struct HardwareParams {
-    pub run: bool,
     pub devices: HashMap<HardwareDeviceId, HardwareDeviceParams>,
     pub enumerate: bool,
 }
@@ -128,7 +127,6 @@ pub struct HardwareParams {
 impl Default for HardwareParams {
     fn default() -> Self {
         Self {
-            run: false,
             devices: Default::default(),
             enumerate: true,
         }
@@ -261,7 +259,7 @@ impl Hardware {
         // Call update on each device
         for (id, device_params) in params.devices.iter_mut() {
             let device = self.devices.get_mut(id).unwrap();
-            device.update(device_params, params.run);
+            device.update(device_params);
         }
 
         // Close out any streams whose canaries have died
@@ -371,7 +369,7 @@ impl HardwareDevice {
         }
     }
 
-    fn update(&mut self, params: &mut HardwareDeviceParams, run: bool) {
+    fn update(&mut self, params: &mut HardwareDeviceParams) {
         match &self.active {
             // Handle state transitions
             HardwareState::Inactive => {
@@ -459,7 +457,7 @@ impl HardwareDevice {
                     if shutting_down {
                         stream_params.active = false;
                     }
-                    stream.update(stream_params, run);
+                    stream.update(stream_params);
                 }
 
                 for (stream, stream_params) in active
@@ -601,14 +599,11 @@ impl HardwareDeviceRxStream {
         }
     }
 
-    fn update(&mut self, params: &mut HardwareDeviceRxStreamParams, run: bool) {
-        // Effectively AND the run flag with the stream's active flag
-        let should_be_active = params.active && run;
-
+    fn update(&mut self, params: &mut HardwareDeviceRxStreamParams) {
         match &self.active {
             // Handle state transitions
             HardwareState::Inactive => {
-                if should_be_active {
+                if params.active {
                     // Start new thread
                     let device_id = self.device_id.clone();
                     let stream_index = self.stream_index;
@@ -643,7 +638,7 @@ impl HardwareDeviceRxStream {
                 }
             }
             HardwareState::Active(active) => {
-                if !should_be_active {
+                if !params.active {
                     active
                         .control_sender
                         .send(HardwareDeviceRxStreamControlMessage::Shutdown)
@@ -696,9 +691,7 @@ impl HardwareDeviceRxStream {
         if matches!(self.active, HardwareState::ShuttingDown(_)) {
             // It is not valid for active = true
             // while we are shutting down
-            if run {
-                params.active = false;
-            }
+            params.active = false;
         }
 
         // Snap any values in parameters to the nearest valid option

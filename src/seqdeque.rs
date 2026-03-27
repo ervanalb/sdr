@@ -6,9 +6,9 @@ use std::{
 #[derive(Clone, Default)]
 pub struct SeqDeque<T>(VecDeque<T>, usize);
 
-impl<T: std::fmt::Debug> std::fmt::Debug for SeqDeque<T> {
+impl<T> std::fmt::Debug for SeqDeque<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        write!(f, "SeqDeque({}..{})", self.start_index(), self.end_index())
     }
 }
 
