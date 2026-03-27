@@ -6,7 +6,6 @@ use crate::{
     ui::Viewport,
     waterfall_renderer::WaterfallRenderer,
 };
-use chrono::{DateTime, Utc};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -71,6 +70,7 @@ impl Processor for WaterfallProcessor {
                         clip_id,
                         spectrum_len,
                         start_time: descriptor.start_time,
+                        row_period: descriptor.chunk_size as f64 / descriptor.sample_rate,
                         freq_min: descriptor.frequency - 0.5 * descriptor.sample_rate,
                         freq_max: descriptor.frequency + 0.5 * descriptor.sample_rate,
                     })
@@ -88,18 +88,8 @@ impl Processor for WaterfallProcessor {
             .get_mut(&clip_id)
             .expect("process_chunk() called with a clip that doesn't exist");
 
-        // Calculate time based on chunk count
-        let chunk_period = processor.chunk_size as f64 / processor.sample_rate;
-        let time = processor.start_time + processor.chunk_count as f64 * chunk_period;
-        processor.chunk_count += 1;
-
         let (spectrum, min, max) = processor.process_chunk(preprocessed_data);
-        let waterfall_row = WaterfallRow {
-            time,
-            spectrum,
-            min,
-            max,
-        };
+        let waterfall_row = WaterfallRow { spectrum, min, max };
         self.sender
             .send(WaterfallMessage::PushRow {
                 clip_id,
@@ -205,6 +195,7 @@ pub enum WaterfallMessage {
         clip_id: ClipId,
         spectrum_len: u32,
         start_time: f64,
+        row_period: f64,
         freq_min: f64,
         freq_max: f64,
     },
@@ -216,7 +207,6 @@ pub enum WaterfallMessage {
 }
 
 pub struct WaterfallRow {
-    pub time: f64,
     pub spectrum: Box<[f32]>,
     pub min: f32,
     pub max: f32,
@@ -275,6 +265,7 @@ impl ProcessorHistory for WaterfallHistory {
                     clip_id,
                     spectrum_len,
                     start_time,
+                    row_period,
                     freq_min,
                     freq_max,
                 } => match self.active_clips.entry(clip_id) {
@@ -283,6 +274,7 @@ impl ProcessorHistory for WaterfallHistory {
                             &self.device,
                             spectrum_len,
                             start_time,
+                            row_period,
                             freq_min,
                             freq_max,
                             self.blank_texture.clone(),
@@ -341,11 +333,10 @@ impl ProcessorHistory for WaterfallHistory {
         }
     }
 
-    fn expire(&mut self, _retain_time: DateTime<chrono::Utc>) {
-        // TODO: Convert DateTime to f64 document time
-        // For now, we don't expire waterfall data
-        // self.finished_clips
-        //     .retain(|_, clip| clip.prune_old_data(retain_time));
+    // TODO(Claude): Change the trait signature to match this
+    fn expire(&mut self, retain_time: f64) {
+        self.finished_clips
+            .retain(|_, clip| clip.prune_old_data(retain_time));
     }
 
     fn draw(
@@ -365,7 +356,7 @@ impl ProcessorHistory for WaterfallHistory {
                 freq_min: active_texture.freq_min,
                 freq_max: active_texture.freq_max,
                 start_time: active_texture.start_time,
-                end_time: active_texture.end_time,
+                end_time: active_texture.end_time(),
                 texture: active_texture.texture.clone(),
                 prev_texture: active_texture.prev_texture.clone(),
                 next_texture: self.blank_texture.clone(),
@@ -454,7 +445,7 @@ pub struct ActiveClip {
     texture: Texture,
     current_row: usize,
     pub start_time: f64,
-    pub end_time: f64,
+    pub row_period: f64,
     pub spectrum_len: u32,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
@@ -467,6 +458,7 @@ impl ActiveClip {
         device: &Device,
         spectrum_len: u32,
         start_time: f64,
+        row_period: f64,
         freq_min: f64,
         freq_max: f64,
         prev_texture: Texture,
@@ -496,7 +488,7 @@ impl ActiveClip {
             texture,
             current_row: 0,
             start_time,
-            end_time: start_time, // Haven't actually pushed the row yet
+            row_period,
             spectrum_len,
             mip_level_count,
             // Allocate some extra space in the mip_buffer
@@ -511,7 +503,8 @@ impl ActiveClip {
         Self::new(
             device,
             prev.spectrum_len,
-            prev.end_time,
+            prev.end_time(),
+            prev.row_period,
             prev.freq_min,
             prev.freq_max,
             prev.texture.clone(),
@@ -589,7 +582,6 @@ impl ActiveClip {
             row_len = next_row_len;
         }
         self.current_row += 1;
-        self.end_time = waterfall_row.time;
         self.min = waterfall_row.min;
         self.max = waterfall_row.max;
 
@@ -602,12 +594,12 @@ impl ActiveClip {
         queue: &Queue,
         next_texture: Texture,
     ) -> Option<FinishedTexture> {
+        let end_time = self.end_time();
         let Self {
             texture,
             prev_texture,
             current_row,
             start_time,
-            end_time,
             ..
         } = self;
 
@@ -684,6 +676,10 @@ impl ActiveClip {
         // Create a new active texture
         let prev = mem::replace(self, ActiveClip::new_following(device, self));
         prev.finish(device, queue, self.texture.clone())
+    }
+
+    fn end_time(&self) -> f64 {
+        self.start_time + self.current_row as f64 * self.row_period
     }
 }
 

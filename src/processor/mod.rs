@@ -4,7 +4,6 @@ use fm::FmProcessorParameters;
 use waterfall::WaterfallProcessorParameters;
 
 use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::Viewport};
-use chrono::{DateTime, Utc};
 use num_complex::Complex;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +37,7 @@ pub trait Processor: Send {
 
 pub trait ProcessorHistory {
     fn update(&mut self);
-    fn expire(&mut self, retain_time: DateTime<Utc>);
+    fn expire(&mut self, retain_time: f64);
 
     /// Draw this processor history onto the canvas
     fn draw(

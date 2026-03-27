@@ -7,7 +7,6 @@ use std::{
     },
 };
 
-use chrono::{DateTime, Utc};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
@@ -87,11 +86,7 @@ impl Processor for FmProcessor {
         }
     }
 
-    fn process_chunk(
-        &mut self,
-        clip_id: ClipId,
-        preprocessed_data: &[Complex<f32>],
-    ) {
+    fn process_chunk(&mut self, clip_id: ClipId, preprocessed_data: &[Complex<f32>]) {
         if let Some(processor) = self.clips.get_mut(&clip_id) {
             processor.process_chunk(
                 preprocessed_data,
@@ -441,11 +436,9 @@ impl ProcessorHistory for FmHistory {
         }
     }
 
-    fn expire(&mut self, _retain_time: DateTime<chrono::Utc>) {
-        // TODO: Convert DateTime to f64 document time
-        // For now, we don't expire FM data
-        // self.transmissions
-        //     .retain(|_, transmission| transmission.prune_old_data(retain_time));
+    fn expire(&mut self, retain_time: f64) {
+        self.transmissions
+            .retain(|_, transmission| transmission.prune_old_data(retain_time));
     }
 
     fn draw(
@@ -583,9 +576,8 @@ impl ProcessorHistory for FmHistory {
 
                             // Feed new audio data to the audio player
                             let start = p.next_seq_num;
-                            let end = transmission.find_chunk_by_time(
-                                time + AUDIO_LOOKAHEAD_DURATION,
-                            );
+                            let end =
+                                transmission.find_chunk_by_time(time + AUDIO_LOOKAHEAD_DURATION);
                             if end > start {
                                 let bufs = transmission.chunks.range(start..end).enumerate().map(
                                     |(i, chunk)| {
