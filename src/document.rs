@@ -1,11 +1,11 @@
 use crate::{
-    hardware::{HardwareResult, RawIqSamples, ReceiveStreamDescriptor, StreamId},
+    hardware::{HardwareResult, RawIqSamples, StreamId},
     id_factory::IdFactory,
     seqdeque::SeqDeque,
 };
 use chrono::{DateTime, Utc};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     rc::{Rc, Weak},
     sync::Arc,
 };
@@ -14,25 +14,16 @@ pub type ClipId = usize;
 pub type RecordingId = usize;
 
 #[derive(Clone, Debug)]
-pub struct StreamDescriptor {
+pub struct ClipDescriptor {
     pub frequency: f64,
     pub sample_rate: f64,
+    pub start_time: f64,
     pub chunk_size: usize,
 }
 
-impl From<&ReceiveStreamDescriptor> for StreamDescriptor {
-    fn from(desc: &ReceiveStreamDescriptor) -> Self {
-        StreamDescriptor {
-            frequency: desc.frequency,
-            sample_rate: desc.sample_rate,
-            chunk_size: desc.chunk_size,
-        }
-    }
-}
-
+#[derive(Clone)]
 pub struct Clip {
-    pub descriptor: StreamDescriptor,
-    pub start_time: f64,
+    pub descriptor: ClipDescriptor,
     pub chunks: SeqDeque<Chunk>,
 }
 
@@ -144,8 +135,12 @@ impl Document {
                     self.clips.insert(
                         clip_id,
                         Clip {
-                            descriptor: StreamDescriptor::from(descriptor),
-                            start_time: clip_start_time,
+                            descriptor: ClipDescriptor {
+                                frequency: descriptor.frequency,
+                                sample_rate: descriptor.sample_rate,
+                                start_time: clip_start_time,
+                                chunk_size: descriptor.chunk_size,
+                            },
                             chunks: SeqDeque::new(),
                         },
                     );
@@ -163,12 +158,12 @@ impl Document {
         // Remove chunks that are older than retain_time
         self.clips.retain(|clip_id, clip| {
             // Calculate elapsed time from clip start to retain_time
-            if retain_time > clip.start_time {
+            if retain_time > clip.descriptor.start_time {
                 // Convert retain_time to retain_index
                 // (the index into clip.chunks where retain_time sits)
                 // by shifting & scaling by the chunk rate
                 let retain_index = clip.chunks.start_index() as f64
-                    + (retain_time - clip.start_time) * clip.descriptor.sample_rate
+                    + (retain_time - clip.descriptor.start_time) * clip.descriptor.sample_rate
                         / clip.descriptor.chunk_size as f64;
                 let retain_index = retain_index.floor() as usize;
                 let retain_index = retain_index.min(clip.chunks.end_index());

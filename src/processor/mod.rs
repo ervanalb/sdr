@@ -3,8 +3,8 @@ pub mod waterfall;
 use fm::FmProcessorParameters;
 use waterfall::WaterfallProcessorParameters;
 
-use crate::{hardware::StreamId, preprocessor::PreprocessedStreamDescriptor, ui::Viewport};
-use chrono::{DateTime, TimeDelta, Utc};
+use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::Viewport};
+use chrono::{DateTime, Utc};
 use num_complex::Complex;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,14 +27,13 @@ impl ProcessorParameters {
 
 pub trait Processor: Send {
     fn reset(&mut self);
-    fn start_stream(&mut self, stream_id: StreamId, descriptor: &PreprocessedStreamDescriptor);
+    fn start_clip(&mut self, clip_id: ClipId, descriptor: &PreprocessedClipDescriptor);
     fn process_chunk(
         &mut self,
-        stream_id: StreamId,
-        time: DateTime<Utc>,
+        clip_id: ClipId,
         preprocessed_data: &[Complex<f32>],
     );
-    fn end_stream(&mut self, stream_id: StreamId);
+    fn end_clip(&mut self, clip_id: ClipId);
 }
 
 pub trait ProcessorHistory {
@@ -48,7 +47,7 @@ pub trait ProcessorHistory {
         id: egui::Id,
         figure_rect: egui::Rect,
         viewport: &Viewport,
-        dt: TimeDelta,
+        dt: f64,
     );
 }
 

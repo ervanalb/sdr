@@ -1,12 +1,12 @@
 use crate::{
+    document::ClipId,
     dsp::log_mix_f32,
-    hardware::StreamId,
-    preprocessor::PreprocessedStreamDescriptor,
+    preprocessor::PreprocessedClipDescriptor,
     processor::{CreationContext, Processor, ProcessorHistory},
     ui::Viewport,
     waterfall_renderer::WaterfallRenderer,
 };
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -41,14 +41,14 @@ impl WaterfallProcessorParameters {
 }
 
 pub struct WaterfallProcessor {
-    streams: BTreeMap<StreamId, StreamProcessor>,
+    clips: BTreeMap<ClipId, ClipProcessor>,
     sender: Sender<WaterfallMessage>,
 }
 
 impl WaterfallProcessor {
     pub fn new(sender: Sender<WaterfallMessage>) -> WaterfallProcessor {
         WaterfallProcessor {
-            streams: BTreeMap::new(),
+            clips: BTreeMap::new(),
             sender,
         }
     }
@@ -56,19 +56,19 @@ impl WaterfallProcessor {
 
 impl Processor for WaterfallProcessor {
     fn reset(&mut self) {
-        self.streams.clear();
+        self.clips.clear();
         self.sender.send(WaterfallMessage::Reset).ok();
     }
 
-    fn start_stream(&mut self, stream_id: usize, descriptor: &PreprocessedStreamDescriptor) {
-        match self.streams.entry(stream_id) {
+    fn start_clip(&mut self, clip_id: ClipId, descriptor: &PreprocessedClipDescriptor) {
+        match self.clips.entry(clip_id) {
             Entry::Vacant(e) => {
-                let processor = StreamProcessor::new(descriptor);
+                let processor = ClipProcessor::new(descriptor);
                 let spectrum_len = processor.fft_size as u32;
                 e.insert(processor);
                 self.sender
-                    .send(WaterfallMessage::StartStream {
-                        stream_id,
+                    .send(WaterfallMessage::StartClip {
+                        clip_id,
                         spectrum_len,
                         start_time: descriptor.start_time,
                         freq_min: descriptor.frequency - 0.5 * descriptor.sample_rate,
@@ -77,21 +77,22 @@ impl Processor for WaterfallProcessor {
                     .ok();
             }
             Entry::Occupied(_) => {
-                panic!("start_stream() called with a stream that already exists");
+                panic!("start_clip() called with a clip that already exists");
             }
         }
     }
 
-    fn process_chunk(
-        &mut self,
-        stream_id: StreamId,
-        time: DateTime<chrono::Utc>,
-        preprocessed_data: &[Complex<f32>],
-    ) {
+    fn process_chunk(&mut self, clip_id: ClipId, preprocessed_data: &[Complex<f32>]) {
         let processor = self
-            .streams
-            .get_mut(&stream_id)
-            .expect("process_chunk() called with a stream that doesn't exist");
+            .clips
+            .get_mut(&clip_id)
+            .expect("process_chunk() called with a clip that doesn't exist");
+
+        // Calculate time based on chunk count
+        let chunk_period = processor.chunk_size as f64 / processor.sample_rate;
+        let time = processor.start_time + processor.chunk_count as f64 * chunk_period;
+        processor.chunk_count += 1;
+
         let (spectrum, min, max) = processor.process_chunk(preprocessed_data);
         let waterfall_row = WaterfallRow {
             time,
@@ -101,48 +102,53 @@ impl Processor for WaterfallProcessor {
         };
         self.sender
             .send(WaterfallMessage::PushRow {
-                stream_id,
+                clip_id,
                 waterfall_row,
             })
             .ok();
     }
 
-    fn end_stream(&mut self, stream_id: usize) {
-        self.streams
-            .remove(&stream_id)
-            .expect("end_stream() called with a stream that doesn't exist");
-        self.sender
-            .send(WaterfallMessage::EndStream(stream_id))
-            .ok();
+    fn end_clip(&mut self, clip_id: ClipId) {
+        self.clips
+            .remove(&clip_id)
+            .expect("end_clip() called with a clip that doesn't exist");
+        self.sender.send(WaterfallMessage::EndClip(clip_id)).ok();
     }
 }
 
-pub struct StreamProcessor {
+pub struct ClipProcessor {
     fft_size: usize,
     min_index: usize,
     max_index: usize,
     min_max_alpha: f32,
     min: f32,
     max: f32,
+    start_time: f64,
+    chunk_size: usize,
+    sample_rate: f64,
+    chunk_count: usize,
 }
 
-impl StreamProcessor {
-    fn new(descriptor: &PreprocessedStreamDescriptor) -> StreamProcessor {
+impl ClipProcessor {
+    fn new(descriptor: &PreprocessedClipDescriptor) -> ClipProcessor {
         let fft_size = descriptor.fft_size;
         let min_index = (MIN_QUANTILE * fft_size as f64).clamp(0., fft_size as f64 - 1.) as usize;
         let max_index = (MAX_QUANTILE * fft_size as f64).clamp(0., fft_size as f64 - 1.) as usize;
 
         let chunk_period = descriptor.chunk_size as f64 / descriptor.sample_rate;
-        let min_max_alpha =
-            (chunk_period / (MIN_MAX_TIME_CONSTANT + chunk_period)) as f32;
+        let min_max_alpha = (chunk_period / (MIN_MAX_TIME_CONSTANT + chunk_period)) as f32;
 
-        StreamProcessor {
+        ClipProcessor {
             fft_size,
             min_index,
             max_index,
             min_max_alpha,
             min: f32::NAN,
             max: f32::NAN,
+            start_time: descriptor.start_time,
+            chunk_size: descriptor.chunk_size,
+            sample_rate: descriptor.sample_rate,
+            chunk_count: 0,
         }
     }
 
@@ -195,22 +201,22 @@ impl StreamProcessor {
 
 pub enum WaterfallMessage {
     Reset,
-    StartStream {
-        stream_id: StreamId,
+    StartClip {
+        clip_id: ClipId,
         spectrum_len: u32,
-        start_time: DateTime<Utc>,
+        start_time: f64,
         freq_min: f64,
         freq_max: f64,
     },
-    EndStream(StreamId),
+    EndClip(ClipId),
     PushRow {
-        stream_id: StreamId,
+        clip_id: ClipId,
         waterfall_row: WaterfallRow,
     },
 }
 
 pub struct WaterfallRow {
-    pub time: DateTime<Utc>,
+    pub time: f64,
     pub spectrum: Box<[f32]>,
     pub min: f32,
     pub max: f32,
@@ -224,8 +230,8 @@ pub struct WaterfallHistory {
     receiver: Receiver<WaterfallMessage>,
     device: Device,
     queue: Queue,
-    pub active_streams: BTreeMap<StreamId, ActiveStream>,
-    pub finished_streams: BTreeMap<StreamId, FinishedStream>,
+    pub active_clips: BTreeMap<ClipId, ActiveClip>,
+    pub finished_clips: BTreeMap<ClipId, FinishedClip>,
     blank_texture: Texture,
 }
 
@@ -250,8 +256,8 @@ impl WaterfallHistory {
             device: device.clone(),
             queue: queue.clone(),
             receiver,
-            active_streams: BTreeMap::new(),
-            finished_streams: BTreeMap::new(),
+            active_clips: BTreeMap::new(),
+            finished_clips: BTreeMap::new(),
             blank_texture,
         }
     }
@@ -262,18 +268,18 @@ impl ProcessorHistory for WaterfallHistory {
         for msg in self.receiver.try_iter() {
             match msg {
                 WaterfallMessage::Reset => {
-                    self.active_streams.clear();
-                    self.finished_streams.clear();
+                    self.active_clips.clear();
+                    self.finished_clips.clear();
                 }
-                WaterfallMessage::StartStream {
-                    stream_id,
+                WaterfallMessage::StartClip {
+                    clip_id,
                     spectrum_len,
                     start_time,
                     freq_min,
                     freq_max,
-                } => match self.active_streams.entry(stream_id) {
+                } => match self.active_clips.entry(clip_id) {
                     Entry::Vacant(e) => {
-                        e.insert(ActiveStream::new(
+                        e.insert(ActiveClip::new(
                             &self.device,
                             spectrum_len,
                             start_time,
@@ -283,14 +289,14 @@ impl ProcessorHistory for WaterfallHistory {
                         ));
                     }
                     Entry::Occupied(_) => {
-                        panic!("Tried to add a new stream that already exists");
+                        panic!("Tried to add a new clip that already exists");
                     }
                 },
-                WaterfallMessage::EndStream(stream_id) => {
+                WaterfallMessage::EndClip(clip_id) => {
                     let active_texture = self
-                        .active_streams
-                        .remove(&stream_id)
-                        .expect("Tried to end a stream that doesn't exist");
+                        .active_clips
+                        .remove(&clip_id)
+                        .expect("Tried to end a clip that doesn't exist");
                     let freq_min = active_texture.freq_min;
                     let freq_max = active_texture.freq_max;
                     let min = active_texture.min;
@@ -301,31 +307,31 @@ impl ProcessorHistory for WaterfallHistory {
                         self.blank_texture.clone(),
                     );
                     Self::update_finished(
-                        &mut self.finished_streams,
+                        &mut self.finished_clips,
                         freq_min,
                         freq_max,
-                        stream_id,
+                        clip_id,
                         min,
                         max,
                         finished_texture,
                     );
                 }
                 WaterfallMessage::PushRow {
-                    stream_id,
+                    clip_id,
                     waterfall_row,
                 } => {
                     let active_texture = self
-                        .active_streams
-                        .get_mut(&stream_id)
-                        .expect("Tried to push a waterfall row to a stream that doesn't exist");
+                        .active_clips
+                        .get_mut(&clip_id)
+                        .expect("Tried to push a waterfall row to a clip that doesn't exist");
 
                     let finished_texture =
                         active_texture.push(&self.device, &self.queue, waterfall_row);
                     Self::update_finished(
-                        &mut self.finished_streams,
+                        &mut self.finished_clips,
                         active_texture.freq_min,
                         active_texture.freq_max,
-                        stream_id,
+                        clip_id,
                         active_texture.min,
                         active_texture.max,
                         finished_texture,
@@ -335,9 +341,11 @@ impl ProcessorHistory for WaterfallHistory {
         }
     }
 
-    fn expire(&mut self, retain_time: DateTime<chrono::Utc>) {
-        self.finished_streams
-            .retain(|_, stream| stream.prune_old_data(retain_time));
+    fn expire(&mut self, _retain_time: DateTime<chrono::Utc>) {
+        // TODO: Convert DateTime to f64 document time
+        // For now, we don't expire waterfall data
+        // self.finished_clips
+        //     .retain(|_, clip| clip.prune_old_data(retain_time));
     }
 
     fn draw(
@@ -346,12 +354,12 @@ impl ProcessorHistory for WaterfallHistory {
         id: egui::Id,
         figure_rect: egui::Rect,
         viewport: &Viewport,
-        _dt: TimeDelta,
+        _dt: f64,
     ) {
         // Collect all chunks into a draw list
 
         let draw_list = self
-            .active_streams
+            .active_clips
             .values()
             .map(|active_texture| WaterfallDrawInfo {
                 freq_min: active_texture.freq_min,
@@ -365,7 +373,7 @@ impl ProcessorHistory for WaterfallHistory {
                 max: active_texture.max,
                 v_end: active_texture.current_row as f32 / TEXTURE_HEIGHT as f32,
             })
-            .chain(self.finished_streams.values().flat_map(|stream| {
+            .chain(self.finished_clips.values().flat_map(|stream| {
                 stream
                     .textures
                     .iter()
@@ -402,30 +410,30 @@ impl ProcessorHistory for WaterfallHistory {
 
 impl WaterfallHistory {
     fn update_finished(
-        finished_streams: &mut BTreeMap<StreamId, FinishedStream>,
+        finished_clips: &mut BTreeMap<ClipId, FinishedClip>,
         freq_min: f64,
         freq_max: f64,
-        stream_id: StreamId,
+        clip_id: ClipId,
         min: f32,
         max: f32,
         finished_texture: Option<FinishedTexture>,
     ) {
-        match finished_streams.entry(stream_id) {
+        match finished_clips.entry(clip_id) {
             Entry::Occupied(mut e) => {
-                let finished_stream = e.get_mut();
+                let finished_clip = e.get_mut();
                 // Even if we don't have a new finished texture to push,
                 // update the min & max values
-                finished_stream.min = min;
-                finished_stream.max = max;
+                finished_clip.min = min;
+                finished_clip.max = max;
                 if let Some(finished_texture) = finished_texture {
-                    finished_stream.textures.push_back(finished_texture);
+                    finished_clip.textures.push_back(finished_texture);
                 }
             }
             Entry::Vacant(e) => {
                 if let Some(finished_texture) = finished_texture {
                     let mut textures = VecDeque::new();
                     textures.push_back(finished_texture);
-                    e.insert(FinishedStream {
+                    e.insert(FinishedClip {
                         freq_min,
                         freq_max,
                         textures,
@@ -439,14 +447,14 @@ impl WaterfallHistory {
 }
 
 #[derive(Debug)]
-pub struct ActiveStream {
+pub struct ActiveClip {
     pub freq_min: f64,
     pub freq_max: f64,
     prev_texture: Texture,
     texture: Texture,
     current_row: usize,
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
+    pub start_time: f64,
+    pub end_time: f64,
     pub spectrum_len: u32,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
@@ -454,11 +462,11 @@ pub struct ActiveStream {
     pub max: f32,
 }
 
-impl ActiveStream {
+impl ActiveClip {
     fn new(
         device: &Device,
         spectrum_len: u32,
-        start_time: DateTime<Utc>,
+        start_time: f64,
         freq_min: f64,
         freq_max: f64,
         prev_texture: Texture,
@@ -499,7 +507,7 @@ impl ActiveStream {
         }
     }
 
-    fn new_following(device: &Device, prev: &ActiveStream) -> Self {
+    fn new_following(device: &Device, prev: &ActiveClip) -> Self {
         Self::new(
             device,
             prev.spectrum_len,
@@ -674,13 +682,13 @@ impl ActiveStream {
     // When this texture fills up, swap it for a new one
     fn swap(&mut self, device: &Device, queue: &Queue) -> Option<FinishedTexture> {
         // Create a new active texture
-        let prev = mem::replace(self, ActiveStream::new_following(device, self));
+        let prev = mem::replace(self, ActiveClip::new_following(device, self));
         prev.finish(device, queue, self.texture.clone())
     }
 }
 
 #[derive(Debug)]
-pub struct FinishedStream {
+pub struct FinishedClip {
     pub freq_min: f64,
     pub freq_max: f64,
     textures: VecDeque<FinishedTexture>,
@@ -688,9 +696,9 @@ pub struct FinishedStream {
     pub max: f32,
 }
 
-impl FinishedStream {
+impl FinishedClip {
     // Returns true if there are still chunks
-    fn prune_old_data(&mut self, retain_time: DateTime<Utc>) -> bool {
+    fn prune_old_data(&mut self, retain_time: f64) -> bool {
         // TODO: actually shrink textures with data older than retain_time
         let first_index = self
             .textures
@@ -705,16 +713,16 @@ struct FinishedTexture {
     texture: Texture,
     prev_texture: Texture,
     next_texture: Texture,
-    start_time: DateTime<Utc>,
-    end_time: DateTime<Utc>,
+    start_time: f64,
+    end_time: f64,
 }
 
 #[derive(Debug, Clone)]
 pub struct WaterfallDrawInfo {
     pub freq_min: f64,
     pub freq_max: f64,
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
+    pub start_time: f64,
+    pub end_time: f64,
     pub texture: Texture,
     pub prev_texture: Texture,
     pub next_texture: Texture,
@@ -764,7 +772,7 @@ struct Callback {
     translation: egui::Vec2,
     scale: egui::Vec2,
     waterfall_chunks: Vec<WaterfallDrawInfo>,
-    reference_time: DateTime<Utc>,
+    reference_time: f64,
 }
 
 impl egui_wgpu::CallbackTrait for Callback {

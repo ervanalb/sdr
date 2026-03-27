@@ -1,19 +1,17 @@
 use crate::{
+    document::ClipDescriptor,
     dsp::{Fft, OverlapExpand, hann_window},
-    hardware::{HardwareDeviceId, RawIqSamples, ReceiveStreamDescriptor},
+    hardware::RawIqSamples,
 };
-use chrono::{DateTime, Utc};
 use num_complex::Complex;
 use std::mem;
 
 const TARGET_BIN_SIZE: f64 = 2.5e3; // 2.5 KHz
 
-pub struct PreprocessedStreamDescriptor {
-    pub device_id: HardwareDeviceId,
-    pub stream_index: usize,
+pub struct PreprocessedClipDescriptor {
     pub frequency: f64,
     pub sample_rate: f64,
-    pub start_time: DateTime<Utc>,
+    pub start_time: f64,
     pub chunk_size: usize,
     pub fft_size: usize,
 }
@@ -28,8 +26,8 @@ pub struct StreamPreprocessor {
 
 impl StreamPreprocessor {
     pub fn new(
-        descriptor: &ReceiveStreamDescriptor,
-    ) -> (StreamPreprocessor, PreprocessedStreamDescriptor) {
+        descriptor: &ClipDescriptor,
+    ) -> (StreamPreprocessor, PreprocessedClipDescriptor) {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (descriptor.sample_rate / TARGET_BIN_SIZE).ceil() as usize;
         let fft_size = min_fft_size.next_power_of_two();
@@ -44,16 +42,14 @@ impl StreamPreprocessor {
             hann_window: hann_window(fft_size),
             fft,
         };
-        let descriptor = PreprocessedStreamDescriptor {
-            device_id: descriptor.device_id.clone(),
-            stream_index: descriptor.stream_index,
+        let preprocessed_descriptor = PreprocessedClipDescriptor {
             frequency: descriptor.frequency,
             sample_rate: descriptor.sample_rate,
             start_time: descriptor.start_time,
             chunk_size: descriptor.chunk_size,
             fft_size,
         };
-        (processor, descriptor)
+        (processor, preprocessed_descriptor)
     }
 
     pub fn process(&mut self, data: &RawIqSamples) -> Box<[Complex<f32>]> {

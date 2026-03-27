@@ -1,10 +1,8 @@
-use crate::duration_ext::DurationExt;
-use chrono::{DateTime, Duration, TimeDelta, Utc};
 
 /// A custom egui widget for drawing a transmission rectangle on a stream
 pub struct StreamTransmission {
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
+    pub start_time: f64,
+    pub end_time: f64,
     pub freq_min: f32,
     pub freq_max: f32,
 }
@@ -16,26 +14,26 @@ struct StreamTransmissionState<T> {
 
 #[derive(Clone)]
 struct StreamTransmissionInspector<T> {
-    pub time: DateTime<Utc>,
+    pub time: f64,
     pub dragging: bool,
     pub play_lock: bool,
     pub user_data: T,
 }
 
 pub struct StreamInspectorParameters {
-    pub time: DateTime<Utc>,
+    pub time: f64,
     pub seek: bool,
     pub play: bool,
 }
 
 pub struct StreamInspectorResponse {
-    pub time_adj: TimeDelta,
+    pub time_adj: f64,
 }
 
 impl StreamTransmission {
     pub fn new(
-        start_time: DateTime<Utc>,
-        end_time: DateTime<Utc>,
+        start_time: f64,
+        end_time: f64,
         freq_min: f32,
         freq_max: f32,
     ) -> Self {
@@ -55,7 +53,7 @@ impl StreamTransmission {
         ui: &mut egui::Ui,
         figure_rect: egui::Rect,
         viewport: &Viewport,
-        dt: TimeDelta,
+        dt: f64,
         id: egui::Id,
         mut inspector_content: F,
     ) -> egui::Response
@@ -222,12 +220,12 @@ impl StreamTransmission {
 pub struct Viewport {
     pub translation: egui::Vec2,
     pub scale: egui::Vec2,
-    pub reference_time: DateTime<Utc>,
+    pub reference_time: f64,
     pub is_live: bool,
 }
 
 impl Viewport {
-    pub fn new(reference_time: DateTime<Utc>) -> Self {
+    pub fn new(reference_time: f64) -> Self {
         Self {
             translation: egui::Vec2::ZERO,
             scale: egui::vec2(1e-3, 1e3),
@@ -236,10 +234,8 @@ impl Viewport {
         }
     }
 
-    pub fn update_reference_time(&mut self, reference_time: DateTime<Utc>, force_live: bool) {
-        let dt = reference_time
-            .signed_duration_since(self.reference_time)
-            .as_seconds_f32();
+    pub fn update_reference_time(&mut self, reference_time: f64, force_live: bool) {
+        let dt = (reference_time - self.reference_time) as f32;
         if force_live {
             self.translation.y = 0.
         }
@@ -257,11 +253,8 @@ impl Viewport {
     fn screen_space_y_secs(&self, y: f32) -> f32 {
         -y * self.scale.y + self.translation.y
     }
-    pub fn screen_space_y(&self, y: DateTime<Utc>) -> f32 {
-        self.screen_space_y_secs(
-            y.signed_duration_since(self.reference_time)
-                .as_seconds_f32(),
-        )
+    pub fn screen_space_y(&self, y: f64) -> f32 {
+        self.screen_space_y_secs((y - self.reference_time) as f32)
     }
     pub fn canvas_x(&self, x: f32) -> f32 {
         (x - self.translation.x) / self.scale.x
@@ -269,7 +262,7 @@ impl Viewport {
     fn canvas_y_secs(&self, y: f32) -> f32 {
         -(y - self.translation.y) / self.scale.y
     }
-    pub fn canvas_y(&self, y: f32) -> DateTime<Utc> {
-        self.reference_time + Duration::from_secs_f64(self.canvas_y_secs(y) as f64)
+    pub fn canvas_y(&self, y: f32) -> f64 {
+        self.reference_time + self.canvas_y_secs(y) as f64
     }
 }

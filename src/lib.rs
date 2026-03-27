@@ -1,4 +1,4 @@
-// pub mod analysis;
+pub mod analysis;
 pub mod audio;
 pub mod band_info;
 pub mod document;

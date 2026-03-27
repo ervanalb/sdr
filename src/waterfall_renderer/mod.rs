@@ -189,7 +189,7 @@ impl WaterfallRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         uniform_buffer: &wgpu::Buffer,
-        reference_time: DateTime<Utc>,
+        reference_time: f64,
     ) {
         self.draw_calls.clear();
         self.vertices.clear();
@@ -197,12 +197,8 @@ impl WaterfallRenderer {
         for chunk in chunks {
             // Build vertices for all chunks using this texture
             // Calculate time coordinates (Y axis)
-            let y_start = reference_time
-                .signed_duration_since(chunk.end_time)
-                .as_seconds_f32();
-            let y_end = reference_time
-                .signed_duration_since(chunk.start_time)
-                .as_seconds_f32();
+            let y_start = (reference_time - chunk.end_time) as f32;
+            let y_end = (reference_time - chunk.start_time) as f32;
 
             if y_end < y_start {
                 continue;

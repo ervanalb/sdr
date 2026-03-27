@@ -1,8 +1,6 @@
-use chrono::{DateTime, Duration, TimeDelta, Utc};
-// use sdr::analysis::Analysis;
+use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
 use sdr::document::Document;
-use sdr::duration_ext::DurationExt;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::ui::Viewport;
@@ -69,10 +67,9 @@ pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
     _document: &Document,
-    // analysis: &Analysis,
-    reference_time: DateTime<Utc>,
-    dt: TimeDelta,
-    temp_random_instant: DateTime<Utc>,
+    analysis: &Analysis,
+    reference_time: f64,
+    dt: f64,
     force_live: bool,
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
@@ -215,24 +212,16 @@ pub fn ui(
         let i = i.min(AVAILABLE_TIME_GRIDLINES.len() - 1);
         let period = AVAILABLE_TIME_GRIDLINES[i];
         let precision = period.log10() as i32;
-        // TODO: Reference everything from day or hour start instead of this random instant
-        let top = (viewport
-            .canvas_y(0.)
-            .signed_duration_since(temp_random_instant)
-            .as_seconds_f64()
-            / period)
-            .ceil() as i32;
-        let bottom = (viewport
-            .canvas_y(figure_rect.height())
-            .signed_duration_since(temp_random_instant)
-            .as_seconds_f64()
-            / period)
-            .floor() as i32;
+
+        let top_time = viewport.canvas_y(0.);
+        let bottom_time = viewport.canvas_y(figure_rect.height());
+
+        let top = (top_time / period).ceil() as i32;
+        let bottom = (bottom_time / period).floor() as i32;
 
         for i in bottom..top {
             let val = i as f64 * period;
-            let y = figure_rect.top()
-                + viewport.screen_space_y(temp_random_instant + Duration::from_secs_f64(val));
+            let y = figure_rect.top() + viewport.screen_space_y(val);
 
             painter.text(
                 egui::pos2(figure_rect.left() - 6., y),
@@ -327,5 +316,5 @@ pub fn ui(
     }
 
     // Draw processors
-    // analysis.draw(ui, figure_rect, viewport, dt);
+    analysis.draw(ui, figure_rect, viewport, dt);
 }
