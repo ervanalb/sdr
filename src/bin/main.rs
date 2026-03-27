@@ -91,7 +91,7 @@ impl SdrApp {
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
-            viewport_state: Viewport::new(0.0),
+            viewport_state: Viewport::new(),
             processor_parameters,
             document: Document::new(),
             recording: None,

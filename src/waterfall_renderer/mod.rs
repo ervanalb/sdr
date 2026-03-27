@@ -8,7 +8,7 @@ const BUFFER_LEN: usize = 4096;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct WaterfallVertex {
-    position: [f32; 2],    // x = frequency, y = time
+    position: [f32; 2],    // x, y in egui pixel coordinates
     uv: [f32; 2],          // in texel coordinates (u=0..width, v=0..height)
     color_range: [f32; 2], // should be a uniform but its less overhead to pass it here
 }
@@ -188,59 +188,51 @@ impl WaterfallRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         uniform_buffer: &wgpu::Buffer,
-        reference_time: f64,
     ) {
         self.draw_calls.clear();
         self.vertices.clear();
 
         for chunk in chunks {
-            // Build vertices for all chunks using this texture
-            // Calculate time coordinates (Y axis)
-            let y_start = (reference_time - chunk.end_time) as f32;
-            let y_end = (reference_time - chunk.start_time) as f32;
-
-            if y_end < y_start {
-                continue;
-            }
-
-            // Calculate frequency coordinates (X axis)
-            let x_left = chunk.freq_min as f32;
-            let x_right = chunk.freq_max as f32;
+            // Extract pixel coordinates from the rect
+            let x_left = chunk.rect.min.x;
+            let x_right = chunk.rect.max.x;
+            let y_top = chunk.rect.min.y;
+            let y_bottom = chunk.rect.max.y;
 
             // Calculate the V coordinate of one texel
             let color_range = [chunk.min, chunk.max];
 
-            // Create quad as two triangles
+            // Create quad as two triangles (in pixel coordinates)
             let vertices_start = self.vertices.len();
             self.vertices.push(WaterfallVertex {
-                position: [x_left, y_start],
-                uv: [0., chunk.v_end],
-                color_range,
-            });
-            self.vertices.push(WaterfallVertex {
-                position: [x_right, y_start],
-                uv: [1., chunk.v_end],
-                color_range,
-            });
-            self.vertices.push(WaterfallVertex {
-                position: [x_left, y_end],
+                position: [x_left, y_top],
                 uv: [0., 0.],
+                color_range,
+            });
+            self.vertices.push(WaterfallVertex {
+                position: [x_right, y_top],
+                uv: [1., 0.],
+                color_range,
+            });
+            self.vertices.push(WaterfallVertex {
+                position: [x_left, y_bottom],
+                uv: [0., chunk.v_end],
                 color_range,
             });
 
             self.vertices.push(WaterfallVertex {
-                position: [x_left, y_end],
-                uv: [0., 0.],
+                position: [x_left, y_bottom],
+                uv: [0., chunk.v_end],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {
-                position: [x_right, y_start],
-                uv: [1., chunk.v_end],
-                color_range,
-            });
-            self.vertices.push(WaterfallVertex {
-                position: [x_right, y_end],
+                position: [x_right, y_top],
                 uv: [1., 0.],
+                color_range,
+            });
+            self.vertices.push(WaterfallVertex {
+                position: [x_right, y_bottom],
+                uv: [1., chunk.v_end],
                 color_range,
             });
 

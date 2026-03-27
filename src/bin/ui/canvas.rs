@@ -99,48 +99,64 @@ pub fn ui(
 
         // Ctrl + scroll wheel: zoom
         if zoom_delta != 1.0 {
-            let old_scale = viewport.scale;
-            viewport.scale = viewport.scale * zoom_delta.powf(WHEEL_ZOOM_SPEED);
-            viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
+            let old_scale_x = viewport.scale_x;
+            let old_scale_y = viewport.scale_y;
+            let zoom = zoom_delta.powf(WHEEL_ZOOM_SPEED) as f64;
+            viewport.scale_x *= zoom;
+            viewport.scale_y *= zoom;
+            viewport.scale_x = viewport
+                .scale_x
+                .clamp(min_scale.x as f64, (min_scale.x * max_zoom) as f64);
+            viewport.scale_y = viewport
+                .scale_y
+                .clamp(min_scale.y as f64, (min_scale.y * max_zoom) as f64);
 
             // Keep pointer position stationary
             if let Some(pointer_pos) = pointer_pos {
-                let old_translation = viewport.translation;
                 let pointer_canvas = pointer_pos - figure_rect.min;
-                viewport.translation = pointer_canvas
-                    - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
-                if old_translation.y >= 0. {
-                    viewport.translation.y = old_translation.y;
-                }
+                viewport.translation_x = pointer_canvas.x as f64
+                    - (pointer_canvas.x as f64 - viewport.translation_x)
+                        * (viewport.scale_x / old_scale_x);
+                viewport.translation_y = pointer_canvas.y as f64
+                    - (pointer_canvas.y as f64 - viewport.translation_y)
+                        * (viewport.scale_y / old_scale_y);
             }
         }
         // Regular scroll: pan the canvas
-        viewport.translation += scroll_delta * SCROLL_SPEED;
+        viewport.translation_x += (scroll_delta.x * SCROLL_SPEED) as f64;
+        viewport.translation_y += (scroll_delta.y * SCROLL_SPEED) as f64;
     }
 
     // Handle mouse button drag for panning
     if response.dragged_by(egui::PointerButton::Primary) {
         let drag = response.drag_delta();
-        viewport.translation += drag;
+        viewport.translation_x += drag.x as f64;
+        viewport.translation_y += drag.y as f64;
     }
 
     // Handle right mouse button drag for zooming
     if response.dragged_by(egui::PointerButton::Secondary) {
         let pointer_pos = ui.input(|i| i.pointer.latest_pos());
         let drag = response.drag_delta();
-        let old_scale = viewport.scale;
-        viewport.scale =
-            old_scale * egui::vec2(DRAG_ZOOM_SPEED.powf(drag.x), DRAG_ZOOM_SPEED.powf(drag.y));
-        viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
+        let old_scale_x = viewport.scale_x;
+        let old_scale_y = viewport.scale_y;
+        viewport.scale_x *= DRAG_ZOOM_SPEED.powf(drag.x) as f64;
+        viewport.scale_y *= DRAG_ZOOM_SPEED.powf(drag.y) as f64;
+        viewport.scale_x = viewport
+            .scale_x
+            .clamp(min_scale.x as f64, (min_scale.x * max_zoom) as f64);
+        viewport.scale_y = viewport
+            .scale_y
+            .clamp(min_scale.y as f64, (min_scale.y * max_zoom) as f64);
         // Keep pointer position stationary
         if let Some(pointer_pos) = pointer_pos {
-            let old_translation = viewport.translation;
             let pointer_canvas = pointer_pos - figure_rect.min;
-            viewport.translation = pointer_canvas
-                - (pointer_canvas - viewport.translation) * (viewport.scale / old_scale);
-            if old_translation.y >= 0. {
-                viewport.translation.y = old_translation.y;
-            }
+            viewport.translation_x = pointer_canvas.x as f64
+                - (pointer_canvas.x as f64 - viewport.translation_x)
+                    * (viewport.scale_x / old_scale_x);
+            viewport.translation_y = pointer_canvas.y as f64
+                - (pointer_canvas.y as f64 - viewport.translation_y)
+                    * (viewport.scale_y / old_scale_y);
         }
     }
 
@@ -148,24 +164,39 @@ pub fn ui(
     if let Some(multi_touch) = ui.input(|i| i.multi_touch()) {
         // Pinch to zoom
         if multi_touch.zoom_delta != 1.0 {
-            let old_scale = viewport.scale;
-            viewport.scale = old_scale * multi_touch.zoom_delta;
-            viewport.scale = viewport.scale.clamp(min_scale, min_scale * max_zoom);
+            let old_scale_x = viewport.scale_x;
+            let old_scale_y = viewport.scale_y;
+            let zoom = multi_touch.zoom_delta as f64;
+            viewport.scale_x *= zoom;
+            viewport.scale_y *= zoom;
+            viewport.scale_x = viewport
+                .scale_x
+                .clamp(min_scale.x as f64, (min_scale.x * max_zoom) as f64);
+            viewport.scale_y = viewport
+                .scale_y
+                .clamp(min_scale.y as f64, (min_scale.y * max_zoom) as f64);
 
             let gesture_center = multi_touch.translation_delta;
-            viewport.translation = gesture_center
-                - (gesture_center - viewport.translation) * (viewport.scale / old_scale);
+            viewport.translation_x = gesture_center.x as f64
+                - (gesture_center.x as f64 - viewport.translation_x)
+                    * (viewport.scale_x / old_scale_x);
+            viewport.translation_y = gesture_center.y as f64
+                - (gesture_center.y as f64 - viewport.translation_y)
+                    * (viewport.scale_y / old_scale_y);
         }
 
         // Two-finger pan
-        viewport.translation += multi_touch.translation_delta;
+        viewport.translation_x += multi_touch.translation_delta.x as f64;
+        viewport.translation_y += multi_touch.translation_delta.y as f64;
     }
 
-    let max_translation = (viewport.scale * overall_size - figure_size).max(egui::Vec2::ZERO);
+    let max_translation_x =
+        (viewport.scale_x * overall_size.x as f64 - figure_size.x as f64).max(0.0);
+    let max_translation_y =
+        (viewport.scale_y * overall_size.y as f64 - figure_size.y as f64).max(0.0);
 
-    viewport.translation = viewport
-        .translation
-        .clamp(-max_translation, egui::Vec2::ZERO);
+    viewport.translation_x = viewport.translation_x.clamp(-max_translation_x, 0.0);
+    viewport.translation_y = viewport.translation_y.clamp(-max_translation_y, 0.0);
 
     let painter = ui.painter().with_clip_rect(ui_rect);
     let gridline_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -173,7 +204,7 @@ pub fn ui(
 
     // Vertical gridlines
     {
-        let target_gridline_period = TARGET_GRIDLINE_SEPARATION / viewport.scale.x;
+        let target_gridline_period = TARGET_GRIDLINE_SEPARATION as f64 / viewport.scale_x;
         let i = AVAILABLE_FREQUENCY_GRIDLINES
             .partition_point(|&period| period < target_gridline_period as f64);
         let i = i.min(AVAILABLE_FREQUENCY_GRIDLINES.len() - 1);
@@ -184,7 +215,7 @@ pub fn ui(
 
         for i in left..right {
             let val = i as f64 * period;
-            let x = figure_rect.left() + viewport.screen_space_x(val as f32);
+            let x = figure_rect.left() + viewport.screen_space_x(val);
 
             painter.text(
                 egui::pos2(x, figure_rect.top() - 6.),
@@ -203,7 +234,7 @@ pub fn ui(
     }
     // Horizontal gridlines
     {
-        let target_gridline_period = TARGET_GRIDLINE_SEPARATION / viewport.scale.y;
+        let target_gridline_period = TARGET_GRIDLINE_SEPARATION as f64 / viewport.scale_y;
         let i = AVAILABLE_TIME_GRIDLINES
             .partition_point(|&period| period < target_gridline_period as f64);
         let i = i.min(AVAILABLE_TIME_GRIDLINES.len() - 1);
@@ -216,7 +247,7 @@ pub fn ui(
         let top = (top_time / period).ceil() as i32;
         let bottom = (bottom_time / period).floor() as i32;
 
-        for i in bottom..top {
+        for i in top..bottom {
             let val = i as f64 * period;
             let y = figure_rect.top() + viewport.screen_space_y(val);
 
@@ -244,9 +275,8 @@ pub fn ui(
             let channel_right_freq =
                 rx_channel_params.frequency.unwrap() + 0.5 * rx_channel_params.sample_rate.unwrap();
 
-            let rect_left = figure_rect.left() + viewport.screen_space_x(channel_left_freq as f32);
-            let rect_right =
-                figure_rect.left() + viewport.screen_space_x(channel_right_freq as f32);
+            let rect_left = figure_rect.left() + viewport.screen_space_x(channel_left_freq);
+            let rect_right = figure_rect.left() + viewport.screen_space_x(channel_right_freq);
             let rect_bottom = figure_rect.top() - 26.;
             let rect_top = figure_rect.top() - 42.;
             let rect = egui::Rect {
@@ -264,8 +294,7 @@ pub fn ui(
             );
             if response.dragged_by(egui::PointerButton::Primary) {
                 let drag = response.drag_delta();
-                *rx_channel_params.frequency.as_mut().unwrap() +=
-                    (drag.x / viewport.scale.x) as f64;
+                *rx_channel_params.frequency.as_mut().unwrap() += drag.x as f64 / viewport.scale_x;
             }
             paint_elided_text(
                 &painter,
@@ -284,8 +313,8 @@ pub fn ui(
             [(&bands_info.bands, 64.), (&bands_info.allocations, 46.)]
         {
             for band in bands_or_allocations {
-                let rect_left = figure_rect.left() + viewport.screen_space_x(band.min as f32);
-                let rect_right = figure_rect.left() + viewport.screen_space_x(band.max as f32);
+                let rect_left = figure_rect.left() + viewport.screen_space_x(band.min);
+                let rect_right = figure_rect.left() + viewport.screen_space_x(band.max);
                 let rect_bottom = figure_rect.top() - offset;
                 let rect_top = figure_rect.top() - offset - 14.;
                 let rect = egui::Rect {

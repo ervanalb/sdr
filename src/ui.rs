@@ -1,10 +1,9 @@
-
 /// A custom egui widget for drawing a transmission rectangle on a stream
 pub struct StreamTransmission {
     pub start_time: f64,
     pub end_time: f64,
-    pub freq_min: f32,
-    pub freq_max: f32,
+    pub freq_min: f64,
+    pub freq_max: f64,
 }
 
 #[derive(Clone, Default)]
@@ -31,12 +30,7 @@ pub struct StreamInspectorResponse {
 }
 
 impl StreamTransmission {
-    pub fn new(
-        start_time: f64,
-        end_time: f64,
-        freq_min: f32,
-        freq_max: f32,
-    ) -> Self {
+    pub fn new(start_time: f64, end_time: f64, freq_min: f64, freq_max: f64) -> Self {
         Self {
             start_time,
             end_time,
@@ -64,8 +58,8 @@ impl StreamTransmission {
         // Convert to screen coordinates
         let left = figure_rect.left() + viewport.screen_space_x(self.freq_min);
         let right = figure_rect.left() + viewport.screen_space_x(self.freq_max);
-        let bottom = figure_rect.top() + viewport.screen_space_y(self.start_time);
-        let top = figure_rect.top() + viewport.screen_space_y(self.end_time);
+        let top = figure_rect.top() + viewport.screen_space_y(self.start_time);
+        let bottom = figure_rect.top() + viewport.screen_space_y(self.end_time);
 
         // Draw a rectangle around the channel
         let rect = egui::Rect {
@@ -115,12 +109,10 @@ impl StreamTransmission {
                     if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
                         && ui.ctx().input(|i| i.pointer.primary_down())
                     {
-                        if !viewport.is_live {
-                            let y = pointer_pos.y - figure_rect.top();
-                            let time = viewport.canvas_y(y);
-                            inspector.time = time;
-                            seek = true;
-                        }
+                        let y = pointer_pos.y - figure_rect.top();
+                        let time = viewport.canvas_y(y);
+                        inspector.time = time;
+                        seek = true;
                     } else {
                         inspector.dragging = false;
                     }
@@ -169,11 +161,7 @@ impl StreamTransmission {
                                 close = true;
                             }
                             let (enabled, play_text) = if inspector.dragging {
-                                if viewport.is_live {
-                                    (false, "PLAYING")
-                                } else {
-                                    (true, "PAUSED")
-                                }
+                                (true, "PAUSED")
                             } else {
                                 if inspector.play_lock {
                                     (true, "PAUSE")
@@ -191,7 +179,7 @@ impl StreamTransmission {
                             ui,
                             StreamInspectorParameters {
                                 time: inspector.time,
-                                play: inspector.play_lock || inspector.dragging && viewport.is_live,
+                                play: inspector.play_lock,
                                 seek,
                             },
                             &mut inspector.user_data,
@@ -207,7 +195,7 @@ impl StreamTransmission {
 
         // Advance inspector if play = true
         if let Some(inspector) = &mut state.inspector
-            && (inspector.play_lock || inspector.dragging && viewport.is_live)
+            && inspector.play_lock
         {
             inspector.time += dt;
         }
@@ -218,51 +206,32 @@ impl StreamTransmission {
 }
 
 pub struct Viewport {
-    pub translation: egui::Vec2,
-    pub scale: egui::Vec2,
-    pub reference_time: f64,
-    pub is_live: bool,
+    pub translation_x: f64,
+    pub translation_y: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
 }
 
 impl Viewport {
-    pub fn new(reference_time: f64) -> Self {
+    pub fn new() -> Self {
         Self {
-            translation: egui::Vec2::ZERO,
-            scale: egui::vec2(1e-3, 1e3),
-            reference_time,
-            is_live: false,
+            translation_x: 0.0,
+            translation_y: 0.0,
+            scale_x: 1e-3,
+            scale_y: 1e3,
         }
     }
 
-    pub fn update_reference_time(&mut self, reference_time: f64, force_live: bool) {
-        let dt = (reference_time - self.reference_time) as f32;
-        if force_live {
-            self.translation.y = 0.
-        }
-        self.is_live = self.translation.y >= 0.;
-        if !self.is_live {
-            // Auto-scroll to keep viewport stationary
-            self.translation.y -= self.scale.y * dt;
-        }
-        self.reference_time = reference_time;
-    }
-
-    pub fn screen_space_x(&self, x: f32) -> f32 {
-        x * self.scale.x + self.translation.x
-    }
-    fn screen_space_y_secs(&self, y: f32) -> f32 {
-        -y * self.scale.y + self.translation.y
+    pub fn screen_space_x(&self, x: f64) -> f32 {
+        (x * self.scale_x + self.translation_x) as f32
     }
     pub fn screen_space_y(&self, y: f64) -> f32 {
-        self.screen_space_y_secs((y - self.reference_time) as f32)
+        (y * self.scale_y + self.translation_y) as f32
     }
-    pub fn canvas_x(&self, x: f32) -> f32 {
-        (x - self.translation.x) / self.scale.x
-    }
-    fn canvas_y_secs(&self, y: f32) -> f32 {
-        -(y - self.translation.y) / self.scale.y
+    pub fn canvas_x(&self, x: f32) -> f64 {
+        (x as f64 - self.translation_x) / self.scale_x
     }
     pub fn canvas_y(&self, y: f32) -> f64 {
-        self.reference_time + self.canvas_y_secs(y) as f64
+        (y as f64 - self.translation_y) / self.scale_y
     }
 }

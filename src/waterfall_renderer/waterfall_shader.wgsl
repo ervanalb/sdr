@@ -1,8 +1,5 @@
 struct ViewportUniforms {
     viewport_size: vec2<f32>,
-    translation: vec2<f32>,
-    scale: vec2<f32>,
-    _padding: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -21,7 +18,7 @@ var next_waterfall_texture: texture_2d<f32>;
 var waterfall_sampler: sampler;
 
 struct VertexInput {
-    @location(0) position: vec2<f32>,
+    @location(0) position: vec2<f32>,  // in egui pixel coordinates
     @location(1) uv: vec2<f32>,
     @location(2) color_range: vec2<f32>,
 }
@@ -34,11 +31,9 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(vertex: VertexInput) -> VertexOutput {
-    let inv_viewport_size = vec2<f32>(2., -2.) / viewport.viewport_size;
     var out: VertexOutput;
-    // Apply scale and translation, then convert to normalized device coordinates
-    let transformed_position = vertex.position * viewport.scale + viewport.translation;
-    let ndc = transformed_position * inv_viewport_size + vec2<f32>(-1., 1.);
+    // Convert pixel coordinates to normalized device coordinates
+    let ndc = vertex.position * vec2<f32>(2., -2.) / viewport.viewport_size + vec2<f32>(-1., 1.);
     out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = vertex.uv;
     out.color_range_db = 10. * log(vertex.color_range) / log(10.);

@@ -449,8 +449,8 @@ impl ProcessorHistory for FmHistory {
         viewport: &Viewport,
         dt: f64,
     ) {
-        let freq_min = (self.frequency - 0.5 * self.bandwidth) as f32;
-        let freq_max = (self.frequency + 0.5 * self.bandwidth) as f32;
+        let freq_min = self.frequency - 0.5 * self.bandwidth;
+        let freq_max = self.frequency + 0.5 * self.bandwidth;
         for (transmission_id, transmission) in self.transmissions.iter() {
             if transmission.chunks.is_empty() {
                 continue;

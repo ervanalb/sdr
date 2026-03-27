@@ -344,34 +344,45 @@ impl ProcessorHistory for WaterfallHistory {
         let draw_list = self
             .active_clips
             .values()
-            .map(|active_texture| WaterfallDrawInfo {
-                freq_min: active_texture.freq_min,
-                freq_max: active_texture.freq_max,
-                start_time: active_texture.start_time,
-                end_time: active_texture.end_time(),
-                texture: active_texture.texture.clone(),
-                prev_texture: active_texture.prev_texture.clone(),
-                next_texture: self.blank_texture.clone(),
-                min: active_texture.min,
-                max: active_texture.max,
-                v_end: active_texture.current_row as f32 / TEXTURE_HEIGHT as f32,
+            .map(|active_texture| {
+                let x_left = viewport.screen_space_x(active_texture.freq_min);
+                let x_right = viewport.screen_space_x(active_texture.freq_max);
+                let y_start = viewport.screen_space_y(active_texture.start_time);
+                let y_end = viewport.screen_space_y(active_texture.end_time());
+
+                WaterfallDrawInfo {
+                    rect: egui::Rect::from_min_max(
+                        egui::pos2(x_left, y_start),
+                        egui::pos2(x_right, y_end),
+                    ),
+                    texture: active_texture.texture.clone(),
+                    prev_texture: active_texture.prev_texture.clone(),
+                    next_texture: self.blank_texture.clone(),
+                    min: active_texture.min,
+                    max: active_texture.max,
+                    v_end: active_texture.current_row as f32 / TEXTURE_HEIGHT as f32,
+                }
             })
             .chain(self.finished_clips.values().flat_map(|stream| {
-                stream
-                    .textures
-                    .iter()
-                    .map(move |finished_texture| WaterfallDrawInfo {
-                        freq_min: stream.freq_min,
-                        freq_max: stream.freq_max,
-                        start_time: finished_texture.start_time,
-                        end_time: finished_texture.end_time,
+                stream.textures.iter().map(move |finished_texture| {
+                    let x_left = viewport.screen_space_x(stream.freq_min);
+                    let x_right = viewport.screen_space_x(stream.freq_max);
+                    let y_start = viewport.screen_space_y(finished_texture.start_time);
+                    let y_end = viewport.screen_space_y(finished_texture.end_time);
+
+                    WaterfallDrawInfo {
+                        rect: egui::Rect::from_min_max(
+                            egui::pos2(x_left, y_start),
+                            egui::pos2(x_right, y_end),
+                        ),
                         texture: finished_texture.texture.clone(),
                         prev_texture: finished_texture.prev_texture.clone(),
                         next_texture: finished_texture.next_texture.clone(),
                         min: stream.min,
                         max: stream.max,
                         v_end: 1.,
-                    })
+                    }
+                })
             }))
             .collect();
 
@@ -382,10 +393,7 @@ impl ProcessorHistory for WaterfallHistory {
                 Callback {
                     id,
                     viewport_size: figure_rect.size(),
-                    translation: viewport.translation,
-                    scale: viewport.scale,
                     waterfall_chunks: draw_list,
-                    reference_time: viewport.reference_time,
                 },
             ));
     }
@@ -707,10 +715,7 @@ struct FinishedTexture {
 
 #[derive(Debug, Clone)]
 pub struct WaterfallDrawInfo {
-    pub freq_min: f64,
-    pub freq_max: f64,
-    pub start_time: f64,
-    pub end_time: f64,
+    pub rect: egui::Rect, // in pixel coordinates
     pub texture: Texture,
     pub prev_texture: Texture,
     pub next_texture: Texture,
@@ -735,9 +740,6 @@ struct CanvasResources {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ViewportUniforms {
     viewport_size: [f32; 2],
-    translation: [f32; 2],
-    scale: [f32; 2],
-    _padding: [f32; 2],
 }
 
 pub fn static_init(cc: &eframe::CreationContext<'_>) {
@@ -757,10 +759,7 @@ pub fn static_init(cc: &eframe::CreationContext<'_>) {
 struct Callback {
     id: egui::Id,
     viewport_size: egui::Vec2,
-    translation: egui::Vec2,
-    scale: egui::Vec2,
     waterfall_chunks: Vec<WaterfallDrawInfo>,
-    reference_time: f64,
 }
 
 impl egui_wgpu::CallbackTrait for Callback {
@@ -800,9 +799,6 @@ impl egui_wgpu::CallbackTrait for Callback {
         // Update uniform buffer with viewport parameters
         let uniforms = ViewportUniforms {
             viewport_size: [self.viewport_size.x, self.viewport_size.y],
-            translation: [self.translation.x, self.translation.y],
-            scale: [self.scale.x, self.scale.y],
-            _padding: [0.0; 2],
         };
         queue.write_buffer(
             &resources.viewport_uniform_buffer,
@@ -816,7 +812,6 @@ impl egui_wgpu::CallbackTrait for Callback {
             device,
             queue,
             &resources.viewport_uniform_buffer,
-            self.reference_time,
         );
 
         Vec::new()
