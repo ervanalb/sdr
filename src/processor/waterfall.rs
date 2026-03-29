@@ -20,7 +20,7 @@ use wgpu::{
 };
 
 const MIN_QUANTILE: f64 = 0.1;
-const MAX_QUANTILE: f64 = 0.99;
+const MAX_QUANTILE: f64 = 0.999;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -346,15 +346,16 @@ impl ProcessorHistory for WaterfallHistory {
             .values()
             .map(|active_texture| {
                 // X is now time, Y is now frequency
-                let x_start = viewport.screen_space_x(active_texture.start_time);
-                let x_end = viewport.screen_space_x(active_texture.end_time());
-                let y_top = viewport.screen_space_y(active_texture.freq_min);
-                let y_bottom = viewport.screen_space_y(active_texture.freq_max);
+                // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
+                let x_left = viewport.screen_space_x(active_texture.start_time);
+                let x_right = viewport.screen_space_x(active_texture.end_time());
+                let y_top = viewport.screen_space_y(active_texture.freq_max);
+                let y_bottom = viewport.screen_space_y(active_texture.freq_min);
 
                 WaterfallDrawInfo {
                     rect: egui::Rect::from_min_max(
-                        egui::pos2(x_start, y_top),
-                        egui::pos2(x_end, y_bottom),
+                        egui::pos2(x_left, y_top),
+                        egui::pos2(x_right, y_bottom),
                     ),
                     texture: active_texture.texture.clone(),
                     prev_texture: active_texture.prev_texture.clone(),
@@ -367,10 +368,11 @@ impl ProcessorHistory for WaterfallHistory {
             .chain(self.finished_clips.values().flat_map(|stream| {
                 stream.textures.iter().map(move |finished_texture| {
                     // X is now time, Y is now frequency
+                    // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
                     let x_start = viewport.screen_space_x(finished_texture.start_time);
                     let x_end = viewport.screen_space_x(finished_texture.end_time);
-                    let y_top = viewport.screen_space_y(stream.freq_min);
-                    let y_bottom = viewport.screen_space_y(stream.freq_max);
+                    let y_top = viewport.screen_space_y(stream.freq_max);
+                    let y_bottom = viewport.screen_space_y(stream.freq_min);
 
                     WaterfallDrawInfo {
                         rect: egui::Rect::from_min_max(

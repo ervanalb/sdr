@@ -206,33 +206,33 @@ impl WaterfallRenderer {
             let vertices_start = self.vertices.len();
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_top],
-                uv: [0., 0.],
+                uv: [1., 0.],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_right, y_top],
-                uv: [0., chunk.v_end],
+                uv: [1., chunk.v_end],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_bottom],
-                uv: [1., 0.],
+                uv: [0., 0.],
                 color_range,
             });
 
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_bottom],
-                uv: [1., 0.],
+                uv: [0., 0.],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_right, y_top],
-                uv: [0., chunk.v_end],
+                uv: [1., chunk.v_end],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_right, y_bottom],
-                uv: [1., chunk.v_end],
+                uv: [0., chunk.v_end],
                 color_range,
             });
 

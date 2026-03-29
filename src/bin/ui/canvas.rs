@@ -1,5 +1,5 @@
 use egui::Stroke;
-use egui::epaint::TextShape;
+use egui::epaint::{MarginF32, TextShape};
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
 use sdr::document::Document;
@@ -10,7 +10,7 @@ use sdr::ui::Viewport;
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
 const DRAG_ZOOM_SPEED: f32 = 1.01;
-const TARGET_GRIDLINE_SEPARATION: f32 = 80.;
+const TARGET_GRIDLINE_SEPARATION: f32 = 40.;
 
 const AVAILABLE_FREQUENCY_GRIDLINES: [f64; 15] = [
     1e2, 5e2, 1e3, 5e3, 1e4, 5e4, 1e5, 5e5, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8, 1e9,
@@ -102,9 +102,12 @@ pub fn ui(
     let ui_size = ui.available_size();
     let (ui_rect, response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
     let figure_rect = ui_rect
-        .clone()
-        .with_min_x(ui_rect.min.x + 154.)
-        .with_min_y(ui_rect.min.y + 24.);
+        + MarginF32 {
+            left: -154.,
+            right: 0.,
+            top: -12.,
+            bottom: -24.,
+        };
     let figure_size = figure_rect.size();
 
     let overall_size = egui::vec2(120., highest_freq as f32);
@@ -218,15 +221,18 @@ pub fn ui(
         (viewport.scale_x * overall_size.x as f64 - figure_size.x as f64).max(0.0);
     let max_translation_y =
         (viewport.scale_y * overall_size.y as f64 - figure_size.y as f64).max(0.0);
+    let offset_y = figure_size.y as f64;
 
     viewport.translation_x = viewport.translation_x.clamp(-max_translation_x, 0.0);
-    viewport.translation_y = viewport.translation_y.clamp(-max_translation_y, 0.0);
+    viewport.translation_y = viewport
+        .translation_y
+        .clamp(offset_y, max_translation_y + offset_y);
 
     let painter = ui.painter().with_clip_rect(ui_rect);
     let gridline_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     let gridline_text_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
 
-    // Vertical gridlines (time)
+    // X-axis gridlines
     {
         let target_gridline_period = TARGET_GRIDLINE_SEPARATION as f64 / viewport.scale_x;
         let i = AVAILABLE_TIME_GRIDLINES
@@ -237,13 +243,13 @@ pub fn ui(
         let left = (viewport.canvas_x(0.) as f64 / period).ceil() as i32;
         let right = (viewport.canvas_x(figure_rect.width()) as f64 / period).floor() as i32;
 
-        for i in left..right {
+        for i in left..=right {
             let val = i as f64 * period;
             let x = figure_rect.left() + viewport.screen_space_x(val);
 
             painter.text(
-                egui::pos2(x, figure_rect.top() - 6.),
-                egui::Align2::CENTER_BOTTOM,
+                egui::pos2(x, figure_rect.bottom() + 6.),
+                egui::Align2::CENTER_TOP,
                 format_time(val, precision),
                 egui::FontId::proportional(12.),
                 gridline_text_color,
@@ -252,7 +258,7 @@ pub fn ui(
             painter.vline(x, figure_rect.top()..=figure_rect.bottom(), gridline_stroke);
         }
     }
-    // Horizontal gridlines (frequency)
+    // Y-axis gridlines
     {
         let target_gridline_period = TARGET_GRIDLINE_SEPARATION as f64 / viewport.scale_y;
         let i = AVAILABLE_FREQUENCY_GRIDLINES
@@ -261,13 +267,13 @@ pub fn ui(
         let period = AVAILABLE_FREQUENCY_GRIDLINES[i];
         let precision = period.log10() as i32;
 
-        let top_freq = viewport.canvas_y(0.);
-        let bottom_freq = viewport.canvas_y(figure_rect.height());
+        let max_freq = viewport.canvas_y(0.);
+        let min_freq = viewport.canvas_y(figure_rect.height());
 
-        let top = (top_freq / period).ceil() as i32;
-        let bottom = (bottom_freq / period).floor() as i32;
+        let bottom = (min_freq / period).ceil() as i32;
+        let top = (max_freq / period).floor() as i32;
 
-        for i in top..bottom {
+        for i in bottom..=top {
             let val = i as f64 * period;
             let y = figure_rect.top() + viewport.screen_space_y(val);
 
@@ -293,8 +299,9 @@ pub fn ui(
 
             let rect_left = figure_rect.left() - 114.;
             let rect_right = rect_left + BAR_WIDTH;
-            let rect_top = figure_rect.top() + viewport.screen_space_y(channel_min_freq);
-            let rect_bottom = figure_rect.top() + viewport.screen_space_y(channel_max_freq);
+            // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
+            let rect_top = figure_rect.top() + viewport.screen_space_y(channel_max_freq);
+            let rect_bottom = figure_rect.top() + viewport.screen_space_y(channel_min_freq);
             let rect = egui::Rect {
                 min: egui::pos2(rect_left, rect_top),
                 max: egui::pos2(rect_right, rect_bottom),
@@ -310,7 +317,8 @@ pub fn ui(
             );
             if response.dragged_by(egui::PointerButton::Primary) {
                 let drag = response.drag_delta();
-                *rx_channel_params.frequency.as_mut().unwrap() += drag.y as f64 / viewport.scale_y;
+                // Y axis is flipped, so negate the drag delta
+                *rx_channel_params.frequency.as_mut().unwrap() -= drag.y as f64 / viewport.scale_y;
             }
             paint_elided_text(
                 &painter,
@@ -332,8 +340,9 @@ pub fn ui(
             for band in bands_or_allocations {
                 let rect_left = figure_rect.left() - offset;
                 let rect_right = figure_rect.left() - offset + BAR_WIDTH;
-                let rect_top = figure_rect.top() + viewport.screen_space_y(band.min);
-                let rect_bottom = figure_rect.top() + viewport.screen_space_y(band.max);
+                // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
+                let rect_top = figure_rect.top() + viewport.screen_space_y(band.max);
+                let rect_bottom = figure_rect.top() + viewport.screen_space_y(band.min);
                 let rect = egui::Rect {
                     min: egui::pos2(rect_left, rect_top),
                     max: egui::pos2(rect_right, rect_bottom),

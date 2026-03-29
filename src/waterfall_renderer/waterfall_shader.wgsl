@@ -67,8 +67,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Convert to dB
     let db = 10. * log(value) / log(10.);
 
+    // Normalize within the dB range of interest
+    let norm = (db - in.color_range_db.x) / (in.color_range_db.y - in.color_range_db.x);
+    let norm_clamped = clamp(norm, 0., 1.);
+
     // Convert to color
-    let color = jet_colormap((db - in.color_range_db.x) / (in.color_range_db.y - in.color_range_db.x));
+    let color = jet_colormap(norm_clamped);
 
     return vec4<f32>(color, 1.0);
 }

@@ -56,10 +56,11 @@ impl StreamTransmission {
         T: Clone + Default + Send + Sync + 'static,
     {
         // Convert to screen coordinates (X=time, Y=frequency)
+        // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
         let left = figure_rect.left() + viewport.screen_space_x(self.start_time);
         let right = figure_rect.left() + viewport.screen_space_x(self.end_time);
-        let top = figure_rect.top() + viewport.screen_space_y(self.freq_min);
-        let bottom = figure_rect.top() + viewport.screen_space_y(self.freq_max);
+        let top = figure_rect.top() + viewport.screen_space_y(self.freq_max);
+        let bottom = figure_rect.top() + viewport.screen_space_y(self.freq_min);
 
         // Draw a rectangle around the channel
         let rect = egui::Rect {
@@ -227,14 +228,14 @@ impl Viewport {
     pub fn screen_space_x(&self, time: f64) -> f32 {
         (time * self.scale_x + self.translation_x) as f32
     }
-    // Y axis is frequency
+    // Y axis is frequency (negated so high frequencies are at top)
     pub fn screen_space_y(&self, freq: f64) -> f32 {
-        (freq * self.scale_y + self.translation_y) as f32
+        (-freq * self.scale_y + self.translation_y) as f32
     }
     pub fn canvas_x(&self, x: f32) -> f64 {
         (x as f64 - self.translation_x) / self.scale_x
     }
     pub fn canvas_y(&self, y: f32) -> f64 {
-        (y as f64 - self.translation_y) / self.scale_y
+        -(y as f64 - self.translation_y) / self.scale_y
     }
 }
