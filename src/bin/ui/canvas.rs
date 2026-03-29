@@ -1,5 +1,5 @@
-use egui::Stroke;
 use egui::epaint::{MarginF32, TextShape};
+use egui::{Stroke, vec2};
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
 use sdr::document::Document;
@@ -109,9 +109,9 @@ pub fn ui(
             bottom: -24.,
         };
     let figure_size = figure_rect.size();
-
-    let overall_size = egui::vec2(120., highest_freq as f32);
-    let min_scale = figure_size / overall_size;
+    let min_scale_y = figure_size.y / highest_freq as f32;
+    let min_scale_x = min_scale_y * 1e6; // Difference in dynamic range between default scales of X and Y axes
+    let min_scale = vec2(min_scale_x, min_scale_y);
     let max_zoom = 1e9;
 
     // Handle scroll and zoom
@@ -217,13 +217,12 @@ pub fn ui(
         viewport.translation_y += multi_touch.translation_delta.y as f64;
     }
 
-    let max_translation_x =
-        (viewport.scale_x * overall_size.x as f64 - figure_size.x as f64).max(0.0);
-    let max_translation_y =
-        (viewport.scale_y * overall_size.y as f64 - figure_size.y as f64).max(0.0);
+    //let max_translation_x =
+    //    (viewport.scale_x * overall_size.x as f64 - figure_size.x as f64).max(0.0);
+    let max_translation_y = (viewport.scale_y * highest_freq - figure_size.y as f64).max(0.0);
     let offset_y = figure_size.y as f64;
 
-    viewport.translation_x = viewport.translation_x.clamp(-max_translation_x, 0.0);
+    viewport.translation_x = viewport.translation_x.min(0.0);
     viewport.translation_y = viewport
         .translation_y
         .clamp(offset_y, max_translation_y + offset_y);

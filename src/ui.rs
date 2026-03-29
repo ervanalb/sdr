@@ -102,20 +102,20 @@ impl StreamTransmission {
                         play_lock: false,
                         user_data: Default::default(),
                     });
-                    seek = true;
                 }
             }
             Some(inspector) => {
                 if inspector.dragging {
-                    if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
-                        && ui.ctx().input(|i| i.pointer.primary_down())
-                    {
-                        let x = pointer_pos.x - figure_rect.left();
-                        let time = viewport.canvas_x(x);
-                        inspector.time = time;
-                        seek = true;
-                    } else {
-                        inspector.dragging = false;
+                    if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
+                        if !ui.ctx().input(|i| i.pointer.primary_down()) {
+                            // Set inspector time on mouse button release
+                            if !inspector.play_lock {
+                                let x = pointer_pos.x - figure_rect.left();
+                                let time = viewport.canvas_x(x);
+                                inspector.time = time;
+                            }
+                            inspector.dragging = false;
+                        }
                     }
                 } else {
                     if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
@@ -162,7 +162,7 @@ impl StreamTransmission {
                                 close = true;
                             }
                             let (enabled, play_text) = if inspector.dragging {
-                                (true, "PAUSED")
+                                (false, "PLAYING")
                             } else {
                                 if inspector.play_lock {
                                     (true, "PAUSE")
@@ -173,6 +173,7 @@ impl StreamTransmission {
                             let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
                             if play_button.clicked() {
                                 inspector.play_lock = !inspector.play_lock;
+                                seek = true;
                             }
                         });
                         ui.separator();
@@ -180,7 +181,7 @@ impl StreamTransmission {
                             ui,
                             StreamInspectorParameters {
                                 time: inspector.time,
-                                play: inspector.play_lock,
+                                play: inspector.play_lock || inspector.dragging,
                                 seek,
                             },
                             &mut inspector.user_data,
@@ -196,7 +197,7 @@ impl StreamTransmission {
 
         // Advance inspector if play = true
         if let Some(inspector) = &mut state.inspector
-            && inspector.play_lock
+            && (inspector.play_lock || inspector.dragging)
         {
             inspector.time += dt;
         }
