@@ -55,11 +55,11 @@ impl StreamTransmission {
         F: FnMut(&mut egui::Ui, StreamInspectorParameters, &mut T) -> StreamInspectorResponse,
         T: Clone + Default + Send + Sync + 'static,
     {
-        // Convert to screen coordinates
-        let left = figure_rect.left() + viewport.screen_space_x(self.freq_min);
-        let right = figure_rect.left() + viewport.screen_space_x(self.freq_max);
-        let top = figure_rect.top() + viewport.screen_space_y(self.start_time);
-        let bottom = figure_rect.top() + viewport.screen_space_y(self.end_time);
+        // Convert to screen coordinates (X=time, Y=frequency)
+        let left = figure_rect.left() + viewport.screen_space_x(self.start_time);
+        let right = figure_rect.left() + viewport.screen_space_x(self.end_time);
+        let top = figure_rect.top() + viewport.screen_space_y(self.freq_min);
+        let bottom = figure_rect.top() + viewport.screen_space_y(self.freq_max);
 
         // Draw a rectangle around the channel
         let rect = egui::Rect {
@@ -93,8 +93,8 @@ impl StreamTransmission {
                     && response.hovered()
                     && ui.ctx().input(|i| i.pointer.primary_down())
                 {
-                    let y = pointer_pos.y - figure_rect.top();
-                    let time = viewport.canvas_y(y);
+                    let x = pointer_pos.x - figure_rect.left();
+                    let time = viewport.canvas_x(x);
                     state.inspector = Some(StreamTransmissionInspector {
                         time,
                         dragging: true,
@@ -109,8 +109,8 @@ impl StreamTransmission {
                     if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
                         && ui.ctx().input(|i| i.pointer.primary_down())
                     {
-                        let y = pointer_pos.y - figure_rect.top();
-                        let time = viewport.canvas_y(y);
+                        let x = pointer_pos.x - figure_rect.left();
+                        let time = viewport.canvas_x(x);
                         inspector.time = time;
                         seek = true;
                     } else {
@@ -121,8 +121,8 @@ impl StreamTransmission {
                         && response.hovered()
                         && ui.ctx().input(|i| i.pointer.primary_down())
                     {
-                        let y = pointer_pos.y - figure_rect.top();
-                        let time = viewport.canvas_y(y);
+                        let x = pointer_pos.x - figure_rect.left();
+                        let time = viewport.canvas_x(x);
                         inspector.time = time;
                         inspector.dragging = true;
                         seek = true;
@@ -140,15 +140,15 @@ impl StreamTransmission {
 
         let mut close = false;
         if let Some(inspector) = &mut state.inspector {
-            // Draw horizontal line across the rectangle in the same color as the outline
-            let y = figure_rect.top() + viewport.screen_space_y(inspector.time);
+            // Draw vertical line across the rectangle in the same color as the outline
+            let x = figure_rect.left() + viewport.screen_space_x(inspector.time);
             painter.line_segment(
-                [egui::pos2(left, y), egui::pos2(right, y)],
+                [egui::pos2(x, top), egui::pos2(x, bottom)],
                 egui::Stroke::new(2.0, visuals.fg_stroke.color),
             );
 
             // Draw inspector panel to the right of the rectangle
-            let panel_pos = egui::pos2(right + 10.0, y);
+            let panel_pos = egui::pos2(x, bottom + 10.0);
             egui::Area::new(id.with("inspector"))
                 .fixed_pos(panel_pos)
                 .order(egui::Order::Foreground)
@@ -205,6 +205,7 @@ impl StreamTransmission {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Viewport {
     pub translation_x: f64,
     pub translation_y: f64,
@@ -217,16 +218,18 @@ impl Viewport {
         Self {
             translation_x: 0.0,
             translation_y: 0.0,
-            scale_x: 1e-3,
-            scale_y: 1e3,
+            scale_x: 1e3,  // X is time
+            scale_y: 1e-3, // Y is frequency
         }
     }
 
-    pub fn screen_space_x(&self, x: f64) -> f32 {
-        (x * self.scale_x + self.translation_x) as f32
+    // X axis is time
+    pub fn screen_space_x(&self, time: f64) -> f32 {
+        (time * self.scale_x + self.translation_x) as f32
     }
-    pub fn screen_space_y(&self, y: f64) -> f32 {
-        (y * self.scale_y + self.translation_y) as f32
+    // Y axis is frequency
+    pub fn screen_space_y(&self, freq: f64) -> f32 {
+        (freq * self.scale_y + self.translation_y) as f32
     }
     pub fn canvas_x(&self, x: f32) -> f64 {
         (x as f64 - self.translation_x) / self.scale_x

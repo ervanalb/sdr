@@ -345,15 +345,16 @@ impl ProcessorHistory for WaterfallHistory {
             .active_clips
             .values()
             .map(|active_texture| {
-                let x_left = viewport.screen_space_x(active_texture.freq_min);
-                let x_right = viewport.screen_space_x(active_texture.freq_max);
-                let y_start = viewport.screen_space_y(active_texture.start_time);
-                let y_end = viewport.screen_space_y(active_texture.end_time());
+                // X is now time, Y is now frequency
+                let x_start = viewport.screen_space_x(active_texture.start_time);
+                let x_end = viewport.screen_space_x(active_texture.end_time());
+                let y_top = viewport.screen_space_y(active_texture.freq_min);
+                let y_bottom = viewport.screen_space_y(active_texture.freq_max);
 
                 WaterfallDrawInfo {
                     rect: egui::Rect::from_min_max(
-                        egui::pos2(x_left, y_start),
-                        egui::pos2(x_right, y_end),
+                        egui::pos2(x_start, y_top),
+                        egui::pos2(x_end, y_bottom),
                     ),
                     texture: active_texture.texture.clone(),
                     prev_texture: active_texture.prev_texture.clone(),
@@ -365,15 +366,16 @@ impl ProcessorHistory for WaterfallHistory {
             })
             .chain(self.finished_clips.values().flat_map(|stream| {
                 stream.textures.iter().map(move |finished_texture| {
-                    let x_left = viewport.screen_space_x(stream.freq_min);
-                    let x_right = viewport.screen_space_x(stream.freq_max);
-                    let y_start = viewport.screen_space_y(finished_texture.start_time);
-                    let y_end = viewport.screen_space_y(finished_texture.end_time);
+                    // X is now time, Y is now frequency
+                    let x_start = viewport.screen_space_x(finished_texture.start_time);
+                    let x_end = viewport.screen_space_x(finished_texture.end_time);
+                    let y_top = viewport.screen_space_y(stream.freq_min);
+                    let y_bottom = viewport.screen_space_y(stream.freq_max);
 
                     WaterfallDrawInfo {
                         rect: egui::Rect::from_min_max(
-                            egui::pos2(x_left, y_start),
-                            egui::pos2(x_right, y_end),
+                            egui::pos2(x_start, y_top),
+                            egui::pos2(x_end, y_bottom),
                         ),
                         texture: finished_texture.texture.clone(),
                         prev_texture: finished_texture.prev_texture.clone(),
