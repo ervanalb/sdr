@@ -5,9 +5,9 @@ use eframe::egui;
 use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
 use sdr::document::{Document, RecordingId};
+use sdr::document_graphics::DocumentGraphics;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::fm::FmProcessorParameters;
-use sdr::processor::waterfall::WaterfallProcessorParameters;
 use sdr::processor::{CreationContext, ProcessorParameters};
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
@@ -53,6 +53,7 @@ struct SdrApp {
     viewport_state: Viewport,
     processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
     document: Document,
+    document_graphics: DocumentGraphics,
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
     prev_time: DateTime<Utc>,
@@ -63,7 +64,8 @@ struct SdrApp {
 impl SdrApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        sdr::processor::waterfall::static_init(cc);
+        sdr::document_graphics::static_init(cc);
+        let wgpu_render_state = cc.wgpu_render_state.as_ref().unwrap();
         let now = Utc::now();
 
         // Load bands info from JSON file included at compile time
@@ -71,10 +73,6 @@ impl SdrApp {
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
 
         let mut processor_parameters = BTreeMap::<ProcessorId, ProcessorParameters>::new();
-        processor_parameters.insert(
-            0,
-            ProcessorParameters::Waterfall(WaterfallProcessorParameters {}),
-        );
 
         let tmp_freq = 90.9e6;
 
@@ -94,6 +92,10 @@ impl SdrApp {
             viewport_state: Viewport::new(),
             processor_parameters,
             document: Document::new(),
+            document_graphics: DocumentGraphics::new(
+                &wgpu_render_state.device,
+                &wgpu_render_state.queue,
+            ),
             recording: None,
             analysis: Analysis::new(),
             prev_time: now,
@@ -142,6 +144,13 @@ impl eframe::App for SdrApp {
         // Expire old chunks
         // TODO: bring back expire
         //self.document.expire(todo!());
+
+        // Update document graphics (waterfalls)
+        self.document_graphics.process(&self.document);
+
+        // Expire old graphics
+        // TODO: bring back expire
+        //self.document_graphics.expire(todo!());
 
         self.analysis.process(
             &mut self.processor_parameters,
@@ -333,14 +342,13 @@ impl eframe::App for SdrApp {
 
             let freq = match self.processor_parameters.get_mut(&1).unwrap() {
                 ProcessorParameters::Fm(p) => &mut p.frequency,
-                _ => panic!(),
             };
             ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
 
             self::ui::canvas::ui(
                 ui,
                 &mut self.viewport_state,
-                &self.document,
+                &self.document_graphics,
                 &self.analysis,
                 &mut self.playhead,
                 dt,

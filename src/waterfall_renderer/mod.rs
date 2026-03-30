@@ -1,9 +1,18 @@
 use eframe::wgpu;
 use std::ops::Range;
 
-use crate::processor::waterfall::WaterfallDrawInfo;
-
 const BUFFER_LEN: usize = 4096;
+
+#[derive(Debug, Clone)]
+pub struct WaterfallDrawInfo {
+    pub rect: egui::Rect, // in pixel coordinates
+    pub texture: wgpu::Texture,
+    pub prev_texture: wgpu::Texture,
+    pub next_texture: wgpu::Texture,
+    pub min: f32,
+    pub max: f32,
+    pub v_end: f32, // for active (partially filled) texture, the highest valid V component of UV coordinate
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]

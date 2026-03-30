@@ -2,7 +2,7 @@ use egui::epaint::{MarginF32, TextShape};
 use egui::{Stroke, vec2};
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
-use sdr::document::Document;
+use sdr::document_graphics::DocumentGraphics;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::ui::Viewport;
@@ -90,7 +90,7 @@ fn paint_elided_text(
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
-    _document: &Document,
+    document_graphics: &DocumentGraphics,
     analysis: &Analysis,
     _playhead: &mut f64,
     dt: f64,
@@ -366,6 +366,9 @@ pub fn ui(
             }
         }
     }
+
+    // Draw clips (waterfall)
+    document_graphics.draw(ui, figure_rect, viewport);
 
     // Draw processors
     analysis.draw(ui, figure_rect, viewport, dt);

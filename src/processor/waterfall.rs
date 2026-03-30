@@ -717,17 +717,6 @@ struct FinishedTexture {
     end_time: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct WaterfallDrawInfo {
-    pub rect: egui::Rect, // in pixel coordinates
-    pub texture: Texture,
-    pub prev_texture: Texture,
-    pub next_texture: Texture,
-    pub min: f32,
-    pub max: f32,
-    pub v_end: f32, // for active (partially filled) texture, the highest valid V component of UV coordinate
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 
 pub struct StaticResources {

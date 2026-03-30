@@ -12,3 +12,4 @@ pub mod processor;
 pub mod seqdeque;
 pub mod ui;
 pub mod waterfall_renderer;
+pub mod document_graphics;

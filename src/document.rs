@@ -21,6 +21,24 @@ pub struct ClipDescriptor {
     pub chunk_size: usize,
 }
 
+impl ClipDescriptor {
+    pub fn time(&self, index: f64) -> f64 {
+        self.start_time + index * self.chunk_size as f64 / self.sample_rate
+    }
+
+    pub fn index(&self, time: f64) -> f64 {
+        (time - self.start_time) * self.sample_rate / self.chunk_size as f64
+    }
+
+    pub fn freq_min(&self) -> f64 {
+        self.frequency - 0.5 * self.sample_rate
+    }
+
+    pub fn freq_max(&self) -> f64 {
+        self.frequency + 0.5 * self.sample_rate
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Clip {
     pub descriptor: ClipDescriptor,
@@ -164,11 +182,12 @@ impl Document {
                 // Convert retain_time to retain_index
                 // (the index into clip.chunks where retain_time sits)
                 // by shifting & scaling by the chunk rate
-                let retain_index = clip.chunks.start_index() as f64
-                    + (retain_time - clip.descriptor.start_time) * clip.descriptor.sample_rate
-                        / clip.descriptor.chunk_size as f64;
-                let retain_index = retain_index.floor() as usize;
-                let retain_index = retain_index.min(clip.chunks.end_index());
+                let retain_index = clip.descriptor.index(retain_time);
+                let retain_index = retain_index.clamp(
+                    clip.chunks.start_index() as f64,
+                    clip.chunks.end_index() as f64,
+                );
+                let retain_index = retain_index as usize;
                 clip.chunks.remove_front(retain_index);
 
                 // Retain empty clips that are part of an active recording
