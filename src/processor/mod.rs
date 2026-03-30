@@ -12,10 +12,11 @@ pub enum ProcessorParameters {
 impl ProcessorParameters {
     pub fn create_processor(
         &self,
-        cc: &CreationContext<'_>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         match self {
-            ProcessorParameters::Fm(p) => p.create_processor(cc),
+            ProcessorParameters::Fm(p) => p.create_processor(device, queue),
         }
     }
 }

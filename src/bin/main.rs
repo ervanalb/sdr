@@ -97,7 +97,7 @@ impl SdrApp {
                 &wgpu_render_state.queue,
             ),
             recording: None,
-            analysis: Analysis::new(),
+            analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
             prev_time: now,
             bands_info,
             playhead: 0.,
@@ -115,10 +115,6 @@ impl eframe::App for SdrApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
-
-        let Some(wgpu_render_state) = frame.wgpu_render_state() else {
-            return;
-        };
 
         let Some(hardware) = &mut self.hardware else {
             return;
@@ -152,14 +148,8 @@ impl eframe::App for SdrApp {
         // TODO: bring back expire
         //self.document_graphics.expire(todo!());
 
-        self.analysis.process(
-            &mut self.processor_parameters,
-            &CreationContext {
-                device: &wgpu_render_state.device,
-                queue: &wgpu_render_state.queue,
-            },
-            &self.document,
-        );
+        self.analysis
+            .process(&mut self.processor_parameters, &self.document);
         // TODO: bring back expire
         //self.analysis.expire(todo!());
 

@@ -19,7 +19,7 @@ use crate::{
     },
     id_factory::IdFactory,
     preprocessor::PreprocessedClipDescriptor,
-    processor::{CreationContext, Processor, ProcessorHistory},
+    processor::{Processor, ProcessorHistory},
     seqdeque::SeqDeque,
     ui::{StreamInspectorParameters, StreamInspectorResponse, StreamTransmission, Viewport},
 };
@@ -40,7 +40,8 @@ pub struct FmProcessorParameters {
 impl FmProcessorParameters {
     pub fn create_processor(
         &self,
-        _cc: &CreationContext<'_>,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         let (sender, receiver) = channel();
         let processor = FmProcessor::new(self, sender);

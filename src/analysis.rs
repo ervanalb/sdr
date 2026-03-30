@@ -2,7 +2,7 @@ use crate::{
     document::{Clip, ClipId, Document},
     id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
-    processor::{CreationContext, Processor, ProcessorHistory, ProcessorParameters},
+    processor::{Processor, ProcessorHistory, ProcessorParameters},
 };
 use rayon::prelude::*;
 use std::{
@@ -200,10 +200,12 @@ pub struct Analysis {
     processors: BTreeMap<ProcessorId, MainThreadProcessorState>,
     processing_thread_sender: Sender<ProcessingInputMessage>,
     _processing_thread_handle: JoinHandle<()>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
 }
 
 impl Analysis {
-    pub fn new() -> Analysis {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Analysis {
         let (main_thread_sender, child_thread_receiver) = channel::<ProcessingInputMessage>();
 
         let _processing_thread_handle = spawn(move || {
@@ -215,13 +217,14 @@ impl Analysis {
             processors: BTreeMap::new(),
             processing_thread_sender: main_thread_sender,
             _processing_thread_handle,
+            device: device.clone(),
+            queue: queue.clone(),
         }
     }
 
     pub fn process(
         &mut self,
         processor_parameters: &mut BTreeMap<ProcessorId, ProcessorParameters>,
-        cc: &CreationContext<'_>,
         document: &Document,
     ) {
         // 1. Add & remove processor states
@@ -237,7 +240,8 @@ impl Analysis {
         let mut new_processors = vec![];
         for (processor_id, processor_parameters) in processor_parameters.iter() {
             if !self.processors.contains_key(processor_id) {
-                let (processor, history) = processor_parameters.create_processor(cc);
+                let (processor, history) =
+                    processor_parameters.create_processor(&self.device, &self.queue);
                 let instance_id = self.instance_id_factory.create();
                 self.processors.insert(
                     *processor_id,
@@ -257,7 +261,7 @@ impl Analysis {
             if parameters != &processor_state.last_parameters {
                 removed_processors.push(processor_state.instance_id);
                 let instance_id = self.instance_id_factory.create();
-                let (processor, history) = parameters.create_processor(cc);
+                let (processor, history) = parameters.create_processor(&self.device, &self.queue);
                 *processor_state = MainThreadProcessorState {
                     instance_id,
                     last_parameters: parameters.clone(),
