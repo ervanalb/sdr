@@ -135,7 +135,7 @@ impl Cursor {
                 ClipCursor::Before => {
                     // Transition from Before to Index(start_index)
                     *clip_cursor = ClipCursor::Index(clip.chunks.start_index());
-                    Some(Event::ClipStart(clip_id))
+                    Some(Some(Event::ClipStart(clip_id)))
                 }
                 ClipCursor::Index(chunk_index) => {
                     if chunk_index < clip.chunks.end_index() {
@@ -143,27 +143,28 @@ impl Cursor {
                         let event = Event::Chunk(clip_id, chunk_index);
                         // Advance to next chunk
                         *clip_cursor = ClipCursor::Index(chunk_index + 1);
-                        Some(event)
+                        Some(Some(event))
                     } else {
                         // We're at the end of available chunks
                         if document.active_clips.contains(&clip_id) {
-                            // Clip is still active, don't advance to After
-                            None
+                            // Clip is still active, don't advance to After,
+                            // and furthermore, stop iteration here
+                            Some(None) // Return None; don't try to advance a different clip
                         } else {
                             // Clip is finished, transition to After
                             *clip_cursor = ClipCursor::After;
-                            Some(Event::ClipEnd(clip_id))
+                            Some(Some(Event::ClipEnd(clip_id)))
                         }
                     }
                 }
                 ClipCursor::After => {
-                    // Already finished, nothing to do
-                    None
+                    // Already finished, nothing to do on this clip
+                    None // Don't return; try to advance a different clip
                 }
             };
 
             // If we got an event, return it; otherwise try the next clip
-            if event.is_some() {
+            if let Some(event) = event {
                 return event;
             }
         }
