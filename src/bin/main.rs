@@ -132,6 +132,9 @@ impl eframe::App for SdrApp {
         if let Some(recording_id) = &self.recording {
             self.document
                 .update_recording(recording_id, hardware_results);
+
+            // Advance playhead during recording
+            self.playhead += dt;
         }
 
         // Update document

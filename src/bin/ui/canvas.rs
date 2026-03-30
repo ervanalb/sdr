@@ -92,7 +92,7 @@ pub fn ui(
     viewport: &mut Viewport,
     document_graphics: &DocumentGraphics,
     analysis: &Analysis,
-    _playhead: &mut f64,
+    playhead: &mut f64,
     dt: f64,
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
@@ -154,8 +154,17 @@ pub fn ui(
         viewport.translation_y += (scroll_delta.y * SCROLL_SPEED) as f64;
     }
 
-    // Handle mouse button drag for panning
-    if response.dragged_by(egui::PointerButton::Primary) {
+    // Handle primary button click to set playhead
+    if response.clicked_by(egui::PointerButton::Primary) {
+        if let Some(pointer_pos) = response.interact_pointer_pos() {
+            let canvas_x = pointer_pos.x - figure_rect.left();
+            let time = viewport.canvas_x(canvas_x);
+            *playhead = time;
+        }
+    }
+
+    // Handle middle mouse button drag for panning
+    if response.dragged_by(egui::PointerButton::Middle) {
         let drag = response.drag_delta();
         viewport.translation_x += drag.x as f64;
         viewport.translation_y += drag.y as f64;
@@ -369,6 +378,17 @@ pub fn ui(
 
     // Draw clips (waterfall)
     document_graphics.draw(ui, figure_rect, viewport);
+
+    // Draw playhead as a thick vertical line
+    let playhead_x = figure_rect.left() + viewport.screen_space_x(*playhead);
+    if playhead_x >= figure_rect.left() && playhead_x <= figure_rect.right() {
+        let playhead_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
+        painter.vline(
+            playhead_x,
+            figure_rect.top()..=figure_rect.bottom(),
+            egui::Stroke::new(2.0, playhead_color),
+        );
+    }
 
     // Draw processors
     analysis.draw(ui, figure_rect, viewport, dt);
