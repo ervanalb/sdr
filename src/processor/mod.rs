@@ -1,14 +1,11 @@
 pub mod fm;
-//pub mod waterfall;
 use fm::FmProcessorParameters;
-//use waterfall::WaterfallProcessorParameters;
 
 use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::Viewport};
 use num_complex::Complex;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProcessorParameters {
-    //Waterfall(WaterfallProcessorParameters),
     Fm(FmProcessorParameters),
 }
 
@@ -18,7 +15,6 @@ impl ProcessorParameters {
         cc: &CreationContext<'_>,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         match self {
-            //ProcessorParameters::Waterfall(p) => p.create_processor(cc),
             ProcessorParameters::Fm(p) => p.create_processor(cc),
         }
     }
