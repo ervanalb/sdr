@@ -112,6 +112,19 @@ pub fn ui(
             top: -40.,
             bottom: -12.,
         };
+
+    // Define timeline region (above figure)
+    let timeline_rect = egui::Rect::from_min_max(
+        egui::pos2(figure_rect.left(), ui_rect.top()),
+        egui::pos2(figure_rect.right(), figure_rect.top()),
+    );
+    let timeline_response = ui
+        .allocate_rect(timeline_rect, egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::Text);
+
+    // Allocate the figure region
+    let figure_response = ui.allocate_rect(figure_rect, egui::Sense::click());
+
     let figure_size = figure_rect.size();
     let min_scale_y = figure_size.y / highest_freq as f32;
     let min_scale_x = min_scale_y * 1e6; // Difference in dynamic range between default scales of X and Y axes
@@ -419,6 +432,20 @@ pub fn ui(
         }
     }
 
+    // Draw hover line in X-axis label region (when not recording)
+    if !is_recording && timeline_response.hovered() {
+        if let Some(pointer_pos) = timeline_response.hover_pos() {
+            let hover_x = pointer_pos.x;
+            if hover_x >= figure_rect.left() && hover_x <= figure_rect.right() {
+                painter.vline(
+                    hover_x,
+                    figure_rect.top()..=figure_rect.bottom(),
+                    egui::Stroke::new(1.0, egui::Color32::GRAY),
+                );
+            }
+        }
+    }
+
     // Draw playhead as a thick vertical line
     let playhead_x = figure_rect.left() + viewport.screen_space_x(*playhead);
     if playhead_x >= figure_rect.left() && playhead_x <= figure_rect.right() {
@@ -430,12 +457,20 @@ pub fn ui(
         );
     }
 
-    // Handle primary button click to set playhead and deselect clips (only when not recording)
-    if !is_recording && response.clicked_by(egui::PointerButton::Primary) {
-        if let Some(pointer_pos) = response.interact_pointer_pos() {
+    // Handle primary button click in X-axis label region to set playhead and deselect clips (only when not recording)
+    if !is_recording && timeline_response.clicked_by(egui::PointerButton::Primary) {
+        if let Some(pointer_pos) = timeline_response.interact_pointer_pos() {
             let canvas_x = pointer_pos.x - figure_rect.left();
             let time = viewport.canvas_x(canvas_x);
             *playhead = time;
+            document_graphics.selected.clear();
+        }
+    }
+
+    if figure_response.clicked_by(egui::PointerButton::Primary) {
+        let modifiers = ui.input(|i| i.modifiers);
+        if !modifiers.shift && !modifiers.ctrl && !modifiers.command {
+            // Clear selection if background is clicked
             document_graphics.selected.clear();
         }
     }
