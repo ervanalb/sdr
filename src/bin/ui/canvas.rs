@@ -378,7 +378,8 @@ pub fn ui(
     }
 
     // Draw clips (waterfall)
-    document_graphics.draw(ui, figure_rect, viewport);
+    let document_graphics_id = ui.id().with("document_graphics");
+    document_graphics.draw(ui, figure_rect, viewport, document_graphics_id);
 
     // Draw playhead as a thick vertical line
     let playhead_x = figure_rect.left() + viewport.screen_space_x(*playhead);

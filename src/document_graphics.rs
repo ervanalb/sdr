@@ -9,7 +9,7 @@ use num_complex::Complex;
 use rayon::prelude::*;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     mem,
 };
 use wgpu::{
@@ -22,6 +22,12 @@ const MIN_QUANTILE: f64 = 0.1;
 const MAX_QUANTILE: f64 = 0.999;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const TEXTURE_HEIGHT: u32 = 1024;
+
+/// Selection state stored in egui memory
+#[derive(Clone, Default)]
+struct ClipSelection {
+    selected: BTreeSet<ClipId>,
+}
 
 pub struct DocumentGraphics {
     clips: BTreeMap<ClipId, ClipGraphics>,
@@ -103,12 +109,55 @@ impl DocumentGraphics {
         todo!();
     }
 
-    pub fn draw(&self, ui: &mut egui::Ui, figure_rect: egui::Rect, viewport: &crate::ui::Viewport) {
-        // Collect all segments into a draw list
+    pub fn draw(
+        &self,
+        ui: &mut egui::Ui,
+        figure_rect: egui::Rect,
+        viewport: &crate::ui::Viewport,
+        id: egui::Id,
+    ) {
+        // Get selection from egui memory
+        let mut selection = ui
+            .ctx()
+            .memory_mut(|mem| mem.data.get_temp::<ClipSelection>(id))
+            .unwrap_or_default();
 
+        // Draw all clips and handle interactions in one loop
         for (&clip_id, clip) in self.clips.iter() {
-            clip.draw(ui, figure_rect, viewport, clip_id, &self.blank_texture);
+            let is_selected = selection.selected.contains(&clip_id);
+            let response = clip.draw(
+                ui,
+                figure_rect,
+                viewport,
+                clip_id,
+                &self.blank_texture,
+                is_selected,
+            );
+
+            if response.clicked() {
+                let modifiers = ui.input(|i| i.modifiers);
+
+                if modifiers.shift {
+                    // Shift-click: add to selection
+                    selection.selected.insert(clip_id);
+                } else if modifiers.ctrl || modifiers.command {
+                    // Ctrl-click (or Cmd on Mac): toggle in selection
+                    if selection.selected.contains(&clip_id) {
+                        selection.selected.remove(&clip_id);
+                    } else {
+                        selection.selected.insert(clip_id);
+                    }
+                } else {
+                    // Regular click: replace selection
+                    selection.selected.clear();
+                    selection.selected.insert(clip_id);
+                }
+            }
         }
+
+        // Store updated selection back to egui memory
+        ui.ctx()
+            .memory_mut(|mem| mem.data.insert_temp(id, selection));
     }
 }
 
@@ -280,7 +329,8 @@ impl ClipGraphics {
         viewport: &crate::ui::Viewport,
         clip_id: ClipId,
         blank_texture: &Texture,
-    ) {
+        is_selected: bool,
+    ) -> egui::Response {
         let y_top = viewport.screen_space_y(self.descriptor.freq_max());
         let y_bottom = viewport.screen_space_y(self.descriptor.freq_min());
         let x_left = viewport.screen_space_x(self.descriptor.time(self.start_index as f64));
@@ -344,24 +394,32 @@ impl ClipGraphics {
             },
         ));
 
-        // Draw hover rectangles for clip
-        if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
-            let clip_rect = Rect::from_min_max(
-                figure_rect.min + egui::vec2(x_left, y_top),
-                figure_rect.min + egui::vec2(x_right, y_bottom),
-            );
+        // Create interaction area for clip
+        let clip_rect = Rect::from_min_max(
+            figure_rect.min + egui::vec2(x_left, y_top),
+            figure_rect.min + egui::vec2(x_right, y_bottom),
+        );
 
-            // Check if pointer is hovering over this clip
-            if clip_rect.contains(pointer_pos) {
-                let hover_color = ui.visuals().widgets.hovered.bg_stroke.color;
-                painter.rect_stroke(
-                    clip_rect,
-                    0.0,
-                    egui::Stroke::new(2.0, hover_color),
-                    egui::StrokeKind::Outside,
-                );
-            }
+        let clip_interact_id = ui.id().with(("clip_interact", clip_id));
+        let response = ui.interact(clip_rect, clip_interact_id, egui::Sense::click());
+
+        // Draw border based on selection and hover state
+        let stroke = if is_selected {
+            // Selected clips get a brighter border
+            egui::Stroke::new(2.0, ui.visuals().widgets.active.fg_stroke.color)
+        } else if response.hovered() {
+            // Hovered clips get the standard hover color
+            egui::Stroke::new(1.0, ui.visuals().widgets.hovered.fg_stroke.color)
+        } else {
+            // No border for non-selected, non-hovered clips
+            egui::Stroke::NONE
+        };
+
+        if stroke != egui::Stroke::NONE {
+            painter.rect_stroke(clip_rect, 0.0, stroke, egui::StrokeKind::Outside);
         }
+
+        response
     }
 }
 
