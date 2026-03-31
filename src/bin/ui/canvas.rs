@@ -96,6 +96,7 @@ pub fn ui(
     dt: f64,
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
+    is_recording: bool,
 ) {
     let highest_freq = bands_info.highest_freq;
 
@@ -154,8 +155,8 @@ pub fn ui(
         viewport.translation_y += (scroll_delta.y * SCROLL_SPEED) as f64;
     }
 
-    // Handle primary button click to set playhead
-    if response.clicked_by(egui::PointerButton::Primary) {
+    // Handle primary button click to set playhead (only when not recording)
+    if !is_recording && response.clicked_by(egui::PointerButton::Primary) {
         if let Some(pointer_pos) = response.interact_pointer_pos() {
             let canvas_x = pointer_pos.x - figure_rect.left();
             let time = viewport.canvas_x(canvas_x);

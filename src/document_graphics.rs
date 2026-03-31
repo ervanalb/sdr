@@ -176,6 +176,50 @@ impl DocumentGraphics {
                     waterfall_chunks: draw_list,
                 },
             ));
+
+        // Draw hover rectangles for clips
+        if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+            for (_clip_id, processor) in self.processors.iter() {
+                // Calculate the clip's bounding rectangle in screen space
+                let y_top = figure_rect.top() + viewport.screen_space_y(processor.descriptor.freq_max());
+                let y_bottom = figure_rect.top() + viewport.screen_space_y(processor.descriptor.freq_min());
+
+                // Get the time range from all segments
+                let mut min_time = f64::MAX;
+                let mut max_time = f64::MIN;
+
+                if let Some(active_segment) = &processor.active_segment {
+                    min_time = min_time.min(processor.descriptor.time(active_segment.start_row as f64));
+                    max_time = max_time.max(processor.descriptor.time(active_segment.end_row as f64));
+                }
+
+                for finished_segment in &processor.finished_segments {
+                    min_time = min_time.min(processor.descriptor.time(finished_segment.start_row as f64));
+                    max_time = max_time.max(processor.descriptor.time(finished_segment.end_row as f64));
+                }
+
+                if min_time <= max_time {
+                    let x_left = figure_rect.left() + viewport.screen_space_x(min_time);
+                    let x_right = figure_rect.left() + viewport.screen_space_x(max_time);
+
+                    let clip_rect = egui::Rect::from_min_max(
+                        egui::pos2(x_left, y_top),
+                        egui::pos2(x_right, y_bottom),
+                    );
+
+                    // Check if pointer is hovering over this clip
+                    if clip_rect.contains(pointer_pos) {
+                        let hover_color = ui.visuals().widgets.hovered.bg_stroke.color;
+                        ui.painter().rect_stroke(
+                            clip_rect,
+                            0.0,
+                            egui::Stroke::new(2.0, hover_color),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -347,6 +347,7 @@ impl eframe::App for SdrApp {
                 dt,
                 &mut self.hardware_params,
                 &self.bands_info,
+                self.recording.is_some(),
             );
         });
     }
