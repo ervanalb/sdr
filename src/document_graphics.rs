@@ -4,6 +4,7 @@ use crate::{
     hardware::RawIqSamples,
     waterfall_renderer::{WaterfallDrawInfo, WaterfallRenderer},
 };
+use egui::Rect;
 use num_complex::Complex;
 use rayon::prelude::*;
 use std::{
@@ -23,7 +24,7 @@ const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const TEXTURE_HEIGHT: u32 = 1024;
 
 pub struct DocumentGraphics {
-    processors: BTreeMap<ClipId, ClipGraphics>,
+    clips: BTreeMap<ClipId, ClipGraphics>,
     device: Device,
     queue: Queue,
     blank_texture: Texture,
@@ -47,7 +48,7 @@ impl DocumentGraphics {
         });
 
         DocumentGraphics {
-            processors: BTreeMap::new(),
+            clips: BTreeMap::new(),
             device: device.clone(),
             queue: queue.clone(),
             blank_texture,
@@ -56,12 +57,12 @@ impl DocumentGraphics {
 
     pub fn process(&mut self, document: &Document) {
         // Remove processors for deleted clips
-        self.processors
+        self.clips
             .retain(|&clip_id, _| document.clips.contains_key(&clip_id));
 
         // Add processors for new clips
         for (&clip_id, clip) in document.clips.iter() {
-            self.processors.entry(clip_id).or_insert_with(|| {
+            self.clips.entry(clip_id).or_insert_with(|| {
                 ClipGraphics::new(
                     &self.device,
                     self.blank_texture.clone(),
@@ -73,9 +74,9 @@ impl DocumentGraphics {
 
         // Gather work items
         let mut work = Vec::new();
-        for (&clip_id, processor) in self.processors.iter_mut() {
+        for (&clip_id, processor) in self.clips.iter_mut() {
             let clip = document.clips.get(&clip_id).unwrap();
-            let next_chunk = processor.next_chunk;
+            let next_chunk = processor.end_index;
             if next_chunk < clip.chunks.end_index() {
                 work.push((processor, clip, next_chunk, clip.chunks.end_index()));
             }
@@ -87,11 +88,11 @@ impl DocumentGraphics {
                 for chunk in clip.chunks.range(start_index..end_index) {
                     processor.process(&self.device, &self.queue, &chunk.data);
                 }
-                processor.next_chunk = end_index;
+                processor.end_index = end_index;
             });
 
         // Finalize processing for any clips that are no longer active
-        for (&clip_id, processor) in self.processors.iter_mut() {
+        for (&clip_id, processor) in self.clips.iter_mut() {
             if !processor.finalized() && !document.active_clips.contains(&clip_id) {
                 processor.finalize(&self.device, &self.queue, &self.blank_texture);
             }
@@ -105,127 +106,16 @@ impl DocumentGraphics {
     pub fn draw(&self, ui: &mut egui::Ui, figure_rect: egui::Rect, viewport: &crate::ui::Viewport) {
         // Collect all segments into a draw list
 
-        let draw_list = self
-            .processors
-            .values()
-            .flat_map(|processor| {
-                let y_top = viewport.screen_space_y(processor.descriptor.freq_max());
-                let y_bottom = viewport.screen_space_y(processor.descriptor.freq_min());
-                processor
-                    .active_segment
-                    .as_ref()
-                    .map(move |active_segment| {
-                        let x_left = viewport.screen_space_x(
-                            processor.descriptor.time(active_segment.start_row as f64),
-                        );
-                        let x_right = viewport.screen_space_x(
-                            processor.descriptor.time(active_segment.end_row as f64),
-                        );
-
-                        WaterfallDrawInfo {
-                            rect: egui::Rect::from_min_max(
-                                egui::pos2(x_left, y_top),
-                                egui::pos2(x_right, y_bottom),
-                            ),
-                            texture: active_segment.texture.clone(),
-                            prev_texture: active_segment.prev_texture.clone(),
-                            next_texture: self.blank_texture.clone(),
-                            min: processor.min,
-                            max: processor.max,
-                            v_end: (active_segment.end_row - active_segment.start_row) as f32
-                                / TEXTURE_HEIGHT as f32,
-                        }
-                    })
-                    .into_iter()
-                    .chain(
-                        processor
-                            .finished_segments
-                            .iter()
-                            .map(move |finished_segment| {
-                                let x_start = viewport.screen_space_x(
-                                    processor.descriptor.time(finished_segment.start_row as f64),
-                                );
-                                let x_end = viewport.screen_space_x(
-                                    processor.descriptor.time(finished_segment.end_row as f64),
-                                );
-
-                                WaterfallDrawInfo {
-                                    rect: egui::Rect::from_min_max(
-                                        egui::pos2(x_start, y_top),
-                                        egui::pos2(x_end, y_bottom),
-                                    ),
-                                    texture: finished_segment.texture.clone(),
-                                    prev_texture: finished_segment.prev_texture.clone(),
-                                    next_texture: finished_segment.next_texture.clone(),
-                                    min: processor.min,
-                                    max: processor.max,
-                                    v_end: 1.,
-                                }
-                            }),
-                    )
-            })
-            .collect();
-
-        ui.painter()
-            .with_clip_rect(figure_rect)
-            .add(egui_wgpu::Callback::new_paint_callback(
-                figure_rect,
-                Callback {
-                    id: "clips_waterfall".into(),
-                    viewport_size: figure_rect.size(),
-                    waterfall_chunks: draw_list,
-                },
-            ));
-
-        // Draw hover rectangles for clips
-        if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
-            for (_clip_id, processor) in self.processors.iter() {
-                // Calculate the clip's bounding rectangle in screen space
-                let y_top = figure_rect.top() + viewport.screen_space_y(processor.descriptor.freq_max());
-                let y_bottom = figure_rect.top() + viewport.screen_space_y(processor.descriptor.freq_min());
-
-                // Get the time range from all segments
-                let mut min_time = f64::MAX;
-                let mut max_time = f64::MIN;
-
-                if let Some(active_segment) = &processor.active_segment {
-                    min_time = min_time.min(processor.descriptor.time(active_segment.start_row as f64));
-                    max_time = max_time.max(processor.descriptor.time(active_segment.end_row as f64));
-                }
-
-                for finished_segment in &processor.finished_segments {
-                    min_time = min_time.min(processor.descriptor.time(finished_segment.start_row as f64));
-                    max_time = max_time.max(processor.descriptor.time(finished_segment.end_row as f64));
-                }
-
-                if min_time <= max_time {
-                    let x_left = figure_rect.left() + viewport.screen_space_x(min_time);
-                    let x_right = figure_rect.left() + viewport.screen_space_x(max_time);
-
-                    let clip_rect = egui::Rect::from_min_max(
-                        egui::pos2(x_left, y_top),
-                        egui::pos2(x_right, y_bottom),
-                    );
-
-                    // Check if pointer is hovering over this clip
-                    if clip_rect.contains(pointer_pos) {
-                        let hover_color = ui.visuals().widgets.hovered.bg_stroke.color;
-                        ui.painter().rect_stroke(
-                            clip_rect,
-                            0.0,
-                            egui::Stroke::new(2.0, hover_color),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
-                }
-            }
+        for (&clip_id, clip) in self.clips.iter() {
+            clip.draw(ui, figure_rect, viewport, clip_id, &self.blank_texture);
         }
     }
 }
 
 struct ClipGraphics {
     pub descriptor: ClipDescriptor,
-    pub next_chunk: usize,
+    pub start_index: usize,
+    pub end_index: usize,
     buffer: Vec<Complex<f32>>,
     overlap_expand: OverlapExpand<Complex<f32>>,
     hann_window: Box<[f32]>,
@@ -244,7 +134,7 @@ impl ClipGraphics {
         device: &Device,
         blank_texture: Texture,
         descriptor: ClipDescriptor,
-        first_chunk: usize,
+        start_index: usize,
     ) -> ClipGraphics {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (descriptor.sample_rate / TARGET_BIN_SIZE).ceil() as usize;
@@ -261,7 +151,8 @@ impl ClipGraphics {
 
         ClipGraphics {
             descriptor,
-            next_chunk: first_chunk,
+            start_index,
+            end_index: start_index,
             buffer: vec![],
             overlap_expand,
             hann_window: hann_window(fft_size),
@@ -274,7 +165,7 @@ impl ClipGraphics {
             active_segment: Some(ActiveSegment::new(
                 device,
                 fft_size as u32,
-                first_chunk,
+                start_index,
                 blank_texture,
             )),
             finished_segments: vec![],
@@ -379,6 +270,97 @@ impl ClipGraphics {
             .finalize(device, queue, blank_texture.clone())
         {
             self.finished_segments.push(finished_segment);
+        }
+    }
+
+    pub fn draw(
+        &self,
+        ui: &mut egui::Ui,
+        figure_rect: egui::Rect,
+        viewport: &crate::ui::Viewport,
+        clip_id: ClipId,
+        blank_texture: &Texture,
+    ) {
+        let y_top = viewport.screen_space_y(self.descriptor.freq_max());
+        let y_bottom = viewport.screen_space_y(self.descriptor.freq_min());
+        let x_left = viewport.screen_space_x(self.descriptor.time(self.start_index as f64));
+        let x_right = viewport.screen_space_x(self.descriptor.time(self.end_index as f64));
+
+        let draw_list = self
+            .active_segment
+            .as_ref()
+            .map(move |active_segment| {
+                let x_left =
+                    viewport.screen_space_x(self.descriptor.time(active_segment.start_row as f64));
+                let x_right =
+                    viewport.screen_space_x(self.descriptor.time(active_segment.end_row as f64));
+
+                WaterfallDrawInfo {
+                    rect: egui::Rect::from_min_max(
+                        egui::pos2(x_left, y_top),
+                        egui::pos2(x_right, y_bottom),
+                    ),
+                    texture: active_segment.texture.clone(),
+                    prev_texture: active_segment.prev_texture.clone(),
+                    next_texture: blank_texture.clone(),
+                    min: self.min,
+                    max: self.max,
+                    v_end: (active_segment.end_row - active_segment.start_row) as f32
+                        / TEXTURE_HEIGHT as f32,
+                }
+            })
+            .into_iter()
+            .chain(self.finished_segments.iter().map(move |finished_segment| {
+                let x_start = viewport
+                    .screen_space_x(self.descriptor.time(finished_segment.start_row as f64));
+                let x_end =
+                    viewport.screen_space_x(self.descriptor.time(finished_segment.end_row as f64));
+
+                WaterfallDrawInfo {
+                    rect: egui::Rect::from_min_max(
+                        egui::pos2(x_start, y_top),
+                        egui::pos2(x_end, y_bottom),
+                    ),
+                    texture: finished_segment.texture.clone(),
+                    prev_texture: finished_segment.prev_texture.clone(),
+                    next_texture: finished_segment.next_texture.clone(),
+                    min: self.min,
+                    max: self.max,
+                    v_end: 1.,
+                }
+            }))
+            .collect();
+
+        let id = ui.id().with(("clip", clip_id));
+        let painter = ui.painter().with_clip_rect(figure_rect);
+
+        // Draw waterfall
+        painter.add(egui_wgpu::Callback::new_paint_callback(
+            figure_rect,
+            Callback {
+                id,
+                viewport_size: figure_rect.size(),
+                waterfall_chunks: draw_list,
+            },
+        ));
+
+        // Draw hover rectangles for clip
+        if let Some(pointer_pos) = ui.input(|i| i.pointer.hover_pos()) {
+            let clip_rect = Rect::from_min_max(
+                figure_rect.min + egui::vec2(x_left, y_top),
+                figure_rect.min + egui::vec2(x_right, y_bottom),
+            );
+
+            // Check if pointer is hovering over this clip
+            if clip_rect.contains(pointer_pos) {
+                let hover_color = ui.visuals().widgets.hovered.bg_stroke.color;
+                painter.rect_stroke(
+                    clip_rect,
+                    0.0,
+                    egui::Stroke::new(2.0, hover_color),
+                    egui::StrokeKind::Outside,
+                );
+            }
         }
     }
 }

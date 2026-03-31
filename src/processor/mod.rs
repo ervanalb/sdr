@@ -42,8 +42,3 @@ pub trait ProcessorHistory {
         dt: f64,
     );
 }
-
-pub struct CreationContext<'a> {
-    pub device: &'a wgpu::Device,
-    pub queue: &'a wgpu::Queue,
-}

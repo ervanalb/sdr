@@ -7,8 +7,8 @@ use sdr::band_info::BandsInfo;
 use sdr::document::{Document, RecordingId};
 use sdr::document_graphics::DocumentGraphics;
 use sdr::hardware::{Hardware, HardwareParams};
+use sdr::processor::ProcessorParameters;
 use sdr::processor::fm::FmProcessorParameters;
-use sdr::processor::{CreationContext, ProcessorParameters};
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -112,7 +112,7 @@ impl eframe::App for SdrApp {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
 
