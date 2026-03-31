@@ -23,84 +23,55 @@ const MAX_QUANTILE: f64 = 0.999;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const TEXTURE_HEIGHT: u32 = 1024;
 
-/// Selection state stored in egui memory
-#[derive(Clone, Default)]
-struct ClipSelection {
-    selected: BTreeSet<ClipId>,
-}
-
+#[derive(Default)]
 pub struct DocumentGraphics {
-    clips: BTreeMap<ClipId, ClipGraphics>,
-    device: Device,
-    queue: Queue,
-    blank_texture: Texture,
+    pub clips: BTreeMap<ClipId, ClipGraphics>,
+    pub selected: BTreeSet<ClipId>,
 }
 
 impl DocumentGraphics {
-    pub fn new(device: &Device, queue: &Queue) -> DocumentGraphics {
-        let blank_texture = device.create_texture(&TextureDescriptor {
-            label: Some("Blank Waterfall Texture"),
-            size: Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::R32Float,
-            usage: TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-
+    pub fn new() -> DocumentGraphics {
         DocumentGraphics {
             clips: BTreeMap::new(),
-            device: device.clone(),
-            queue: queue.clone(),
-            blank_texture,
+            selected: BTreeSet::new(),
         }
     }
 
-    pub fn process(&mut self, document: &Document) {
-        // Remove processors for deleted clips
+    pub fn process(&mut self, device: &Device, queue: &Queue, document: &Document) {
+        // Remove clip graphics for deleted clips
         self.clips
             .retain(|&clip_id, _| document.clips.contains_key(&clip_id));
 
-        // Add processors for new clips
+        // Add clip graphics for new clips
         for (&clip_id, clip) in document.clips.iter() {
             self.clips.entry(clip_id).or_insert_with(|| {
-                ClipGraphics::new(
-                    &self.device,
-                    self.blank_texture.clone(),
-                    clip.descriptor.clone(),
-                    clip.chunks.start_index(),
-                )
+                ClipGraphics::new(device, clip.descriptor.clone(), clip.chunks.start_index())
             });
         }
 
         // Gather work items
         let mut work = Vec::new();
-        for (&clip_id, processor) in self.clips.iter_mut() {
+        for (&clip_id, clip_graphics) in self.clips.iter_mut() {
             let clip = document.clips.get(&clip_id).unwrap();
-            let next_chunk = processor.end_index;
+            let next_chunk = clip_graphics.end_index;
             if next_chunk < clip.chunks.end_index() {
-                work.push((processor, clip, next_chunk, clip.chunks.end_index()));
+                work.push((clip_graphics, clip, next_chunk, clip.chunks.end_index()));
             }
         }
 
         // Run the work in parallel
         work.into_par_iter()
-            .for_each(|(processor, clip, start_index, end_index)| {
+            .for_each(|(clip_graphics, clip, start_index, end_index)| {
                 for chunk in clip.chunks.range(start_index..end_index) {
-                    processor.process(&self.device, &self.queue, &chunk.data);
+                    clip_graphics.process(device, queue, &chunk.data);
                 }
-                processor.end_index = end_index;
+                clip_graphics.end_index = end_index;
             });
 
         // Finalize processing for any clips that are no longer active
-        for (&clip_id, processor) in self.clips.iter_mut() {
-            if !processor.finalized() && !document.active_clips.contains(&clip_id) {
-                processor.finalize(&self.device, &self.queue, &self.blank_texture);
+        for (&clip_id, clip_graphics) in self.clips.iter_mut() {
+            if !clip_graphics.finalized() && !document.active_clips.contains(&clip_id) {
+                clip_graphics.finalize(device, queue);
             }
         }
     }
@@ -108,60 +79,9 @@ impl DocumentGraphics {
     pub fn expire(&mut self, _retain_time: f64) {
         todo!();
     }
-
-    pub fn draw(
-        &self,
-        ui: &mut egui::Ui,
-        figure_rect: egui::Rect,
-        viewport: &crate::ui::Viewport,
-        id: egui::Id,
-    ) {
-        // Get selection from egui memory
-        let mut selection = ui
-            .ctx()
-            .memory_mut(|mem| mem.data.get_temp::<ClipSelection>(id))
-            .unwrap_or_default();
-
-        // Draw all clips and handle interactions in one loop
-        for (&clip_id, clip) in self.clips.iter() {
-            let is_selected = selection.selected.contains(&clip_id);
-            let response = clip.draw(
-                ui,
-                figure_rect,
-                viewport,
-                clip_id,
-                &self.blank_texture,
-                is_selected,
-            );
-
-            if response.clicked() {
-                let modifiers = ui.input(|i| i.modifiers);
-
-                if modifiers.shift {
-                    // Shift-click: add to selection
-                    selection.selected.insert(clip_id);
-                } else if modifiers.ctrl || modifiers.command {
-                    // Ctrl-click (or Cmd on Mac): toggle in selection
-                    if selection.selected.contains(&clip_id) {
-                        selection.selected.remove(&clip_id);
-                    } else {
-                        selection.selected.insert(clip_id);
-                    }
-                } else {
-                    // Regular click: replace selection
-                    selection.selected.clear();
-                    selection.selected.insert(clip_id);
-                }
-            }
-        }
-
-        // Store updated selection back to egui memory
-        ui.ctx()
-            .memory_mut(|mem| mem.data.insert_temp(id, selection));
-    }
 }
 
-struct ClipGraphics {
+pub struct ClipGraphics {
     pub descriptor: ClipDescriptor,
     pub start_index: usize,
     pub end_index: usize,
@@ -176,15 +96,11 @@ struct ClipGraphics {
     max: f32,
     active_segment: Option<ActiveSegment>,
     finished_segments: Vec<FinishedSegment>,
+    blank_texture: Texture,
 }
 
 impl ClipGraphics {
-    fn new(
-        device: &Device,
-        blank_texture: Texture,
-        descriptor: ClipDescriptor,
-        start_index: usize,
-    ) -> ClipGraphics {
+    fn new(device: &Device, descriptor: ClipDescriptor, start_index: usize) -> ClipGraphics {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (descriptor.sample_rate / TARGET_BIN_SIZE).ceil() as usize;
         let fft_size = min_fft_size.next_power_of_two();
@@ -197,6 +113,21 @@ impl ClipGraphics {
 
         let chunk_period = descriptor.chunk_size as f64 / descriptor.sample_rate;
         let min_max_alpha = (chunk_period / (MIN_MAX_TIME_CONSTANT + chunk_period)) as f32;
+
+        let blank_texture = device.create_texture(&TextureDescriptor {
+            label: Some("Blank Waterfall Texture"),
+            size: Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R32Float,
+            usage: TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
 
         ClipGraphics {
             descriptor,
@@ -215,9 +146,10 @@ impl ClipGraphics {
                 device,
                 fft_size as u32,
                 start_index,
-                blank_texture,
+                blank_texture.clone(),
             )),
             finished_segments: vec![],
+            blank_texture,
         }
     }
 
@@ -311,12 +243,12 @@ impl ClipGraphics {
         self.active_segment.is_none()
     }
 
-    fn finalize(&mut self, device: &Device, queue: &Queue, blank_texture: &Texture) {
+    fn finalize(&mut self, device: &Device, queue: &Queue) {
         if let Some(finished_segment) = self
             .active_segment
             .take()
             .expect("Finalize called twice")
-            .finalize(device, queue, blank_texture.clone())
+            .finalize(device, queue, self.blank_texture.clone())
         {
             self.finished_segments.push(finished_segment);
         }
@@ -328,7 +260,6 @@ impl ClipGraphics {
         figure_rect: egui::Rect,
         viewport: &crate::ui::Viewport,
         clip_id: ClipId,
-        blank_texture: &Texture,
         is_selected: bool,
     ) -> egui::Response {
         let y_top = viewport.screen_space_y(self.descriptor.freq_max());
@@ -352,7 +283,7 @@ impl ClipGraphics {
                     ),
                     texture: active_segment.texture.clone(),
                     prev_texture: active_segment.prev_texture.clone(),
-                    next_texture: blank_texture.clone(),
+                    next_texture: self.blank_texture.clone(),
                     min: self.min,
                     max: self.max,
                     v_end: (active_segment.end_row - active_segment.start_row) as f32

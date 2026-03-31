@@ -5,7 +5,6 @@ use eframe::egui;
 use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
 use sdr::document::{Document, RecordingId};
-use sdr::document_graphics::DocumentGraphics;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::ProcessorParameters;
 use sdr::processor::fm::FmProcessorParameters;
@@ -53,7 +52,6 @@ struct SdrApp {
     viewport_state: Viewport,
     processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
     document: Document,
-    document_graphics: DocumentGraphics,
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
     prev_time: DateTime<Utc>,
@@ -92,10 +90,6 @@ impl SdrApp {
             viewport_state: Viewport::new(),
             processor_parameters,
             document: Document::new(),
-            document_graphics: DocumentGraphics::new(
-                &wgpu_render_state.device,
-                &wgpu_render_state.queue,
-            ),
             recording: None,
             analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
             prev_time: now,
@@ -112,7 +106,7 @@ impl eframe::App for SdrApp {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Request continuous repaints
         ctx.request_repaint();
 
@@ -144,12 +138,7 @@ impl eframe::App for SdrApp {
         // TODO: bring back expire
         //self.document.expire(todo!());
 
-        // Update document graphics (waterfalls)
-        self.document_graphics.process(&self.document);
-
-        // Expire old graphics
-        // TODO: bring back expire
-        //self.document_graphics.expire(todo!());
+        // Document graphics processing now happens in canvas.rs
 
         self.analysis
             .process(&mut self.processor_parameters, &self.document);
@@ -338,16 +327,19 @@ impl eframe::App for SdrApp {
             };
             ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
 
+            let wgpu_render_state = frame.wgpu_render_state().unwrap();
+
             self::ui::canvas::ui(
                 ui,
                 &mut self.viewport_state,
-                &self.document_graphics,
+                &self.document,
                 &self.analysis,
                 &mut self.playhead,
                 dt,
                 &mut self.hardware_params,
                 &self.bands_info,
                 self.recording.is_some(),
+                &wgpu_render_state,
             );
         });
     }

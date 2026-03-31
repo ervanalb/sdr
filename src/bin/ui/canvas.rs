@@ -2,10 +2,12 @@ use egui::epaint::{MarginF32, TextShape};
 use egui::{Stroke, vec2};
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
+use sdr::document::{ClipId, Document};
 use sdr::document_graphics::DocumentGraphics;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
 use sdr::ui::Viewport;
+use std::sync::{Arc, Mutex};
 
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
@@ -90,13 +92,14 @@ fn paint_elided_text(
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
-    document_graphics: &DocumentGraphics,
+    document: &Document,
     analysis: &Analysis,
     playhead: &mut f64,
     dt: f64,
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
     is_recording: bool,
+    wgpu_render_state: &egui_wgpu::RenderState,
 ) {
     let highest_freq = bands_info.highest_freq;
 
@@ -106,8 +109,8 @@ pub fn ui(
         + MarginF32 {
             left: -154.,
             right: 0.,
-            top: -12.,
-            bottom: -24.,
+            top: -40.,
+            bottom: -12.,
         };
     let figure_size = figure_rect.size();
     let min_scale_y = figure_size.y / highest_freq as f32;
@@ -153,15 +156,6 @@ pub fn ui(
         // Regular scroll: pan the canvas
         viewport.translation_x += (scroll_delta.x * SCROLL_SPEED) as f64;
         viewport.translation_y += (scroll_delta.y * SCROLL_SPEED) as f64;
-    }
-
-    // Handle primary button click to set playhead (only when not recording)
-    if !is_recording && response.clicked_by(egui::PointerButton::Primary) {
-        if let Some(pointer_pos) = response.interact_pointer_pos() {
-            let canvas_x = pointer_pos.x - figure_rect.left();
-            let time = viewport.canvas_x(canvas_x);
-            *playhead = time;
-        }
     }
 
     // Handle middle mouse button drag for panning
@@ -257,8 +251,8 @@ pub fn ui(
             let x = figure_rect.left() + viewport.screen_space_x(val);
 
             painter.text(
-                egui::pos2(x, figure_rect.bottom() + 6.),
-                egui::Align2::CENTER_TOP,
+                egui::pos2(x, figure_rect.top() - 22.),
+                egui::Align2::CENTER_BOTTOM,
                 format_time(val, precision),
                 egui::FontId::proportional(12.),
                 gridline_text_color,
@@ -377,9 +371,53 @@ pub fn ui(
         }
     }
 
-    // Draw clips (waterfall)
+    // Get or create DocumentGraphics from egui memory
     let document_graphics_id = ui.id().with("document_graphics");
-    document_graphics.draw(ui, figure_rect, viewport, document_graphics_id);
+
+    let document_graphics = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp_mut_or_default::<Arc<Mutex<DocumentGraphics>>>(document_graphics_id)
+            .clone()
+    });
+
+    let mut document_graphics = document_graphics.lock().unwrap();
+
+    // Process the document into graphical representation
+    document_graphics.process(
+        &wgpu_render_state.device,
+        &wgpu_render_state.queue,
+        document,
+    );
+
+    // Collect clip IDs to avoid borrowing issues
+    let clip_ids: Vec<ClipId> = document_graphics.clips.keys().copied().collect();
+
+    for clip_id in clip_ids {
+        let clip = document_graphics.clips.get(&clip_id).unwrap();
+        let is_selected = document_graphics.selected.contains(&clip_id);
+        let response = clip.draw(ui, figure_rect, viewport, clip_id, is_selected);
+
+        // Handle click interactions immediately
+        if response.clicked() {
+            let modifiers = ui.input(|i| i.modifiers);
+
+            if modifiers.shift {
+                // Shift-click: add to selection
+                document_graphics.selected.insert(clip_id);
+            } else if modifiers.ctrl || modifiers.command {
+                // Ctrl-click (or Cmd on Mac): toggle in selection
+                if document_graphics.selected.contains(&clip_id) {
+                    document_graphics.selected.remove(&clip_id);
+                } else {
+                    document_graphics.selected.insert(clip_id);
+                }
+            } else {
+                // Regular click: replace selection
+                document_graphics.selected.clear();
+                document_graphics.selected.insert(clip_id);
+            }
+        }
+    }
 
     // Draw playhead as a thick vertical line
     let playhead_x = figure_rect.left() + viewport.screen_space_x(*playhead);
@@ -390,6 +428,16 @@ pub fn ui(
             figure_rect.top()..=figure_rect.bottom(),
             egui::Stroke::new(2.0, playhead_color),
         );
+    }
+
+    // Handle primary button click to set playhead and deselect clips (only when not recording)
+    if !is_recording && response.clicked_by(egui::PointerButton::Primary) {
+        if let Some(pointer_pos) = response.interact_pointer_pos() {
+            let canvas_x = pointer_pos.x - figure_rect.left();
+            let time = viewport.canvas_x(canvas_x);
+            *playhead = time;
+            document_graphics.selected.clear();
+        }
     }
 
     // Draw processors
