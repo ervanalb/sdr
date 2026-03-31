@@ -15,6 +15,7 @@ pub type RecordingId = usize;
 
 #[derive(Clone, Debug)]
 pub struct ClipDescriptor {
+    pub name: String,
     pub frequency: f64,
     pub sample_rate: f64,
     pub start_time: f64,
@@ -57,6 +58,7 @@ pub struct Document {
     clip_id_factory: IdFactory,
     recording_id_factory: IdFactory,
     recordings: BTreeMap<RecordingId, RecordingInfo>,
+    clip_name_counter: usize,
 }
 
 #[derive(Debug)]
@@ -75,6 +77,7 @@ impl Document {
             clips: BTreeMap::new(),
             recordings: BTreeMap::new(),
             active_clips: BTreeSet::new(),
+            clip_name_counter: 1,
         }
     }
 
@@ -152,10 +155,13 @@ impl Document {
                     let clip_start_time = recording.document_start_time + elapsed_seconds;
 
                     let clip_id = self.clip_id_factory.create();
+                    let clip_name = format!("Clip {}", self.clip_name_counter);
+                    self.clip_name_counter += 1;
                     self.clips.insert(
                         clip_id,
                         Clip {
                             descriptor: ClipDescriptor {
+                                name: clip_name,
                                 frequency: descriptor.frequency,
                                 sample_rate: descriptor.sample_rate,
                                 start_time: clip_start_time,

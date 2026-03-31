@@ -352,8 +352,13 @@ impl ClipGraphics {
             figure_rect.min + egui::vec2(x_right, y_bottom),
         );
 
+        // Extend interaction area to include name bar above the clip
+        let bar_height = 20.0;
+        let clip_rect_with_bar =
+            Rect::from_min_max(clip_rect.min - egui::vec2(0.0, bar_height), clip_rect.max);
+
         // Intersect with figure_rect to prevent interaction outside the visible area
-        let clip_interact_rect = clip_rect.intersect(figure_rect);
+        let clip_interact_rect = clip_rect_with_bar.intersect(figure_rect);
 
         let clip_interact_id = ui.id().with(("clip_interact", clip_id));
         let response = ui.interact(clip_interact_rect, clip_interact_id, egui::Sense::click());
@@ -364,7 +369,7 @@ impl ClipGraphics {
             egui::Stroke::new(2.0, ui.visuals().widgets.active.fg_stroke.color)
         } else if response.hovered() {
             // Hovered clips get the standard hover color
-            egui::Stroke::new(1.0, ui.visuals().widgets.hovered.fg_stroke.color)
+            egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color)
         } else {
             // No border for non-selected, non-hovered clips
             egui::Stroke::NONE
@@ -372,6 +377,39 @@ impl ClipGraphics {
 
         if stroke != egui::Stroke::NONE {
             painter.rect_stroke(clip_rect, 0.0, stroke, egui::StrokeKind::Outside);
+
+            // Draw name bar above the clip
+            let name_bar_rect = egui::Rect::from_min_max(
+                egui::pos2(clip_rect.min.x, clip_rect.min.y - bar_height),
+                egui::pos2(clip_rect.max.x, clip_rect.min.y),
+            )
+            .expand(stroke.width);
+
+            // Fill the bar with the border color
+            painter.rect_filled(name_bar_rect, 0.0, stroke.color);
+
+            // Calculate visible text area (keep onscreen)
+            let visible_bar_rect = name_bar_rect.intersect(figure_rect);
+
+            if visible_bar_rect.width() > 0.0 {
+                // Create a rect for left-aligned text with padding
+                let padding = 4.0;
+                let text_rect = egui::Rect::from_min_max(
+                    egui::pos2(visible_bar_rect.min.x + padding, visible_bar_rect.min.y),
+                    egui::pos2(visible_bar_rect.max.x - padding, visible_bar_rect.max.y),
+                );
+
+                // Draw the clip name
+                crate::ui::paint_elided_text(
+                    &painter,
+                    text_rect,
+                    self.descriptor.name.clone(),
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::BLACK,
+                    false,
+                    false,
+                );
+            }
         }
 
         response

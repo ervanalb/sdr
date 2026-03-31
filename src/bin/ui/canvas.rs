@@ -1,12 +1,12 @@
-use egui::epaint::{MarginF32, TextShape};
-use egui::{Stroke, vec2};
+use egui::epaint::MarginF32;
+use egui::vec2;
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
 use sdr::document::Document;
 use sdr::document_graphics::DocumentGraphics;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
-use sdr::ui::Viewport;
+use sdr::ui::{Viewport, paint_elided_text};
 use std::sync::{Arc, Mutex};
 
 const SCROLL_SPEED: f32 = 1.0;
@@ -22,72 +22,6 @@ const AVAILABLE_TIME_GRIDLINES: [f64; 15] = [
 ];
 
 const BAR_WIDTH: f32 = 14.;
-
-fn paint_elided_text(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    text: String,
-    font_id: egui::FontId,
-    color: egui::Color32,
-    rotated: bool,
-) {
-    let rect_width = if rotated { rect.height() } else { rect.width() };
-
-    let galley = painter.layout_no_wrap(text.clone(), font_id.clone(), color);
-    let text_width = galley.rect.width();
-
-    let galley = if text_width > rect_width {
-        let ellipsis = painter.layout_no_wrap("...".to_string(), font_id.clone(), color);
-        let ellipsis_width = ellipsis.rect.width();
-        let available_width = rect_width - ellipsis_width;
-
-        if available_width > 0.0 {
-            let mut truncated_text = text.clone();
-            while !truncated_text.is_empty() {
-                let test_galley =
-                    painter.layout_no_wrap(truncated_text.clone(), font_id.clone(), color);
-                if test_galley.rect.width() <= available_width {
-                    break;
-                }
-                truncated_text.pop();
-            }
-            let combined = format!("{}...", truncated_text);
-            let final_galley = painter.layout_no_wrap(combined, font_id, color);
-            Some(final_galley)
-        } else {
-            None
-        }
-    } else {
-        Some(galley)
-    };
-
-    let Some(galley) = galley else {
-        return;
-    };
-
-    let galley_center = if rotated {
-        egui::vec2(galley.rect.height() / 2.0, -galley.rect.width() / 2.0)
-    } else {
-        egui::vec2(galley.rect.width() / 2.0, galley.rect.height() / 2.0)
-    };
-
-    let angle = if rotated {
-        -0.25 * std::f32::consts::TAU
-    } else {
-        0.
-    };
-
-    let shape = TextShape {
-        pos: rect.center() - galley_center,
-        galley,
-        underline: Stroke::NONE,
-        fallback_color: color,
-        override_text_color: None,
-        opacity_factor: 1.,
-        angle,
-    };
-    painter.add(shape);
-}
 
 pub fn ui(
     ui: &mut egui::Ui,
@@ -343,6 +277,7 @@ pub fn ui(
                 egui::FontId::proportional(12.),
                 visuals.fg_stroke.color,
                 true,
+                true,
             );
         }
     }
@@ -377,6 +312,7 @@ pub fn ui(
                         band.description.clone(),
                         egui::FontId::proportional(12.),
                         visuals.fg_stroke.color,
+                        true,
                         true,
                     );
                 }

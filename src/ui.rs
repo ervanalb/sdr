@@ -1,3 +1,76 @@
+pub fn paint_elided_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: String,
+    font_id: egui::FontId,
+    color: egui::Color32,
+    centered: bool,
+    rotated: bool,
+) {
+    let rect_width = if rotated { rect.height() } else { rect.width() };
+
+    let galley = painter.layout_no_wrap(text.clone(), font_id.clone(), color);
+    let text_width = galley.rect.width();
+
+    let galley = if text_width > rect_width {
+        let ellipsis = painter.layout_no_wrap("...".to_string(), font_id.clone(), color);
+        let ellipsis_width = ellipsis.rect.width();
+        let available_width = rect_width - ellipsis_width;
+
+        if available_width > 0.0 {
+            let mut truncated_text = text.clone();
+            while !truncated_text.is_empty() {
+                let test_galley =
+                    painter.layout_no_wrap(truncated_text.clone(), font_id.clone(), color);
+                if test_galley.rect.width() <= available_width {
+                    break;
+                }
+                truncated_text.pop();
+            }
+            let combined = format!("{}...", truncated_text);
+            let final_galley = painter.layout_no_wrap(combined, font_id, color);
+            Some(final_galley)
+        } else {
+            None
+        }
+    } else {
+        Some(galley)
+    };
+
+    let Some(galley) = galley else {
+        return;
+    };
+
+    let galley_anchor = match (centered, rotated) {
+        (false, false) => egui::vec2(0., galley.rect.height() / 2.0),
+        (false, true) => todo!(),
+        (true, false) => egui::vec2(galley.rect.width() / 2.0, galley.rect.height() / 2.0),
+        (true, true) => egui::vec2(galley.rect.height() / 2.0, -galley.rect.width() / 2.0),
+    };
+
+    let rect_anchor = match centered {
+        false => rect.left_center(),
+        true => rect.center(),
+    };
+
+    let angle = if rotated {
+        -0.25 * std::f32::consts::TAU
+    } else {
+        0.
+    };
+
+    let shape = egui::epaint::TextShape {
+        pos: rect_anchor - galley_anchor,
+        galley,
+        underline: egui::Stroke::NONE,
+        fallback_color: color,
+        override_text_color: None,
+        opacity_factor: 1.,
+        angle,
+    };
+    painter.add(shape);
+}
+
 /// A custom egui widget for drawing a transmission rectangle on a stream
 pub struct StreamTransmission {
     pub start_time: f64,
