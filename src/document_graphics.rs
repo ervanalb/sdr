@@ -27,6 +27,8 @@ const TEXTURE_HEIGHT: u32 = 1024;
 pub struct DocumentGraphics {
     pub clips: BTreeMap<ClipId, ClipGraphics>,
     pub selected: BTreeSet<ClipId>,
+    pub hovered: BTreeSet<ClipId>,
+    pub draw_order: Vec<ClipId>,
 }
 
 impl DocumentGraphics {
@@ -34,6 +36,8 @@ impl DocumentGraphics {
         DocumentGraphics {
             clips: BTreeMap::new(),
             selected: BTreeSet::new(),
+            hovered: BTreeSet::new(),
+            draw_order: Vec::new(),
         }
     }
 
@@ -42,9 +46,17 @@ impl DocumentGraphics {
         self.clips
             .retain(|&clip_id, _| document.clips.contains_key(&clip_id));
 
+        // Remove deleted clips from draw_order and hovered
+        self.draw_order
+            .retain(|clip_id| document.clips.contains_key(clip_id));
+        self.hovered
+            .retain(|clip_id| document.clips.contains_key(clip_id));
+
         // Add clip graphics for new clips
         for (&clip_id, clip) in document.clips.iter() {
             self.clips.entry(clip_id).or_insert_with(|| {
+                // Add new clips to the end of the draw_order
+                self.draw_order.push(clip_id);
                 ClipGraphics::new(device, clip.descriptor.clone(), clip.chunks.start_index())
             });
         }
@@ -73,6 +85,15 @@ impl DocumentGraphics {
             if !clip_graphics.finalized() && !document.active_clips.contains(&clip_id) {
                 clip_graphics.finalize(device, queue);
             }
+        }
+    }
+
+    pub fn bring_to_top(&mut self, clip_id: ClipId) {
+        if let Some(pos) = self.draw_order.iter().position(|id| *id == clip_id) {
+            // Remove the clip from its current position
+            self.draw_order.remove(pos);
+            // Add it to the end of list (visually, on top)
+            self.draw_order.push(clip_id);
         }
     }
 
@@ -331,8 +352,11 @@ impl ClipGraphics {
             figure_rect.min + egui::vec2(x_right, y_bottom),
         );
 
+        // Intersect with figure_rect to prevent interaction outside the visible area
+        let clip_interact_rect = clip_rect.intersect(figure_rect);
+
         let clip_interact_id = ui.id().with(("clip_interact", clip_id));
-        let response = ui.interact(clip_rect, clip_interact_id, egui::Sense::click());
+        let response = ui.interact(clip_interact_rect, clip_interact_id, egui::Sense::click());
 
         // Draw border based on selection and hover state
         let stroke = if is_selected {

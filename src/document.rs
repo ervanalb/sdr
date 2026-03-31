@@ -197,4 +197,18 @@ impl Document {
             }
         });
     }
+
+    pub fn delete_selection(&mut self, selection: &mut BTreeSet<ClipId>) {
+        // Remove clips that are not active
+        selection.retain(|clip_id| {
+            if self.active_clips.contains(clip_id) {
+                // Skip active clips, keep them in selection
+                true
+            } else {
+                // Delete non-active clips
+                self.clips.remove(clip_id);
+                false
+            }
+        });
+    }
 }

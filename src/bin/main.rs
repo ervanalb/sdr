@@ -332,7 +332,7 @@ impl eframe::App for SdrApp {
             self::ui::canvas::ui(
                 ui,
                 &mut self.viewport_state,
-                &self.document,
+                &mut self.document,
                 &self.analysis,
                 &mut self.playhead,
                 dt,

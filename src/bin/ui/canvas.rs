@@ -2,7 +2,7 @@ use egui::epaint::{MarginF32, TextShape};
 use egui::{Stroke, vec2};
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
-use sdr::document::{ClipId, Document};
+use sdr::document::Document;
 use sdr::document_graphics::DocumentGraphics;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
@@ -92,7 +92,7 @@ fn paint_elided_text(
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
-    document: &Document,
+    document: &mut Document,
     analysis: &Analysis,
     playhead: &mut f64,
     dt: f64,
@@ -402,17 +402,29 @@ pub fn ui(
         document,
     );
 
-    // Collect clip IDs to avoid borrowing issues
-    let clip_ids: Vec<ClipId> = document_graphics.clips.keys().copied().collect();
+    // Sort draw_order by hover state (non-hovered first, hovered last)
+    let mut sorted_draw_order = document_graphics.draw_order.clone();
+    sorted_draw_order.sort_by_key(|clip_id| document_graphics.hovered.contains(clip_id));
 
-    for clip_id in clip_ids {
+    // Clear hovered set for this frame
+    document_graphics.hovered.clear();
+
+    for clip_id in sorted_draw_order {
         let clip = document_graphics.clips.get(&clip_id).unwrap();
         let is_selected = document_graphics.selected.contains(&clip_id);
         let response = clip.draw(ui, figure_rect, viewport, clip_id, is_selected);
 
+        // Update hover state for next frame
+        if response.hovered() {
+            document_graphics.hovered.insert(clip_id);
+        }
+
         // Handle click interactions immediately
         if response.clicked() {
             let modifiers = ui.input(|i| i.modifiers);
+
+            // Bring clicked clip to front
+            document_graphics.bring_to_top(clip_id);
 
             if modifiers.shift {
                 // Shift-click: add to selection
@@ -473,6 +485,14 @@ pub fn ui(
             // Clear selection if background is clicked
             document_graphics.selected.clear();
         }
+    }
+
+    // Handle Delete/Backspace to delete selected clips
+    let delete_pressed =
+        ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+    if delete_pressed && !document_graphics.selected.is_empty() {
+        // Delete selected clips (skips active clips and keeps them selected)
+        document.delete_selection(&mut document_graphics.selected);
     }
 
     // Draw processors
