@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use eframe::egui;
 use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
-use sdr::document::{Document, RecordingId};
+use sdr::document::{ActiveDocument, RecordingId};
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::ProcessorParameters;
 use sdr::processor::fm::FmProcessorParameters;
@@ -51,7 +51,7 @@ struct SdrApp {
     hardware_params: HardwareParams,
     viewport_state: Viewport,
     processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
-    document: Document,
+    document: ActiveDocument,
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
     prev_time: DateTime<Utc>,
@@ -89,7 +89,7 @@ impl SdrApp {
             hardware_params: HardwareParams::default(),
             viewport_state: Viewport::new(),
             processor_parameters,
-            document: Document::new(),
+            document: ActiveDocument::new(),
             recording: None,
             analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
             prev_time: now,
@@ -148,6 +148,38 @@ impl eframe::App for SdrApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("New").clicked() {
+                        self.document = ActiveDocument::new();
+                        ui.close();
+                    }
+                    if ui.button("Open...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SDR Document", &["sdr"])
+                            .pick_file()
+                        {
+                            match sdr::document::ActiveDocument::load_from_file(&path) {
+                                Ok(document) => {
+                                    self.document = document;
+                                    ui.close();
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to load document: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    if ui.button("Save As...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SDR Document", &["sdr"])
+                            .save_file()
+                        {
+                            if let Err(e) = self.document.save_to_file(&path) {
+                                eprintln!("Failed to save document: {}", e);
+                            }
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
                     if ui.button("Exit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }

@@ -2,8 +2,9 @@ use std::{
     collections::{VecDeque, vec_deque::Iter},
     ops::{Bound, Index, IndexMut, RangeBounds},
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SeqDeque<T>(VecDeque<T>, usize);
 
 impl<T> std::fmt::Debug for SeqDeque<T> {

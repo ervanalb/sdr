@@ -2,7 +2,7 @@ use egui::epaint::MarginF32;
 use egui::vec2;
 use sdr::analysis::Analysis;
 use sdr::band_info::BandsInfo;
-use sdr::document::Document;
+use sdr::document::ActiveDocument;
 use sdr::document_graphics::DocumentGraphics;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
@@ -26,7 +26,7 @@ const BAR_WIDTH: f32 = 14.;
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
-    document: &mut Document,
+    document: &mut ActiveDocument,
     analysis: &Analysis,
     playhead: &mut f64,
     dt: f64,

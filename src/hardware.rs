@@ -50,6 +50,9 @@ pub struct ReceiveStreamChunk {
     pub chunk: RawIqSamples,
 }
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
 pub enum RawIqSamples {
     CS8(Box<[Complex<i8>]>),
     CF32(Box<[Complex<f32>]>),

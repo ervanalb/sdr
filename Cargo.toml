@@ -9,7 +9,7 @@ path = "src/bin/main.rs"
 
 [dependencies]
 soapysdr = "0.4.5"
-num-complex = "0.4"
+num-complex = { version = "0.4", features = ["serde"] }
 rustfft = "6.2"
 eframe = { version = "0.33.3", default-features = false, features = [
     "default_fonts",
@@ -25,6 +25,7 @@ env_logger = "0.11"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+bincode = "1.3"
 rayon = "1.11.0"
 rfd = "0.17.2"
 slotmap = "1.1.1"

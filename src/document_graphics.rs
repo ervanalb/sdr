@@ -1,5 +1,5 @@
 use crate::{
-    document::{ClipDescriptor, ClipId, Document},
+    document::{ActiveDocument, ClipDescriptor, ClipId},
     dsp::{Fft, OverlapExpand, hann_window, log_mix_f32},
     hardware::RawIqSamples,
     waterfall_renderer::{WaterfallDrawInfo, WaterfallRenderer},
@@ -41,19 +41,19 @@ impl DocumentGraphics {
         }
     }
 
-    pub fn process(&mut self, device: &Device, queue: &Queue, document: &Document) {
+    pub fn process(&mut self, device: &Device, queue: &Queue, document: &ActiveDocument) {
         // Remove clip graphics for deleted clips
         self.clips
-            .retain(|&clip_id, _| document.clips.contains_key(&clip_id));
+            .retain(|&clip_id, _| document.document.clips.contains_key(&clip_id));
 
         // Remove deleted clips from draw_order and hovered
         self.draw_order
-            .retain(|clip_id| document.clips.contains_key(clip_id));
+            .retain(|clip_id| document.document.clips.contains_key(clip_id));
         self.hovered
-            .retain(|clip_id| document.clips.contains_key(clip_id));
+            .retain(|clip_id| document.document.clips.contains_key(clip_id));
 
         // Add clip graphics for new clips
-        for (&clip_id, clip) in document.clips.iter() {
+        for (&clip_id, clip) in document.document.clips.iter() {
             self.clips.entry(clip_id).or_insert_with(|| {
                 // Add new clips to the end of the draw_order
                 self.draw_order.push(clip_id);
@@ -64,7 +64,7 @@ impl DocumentGraphics {
         // Gather work items
         let mut work = Vec::new();
         for (&clip_id, clip_graphics) in self.clips.iter_mut() {
-            let clip = document.clips.get(&clip_id).unwrap();
+            let clip = document.document.clips.get(&clip_id).unwrap();
             let next_chunk = clip_graphics.end_index;
             if next_chunk < clip.chunks.end_index() {
                 work.push((clip_graphics, clip, next_chunk, clip.chunks.end_index()));

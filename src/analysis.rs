@@ -1,5 +1,5 @@
 use crate::{
-    document::{Clip, ClipId, Document},
+    document::{ActiveDocument, Clip, ClipId},
     id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
     processor::{Processor, ProcessorHistory, ProcessorParameters},
@@ -188,9 +188,9 @@ impl DocumentSnapshot {
         }
     }
 
-    fn from_document(document: &Document) -> Self {
+    fn from_document(document: &ActiveDocument) -> Self {
         DocumentSnapshot {
-            clips: document.clips.clone(),
+            clips: document.document.clips.clone(),
             active_clips: document.active_clips.clone(),
         }
     }
@@ -226,7 +226,7 @@ impl Analysis {
     pub fn process(
         &mut self,
         processor_parameters: &mut BTreeMap<ProcessorId, ProcessorParameters>,
-        document: &Document,
+        document: &ActiveDocument,
     ) {
         // 1. Add & remove processor states
         let mut removed_processors = vec![];
