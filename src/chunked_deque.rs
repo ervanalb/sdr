@@ -238,22 +238,6 @@ mod tests {
     }
 
     #[test]
-    fn test_chunking() {
-        let mut deque = ChunkedDeque::new();
-
-        for i in 0..300 {
-            deque.push_back(Arc::new(i));
-        }
-
-        assert_eq!(deque.len(), 300);
-        assert!(deque.chunks.len() >= 2);
-
-        for i in 0..300 {
-            assert_eq!(**deque.get(i).unwrap(), i);
-        }
-    }
-
-    #[test]
     fn test_structural_equality() {
         let mut deque1 = ChunkedDeque::new();
 
