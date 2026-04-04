@@ -75,7 +75,7 @@ impl DocumentGraphics {
         work.into_par_iter()
             .for_each(|(clip_graphics, clip, start_index, end_index)| {
                 for chunk in clip.chunks.range(start_index..end_index) {
-                    clip_graphics.process(device, queue, &chunk.data);
+                    clip_graphics.process(device, queue, chunk.as_ref());
                 }
                 clip_graphics.end_index = end_index;
             });
@@ -104,8 +104,8 @@ impl DocumentGraphics {
 
 pub struct ClipGraphics {
     pub descriptor: ClipDescriptor,
-    pub start_index: usize,
-    pub end_index: usize,
+    pub start_index: isize,
+    pub end_index: isize,
     buffer: Vec<Complex<f32>>,
     overlap_expand: OverlapExpand<Complex<f32>>,
     hann_window: Box<[f32]>,
@@ -121,7 +121,7 @@ pub struct ClipGraphics {
 }
 
 impl ClipGraphics {
-    fn new(device: &Device, descriptor: ClipDescriptor, start_index: usize) -> ClipGraphics {
+    fn new(device: &Device, descriptor: ClipDescriptor, start_index: isize) -> ClipGraphics {
         // Pick a FFT size that is a power of 2 that is at least `sample_rate / target_bin_size`
         let min_fft_size = (descriptor.sample_rate / TARGET_BIN_SIZE).ceil() as usize;
         let fft_size = min_fft_size.next_power_of_two();
@@ -420,14 +420,14 @@ impl ClipGraphics {
 pub struct ActiveSegment {
     prev_texture: Texture,
     texture: Texture,
-    start_row: usize,
-    end_row: usize,
+    start_row: isize,
+    end_row: isize,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
 }
 
 impl ActiveSegment {
-    fn new(device: &Device, spectrum_len: u32, start_row: usize, prev_texture: Texture) -> Self {
+    fn new(device: &Device, spectrum_len: u32, start_row: isize, prev_texture: Texture) -> Self {
         let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Waterfall Texture"),
@@ -468,7 +468,7 @@ impl ActiveSegment {
         queue: &Queue,
         spectrum: &[f32],
     ) -> Option<FinishedSegment> {
-        let finished_texture = if self.end_row - self.start_row >= TEXTURE_HEIGHT as usize {
+        let finished_texture = if self.end_row - self.start_row >= TEXTURE_HEIGHT as isize {
             self.swap(device, queue, spectrum.len() as u32)
         } else {
             None
@@ -555,7 +555,7 @@ impl ActiveSegment {
             return None;
         }
 
-        let texture = if end_row - start_row < TEXTURE_HEIGHT as usize {
+        let texture = if end_row - start_row < TEXTURE_HEIGHT as isize {
             // If partial, copy this texture into an appropriately sized one
             // to free up space
 
@@ -639,8 +639,8 @@ struct FinishedSegment {
     texture: Texture,
     prev_texture: Texture,
     next_texture: Texture,
-    start_row: usize,
-    end_row: usize,
+    start_row: isize,
+    end_row: isize,
 }
 
 ///////////////////////////////////////////////////////////////////////////////

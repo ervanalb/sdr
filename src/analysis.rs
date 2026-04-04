@@ -17,7 +17,7 @@ type ProcessorInstanceId = usize;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ClipCursor {
     Before,
-    Index(usize),
+    Index(isize),
     After,
 }
 
@@ -328,7 +328,7 @@ struct ProcessingInputMessage {
 enum Event {
     ClipStart(ClipId),
     ClipEnd(ClipId),
-    Chunk(ClipId, usize), // ClipId and chunk index
+    Chunk(ClipId, isize), // ClipId and chunk index
 }
 
 fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage>) {
@@ -418,7 +418,7 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
 
                         // Preprocess
                         if let Some(preprocessor) = preprocessors.get_mut(&clip_id) {
-                            let preprocessed_data = preprocessor.process(&chunk.data);
+                            let preprocessed_data = preprocessor.process(chunk.as_ref());
 
                             // Process with all processors
                             let work: Vec<_> = processors

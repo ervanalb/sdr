@@ -1,7 +1,7 @@
 use crate::{
+    chunked_deque::ChunkedDeque,
     hardware::{HardwareResult, RawIqSamples, StreamId},
     id_factory::IdFactory,
-    seqdeque::SeqDeque,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -44,31 +44,43 @@ impl ClipDescriptor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Clip {
     pub descriptor: ClipDescriptor,
-    pub chunks: SeqDeque<Chunk>,
+    pub chunks: ChunkedDeque<Chunk>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Chunk {
-    #[serde(with = "serde_arc")]
-    pub data: Arc<RawIqSamples>,
-}
+#[derive(Clone, Debug)]
+pub struct Chunk(Arc<RawIqSamples>);
 
-mod serde_arc {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &Arc<RawIqSamples>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (**value).serialize(serializer)
+impl Chunk {
+    pub fn new(value: RawIqSamples) -> Self {
+        Chunk(Arc::new(value))
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<RawIqSamples>, D::Error>
+    pub fn as_ref(&self) -> &RawIqSamples {
+        &self.0
+    }
+}
+
+impl PartialEq for Chunk {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl serde::Serialize for Chunk {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        D: Deserializer<'de>,
+        S: serde::Serializer,
     {
-        Ok(Arc::new(RawIqSamples::deserialize(deserializer)?))
+        self.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Chunk {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Chunk::new(RawIqSamples::deserialize(deserializer)?))
     }
 }
 
@@ -277,16 +289,14 @@ impl ActiveDocument {
                                 start_time: clip_start_time,
                                 chunk_size: descriptor.chunk_size,
                             },
-                            chunks: SeqDeque::new(),
+                            chunks: ChunkedDeque::new(),
                         },
                     );
                     clip_id
                 });
 
             let clip = self.document.clips.get_mut(&clip_id).unwrap();
-            clip.chunks.push_back(Chunk {
-                data: Arc::new(chunk.chunk),
-            });
+            clip.chunks.push_back(Chunk::new(chunk.chunk));
         }
     }
 
@@ -303,7 +313,7 @@ impl ActiveDocument {
                     clip.chunks.start_index() as f64,
                     clip.chunks.end_index() as f64,
                 );
-                let retain_index = retain_index as usize;
+                let retain_index = retain_index as isize;
                 clip.chunks.remove_front(retain_index);
 
                 // Retain empty clips that are part of an active recording

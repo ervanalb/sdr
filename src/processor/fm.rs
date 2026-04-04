@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     audio::{self, AudioBuffer, AudioOutput, FeedResult},
+    chunked_deque::ChunkedDeque,
     document::ClipId,
     dsp::{
         CubicInterpolator, FmDemod, Ifft, OverlapExpand, OverlapReduce, RealFft, RealIfft,
@@ -20,7 +21,6 @@ use crate::{
     id_factory::IdFactory,
     preprocessor::PreprocessedClipDescriptor,
     processor::{Processor, ProcessorHistory},
-    seqdeque::SeqDeque,
     ui::{StreamInspectorParameters, StreamInspectorResponse, StreamTransmission, Viewport},
 };
 
@@ -124,10 +124,10 @@ pub struct ClipProcessor {
     audio_interpolator: CubicInterpolator<f32>,
     active_transmission: Option<TransmissionId>,
     output_sample_rate: f64,
-    start_time: f64,
-    chunk_size: usize,
-    sample_rate: f64,
-    chunk_count: usize,
+    stream_start_time: f64,
+    stream_chunk_size: usize,
+    stream_sample_rate: f64,
+    stream_chunk_count: usize,
 }
 
 impl ClipProcessor {
@@ -200,10 +200,10 @@ impl ClipProcessor {
             audio_interpolator: CubicInterpolator::new(audio_ifft_sample_rate / audio::SAMPLE_RATE),
             active_transmission: None,
             output_sample_rate,
-            start_time: stream_descriptor.start_time,
-            chunk_size: stream_descriptor.chunk_size,
-            sample_rate: stream_descriptor.sample_rate,
-            chunk_count: 0,
+            stream_start_time: stream_descriptor.start_time,
+            stream_chunk_size: stream_descriptor.chunk_size,
+            stream_sample_rate: stream_descriptor.sample_rate,
+            stream_chunk_count: 0,
         })
     }
 
@@ -214,9 +214,7 @@ impl ClipProcessor {
         transmission_id_factory: &mut IdFactory,
     ) {
         // Calculate time based on chunk count
-        let chunk_period = self.chunk_size as f64 / self.sample_rate;
-        let time = self.start_time + self.chunk_count as f64 * chunk_period;
-        self.chunk_count += 1;
+        self.stream_chunk_count += 1;
         // Pick out the relevant bins from the overall FFT data
         let fft_count = preprocessed_data.len() / self.fft_size;
         let chunk_slice_len = self.bins.end - self.bins.start;
@@ -261,10 +259,14 @@ impl ClipProcessor {
                 if energy > self.squelch_high {
                     let transmission_id = transmission_id_factory.create();
                     let transmission = self.active_transmission.insert(transmission_id);
+                    let period = self.stream_chunk_size as f64 / self.stream_sample_rate;
                     sender
                         .send(FmMessage::StartTransmission {
                             transmission_id,
-                            sample_rate: self.output_sample_rate,
+                            reference_time: self.stream_start_time
+                                + self.stream_chunk_count as f64 * period,
+                            period,
+                            iq_sample_rate: self.output_sample_rate,
                         })
                         .ok();
                     transmission
@@ -318,7 +320,6 @@ impl ClipProcessor {
         sender
             .send(FmMessage::PushChunk {
                 transmission_id: *active_transmission_id,
-                time,
                 iq_data,
                 audio_data,
             })
@@ -336,12 +337,13 @@ pub enum FmMessage {
     Reset,
     StartTransmission {
         transmission_id: TransmissionId,
-        sample_rate: f64,
+        reference_time: f64,
+        period: f64,
+        iq_sample_rate: f64,
     },
     EndTransmission(TransmissionId),
     PushChunk {
         transmission_id: TransmissionId,
-        time: f64,
         iq_data: Box<[Complex<f32>]>,
         audio_data: Box<[f32]>,
     },
@@ -353,22 +355,24 @@ impl std::fmt::Debug for FmMessage {
             Self::Reset => write!(f, "Reset"),
             Self::StartTransmission {
                 transmission_id,
-                sample_rate,
+                reference_time,
+                period,
+                iq_sample_rate,
             } => f
                 .debug_struct("StartTransmission")
                 .field("transmission_id", transmission_id)
-                .field("sample_rate", sample_rate)
+                .field("reference_time", reference_time)
+                .field("period", period)
+                .field("iq_sample_rate", iq_sample_rate)
                 .finish(),
             Self::EndTransmission(arg0) => f.debug_tuple("EndTransmission").field(arg0).finish(),
             Self::PushChunk {
                 transmission_id,
-                time,
                 iq_data,
                 audio_data,
             } => f
                 .debug_struct("PushChunk")
                 .field("transmission_id", transmission_id)
-                .field("time", time)
                 .field("iq_data.len()", &iq_data.len())
                 .field("audio_data.len()", &audio_data.len())
                 .finish(),
@@ -405,10 +409,12 @@ impl ProcessorHistory for FmHistory {
                 }
                 FmMessage::StartTransmission {
                     transmission_id,
-                    sample_rate,
+                    reference_time,
+                    period,
+                    iq_sample_rate,
                 } => match self.transmissions.entry(transmission_id) {
                     Entry::Vacant(e) => {
-                        e.insert(FmTransmission::new(sample_rate));
+                        e.insert(FmTransmission::new(reference_time, period, iq_sample_rate));
                     }
                     Entry::Occupied(_) => {
                         panic!("Tried to add a new transmission that already exists");
@@ -422,7 +428,6 @@ impl ProcessorHistory for FmHistory {
                 }
                 FmMessage::PushChunk {
                     transmission_id,
-                    time,
                     iq_data,
                     audio_data,
                 } => {
@@ -431,7 +436,7 @@ impl ProcessorHistory for FmHistory {
                         .get_mut(&transmission_id)
                         .expect("Tried to push to a transmission that doesn't exist");
 
-                    transmission.push(time, iq_data, audio_data);
+                    transmission.push(iq_data, audio_data);
                 }
             }
         }
@@ -456,7 +461,8 @@ impl ProcessorHistory for FmHistory {
             if transmission.chunks.is_empty() {
                 continue;
             }
-            let (start_time, end_time) = transmission.time_range();
+            let start_time = transmission.time(transmission.chunks.start_index() as f64);
+            let end_time = transmission.time(transmission.chunks.end_index() as f64);
 
             let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max).show(
                 ui,
@@ -469,7 +475,10 @@ impl ProcessorHistory for FmHistory {
                     ui.separator();
 
                     // Find the chunk closest to the inspected time
-                    let chunk_index = transmission.find_chunk_by_time(time);
+                    let chunk_index = (transmission.index(time) as isize).clamp(
+                        transmission.chunks.start_index(),
+                        transmission.chunks.end_index() - 1,
+                    );
                     let chunk = &transmission.chunks[chunk_index];
                     ui.label(format!("Chunk index: {}", chunk_index));
                     ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
@@ -577,12 +586,13 @@ impl ProcessorHistory for FmHistory {
 
                             // Feed new audio data to the audio player
                             let start = p.next_seq_num;
-                            let end =
-                                transmission.find_chunk_by_time(time + AUDIO_LOOKAHEAD_DURATION);
+                            let end = (transmission.index(time + AUDIO_LOOKAHEAD_DURATION)
+                                as isize)
+                                .min(transmission.chunks.end_index());
                             if end > start {
                                 let bufs = transmission.chunks.range(start..end).enumerate().map(
                                     |(i, chunk)| {
-                                        let seq_num = i + start;
+                                        let seq_num = start + i as isize;
                                         AudioBuffer {
                                             seq_num,
                                             data: chunk.audio_data.clone(),
@@ -602,12 +612,11 @@ impl ProcessorHistory for FmHistory {
                                 // Look up last_played_seq_num and set_time based on it,
                                 // to keep the inspector time (playhead)
                                 // synchronized to the actual audio rate
-                                if let Some(last_played_seq_num) = last_played_seq_num
-                                    && let Some(player_time) =
-                                        transmission.chunks.get(last_played_seq_num).map(|c| c.time)
-                                {
+                                if let Some(last_played_seq_num) = last_played_seq_num {
+                                    let player_time = transmission.time(last_played_seq_num as f64);
+                                    let chunk_time = transmission.time(chunk_index as f64);
                                     // Apply strong LPF since we have relatively poor introspection into audio
-                                    let new_adj = (player_time - chunk.time) as f32;
+                                    let new_adj = (player_time - chunk_time) as f32;
                                     let alpha = 0.0001;
                                     p.time_adj += alpha * (new_adj - p.time_adj);
                                     time_adj = p.time_adj as f64;
@@ -654,7 +663,7 @@ impl ProcessorHistory for FmHistory {
 
                         // Sanitize the channel name for use as a filename
                         let default_name =
-                            format!("fm_{}sps.raw", transmission.sample_rate.round())
+                            format!("fm_{}sps.raw", transmission.iq_sample_rate.round())
                                 .replace(" ", "_")
                                 .replace("/", "_");
 
@@ -676,49 +685,42 @@ impl ProcessorHistory for FmHistory {
 
 pub struct FmTransmission {
     active: bool,
-    sample_rate: f64,
-    chunks: SeqDeque<FmTransmissionChunk>,
+    reference_time: f64,
+    period: f64,
+    iq_sample_rate: f64,
+    chunks: ChunkedDeque<FmTransmissionChunk>,
 }
 
 impl FmTransmission {
-    fn new(sample_rate: f64) -> FmTransmission {
+    fn new(reference_time: f64, period: f64, iq_sample_rate: f64) -> FmTransmission {
         FmTransmission {
             active: true,
-            sample_rate,
-            chunks: SeqDeque::new(),
+            reference_time,
+            period,
+            iq_sample_rate,
+            chunks: ChunkedDeque::new(),
         }
     }
 
-    fn push(&mut self, time: f64, iq_data: Box<[Complex<f32>]>, audio_data: Box<[f32]>) {
+    fn push(&mut self, iq_data: Box<[Complex<f32>]>, audio_data: Box<[f32]>) {
         self.chunks.push_back(FmTransmissionChunk {
-            time,
             iq_data,
             audio_data,
         })
     }
 
     fn prune_old_data(&mut self, retain_time: f64) -> bool {
-        let first_index = self
-            .chunks
-            .partition_point(|chunk| chunk.time <= retain_time);
-        self.chunks.remove_front(first_index);
-        self.active || !self.chunks.is_empty()
+        let cutoff_index = self.index(retain_time) as isize;
+        self.chunks.remove_front(cutoff_index);
+        !self.chunks.is_empty()
     }
 
-    fn time_range(&self) -> (f64, f64) {
-        (
-            self.chunks.front().unwrap().time,
-            self.chunks.back().unwrap().time,
-        )
+    fn time(&self, index: f64) -> f64 {
+        self.reference_time + index * self.period
     }
 
-    fn find_chunk_by_time(&self, time: f64) -> usize {
-        let index = self.chunks.partition_point(|chunk| chunk.time < time);
-        if index >= self.chunks.end_index() {
-            self.chunks.end_index() - 1
-        } else {
-            index
-        }
+    fn index(&self, time: f64) -> f64 {
+        (time - self.reference_time) / self.period
     }
 
     fn export_iq_data(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
@@ -765,8 +767,8 @@ impl FmTransmission {
     }
 }
 
+#[derive(Clone)]
 pub struct FmTransmissionChunk {
-    pub time: f64,
     pub iq_data: Box<[Complex<f32>]>,
     pub audio_data: Box<[f32]>,
 }
@@ -783,6 +785,6 @@ struct FmUiState {
 
 struct Player {
     audio_output: AudioOutput,
-    next_seq_num: usize,
+    next_seq_num: isize,
     time_adj: f32,
 }

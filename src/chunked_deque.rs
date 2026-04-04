@@ -1,12 +1,49 @@
-use std::{array, collections::VecDeque, sync::Arc};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::{array, collections::VecDeque, ops::Index, sync::Arc};
 
 const CHUNK_SIZE: usize = 1024;
 
+// TODO: Replace Option<T> with MaybeUninit<T>
 #[derive(Clone)]
 pub struct ChunkedDeque<T> {
-    chunks: VecDeque<Arc<[Option<Arc<T>>; CHUNK_SIZE]>>,
-    start_offset: isize,
-    end_offset: isize,
+    chunks: VecDeque<Arc<[Option<T>; CHUNK_SIZE]>>,
+    start_index: isize,
+    end_index: isize,
+}
+
+pub struct ChunkedDequeIter<'a, T> {
+    deque: &'a ChunkedDeque<T>,
+    current_chunk_idx: usize,
+    current_offset: usize,
+    end_chunk_idx: usize,
+    end_offset: usize,
+}
+
+impl<'a, T> Iterator for ChunkedDequeIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Check if we've reached the end
+        if self.current_chunk_idx > self.end_chunk_idx
+            || (self.current_chunk_idx == self.end_chunk_idx
+                && self.current_offset >= self.end_offset)
+        {
+            return None;
+        }
+
+        // Get the current element
+        let chunk = self.deque.chunks.get(self.current_chunk_idx)?;
+        let element = chunk[self.current_offset].as_ref()?;
+
+        // Advance the iterator
+        self.current_offset += 1;
+        if self.current_offset >= CHUNK_SIZE {
+            self.current_offset = 0;
+            self.current_chunk_idx += 1;
+        }
+
+        Some(element)
+    }
 }
 
 impl<T> Default for ChunkedDeque<T> {
@@ -31,90 +68,99 @@ impl<T> ChunkedDeque<T> {
     pub fn new() -> Self {
         Self {
             chunks: VecDeque::new(),
-            start_offset: 0,
-            end_offset: 0,
+            start_index: 0,
+            end_index: 0,
         }
     }
 
     pub fn start_index(&self) -> isize {
-        self.start_offset
+        self.start_index
     }
 
     pub fn end_index(&self) -> isize {
-        self.end_offset
+        self.end_index
     }
 
     pub fn len(&self) -> usize {
-        (self.end_offset - self.start_offset) as usize
+        (self.end_index - self.start_index) as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.start_offset == self.end_offset
+        self.start_index == self.end_index
     }
 
-    fn index_to_chunk_and_offset(&self, index: isize) -> Option<(usize, usize)> {
-        if index < self.start_index() || index >= self.end_index() {
-            return None;
-        }
-
+    fn index_to_chunk_and_offset(&self, index: isize) -> (usize, usize) {
         let absolute_chunk = index.div_euclid(CHUNK_SIZE as isize);
-        let chunk_offset = self.start_offset.div_euclid(CHUNK_SIZE as isize);
+        let chunk_offset = self.start_index.div_euclid(CHUNK_SIZE as isize);
         let chunk_index = (absolute_chunk - chunk_offset) as usize;
         let offset_in_chunk = index.rem_euclid(CHUNK_SIZE as isize) as usize;
 
-        if chunk_index >= self.chunks.len() {
-            return None;
-        }
-
-        Some((chunk_index, offset_in_chunk))
+        (chunk_index, offset_in_chunk)
     }
 
-    pub fn get(&self, index: isize) -> Option<&Arc<T>> {
-        let (chunk_idx, offset) = self.index_to_chunk_and_offset(index)?;
+    pub fn get(&self, index: isize) -> Option<&T> {
+        if index < self.start_index || index >= self.end_index {
+            return None;
+        }
+        let (chunk_idx, offset) = self.index_to_chunk_and_offset(index);
         Some(self.chunks[chunk_idx][offset].as_ref().unwrap())
     }
 
-    pub fn push_back(&mut self, arc_value: Arc<T>) {
-        let end_idx = self.end_offset;
+    pub fn push_back(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        let end_idx = self.end_index;
         let end_offset_in_chunk = end_idx.rem_euclid(CHUNK_SIZE as isize) as usize;
 
         if end_offset_in_chunk == 0 {
             let new_chunk = Arc::new(array::from_fn(|_| None));
             self.chunks.push_back(new_chunk);
             let chunk = Arc::make_mut(self.chunks.back_mut().unwrap());
-            chunk[0] = Some(arc_value);
+            chunk[0] = Some(value);
         } else {
             let chunk = Arc::make_mut(self.chunks.back_mut().unwrap());
-            chunk[end_offset_in_chunk] = Some(arc_value);
+            chunk[end_offset_in_chunk] = Some(value);
         }
 
-        self.end_offset += 1;
+        self.end_index += 1;
     }
 
-    pub fn push_front(&mut self, arc_value: Arc<T>) {
-        let new_start_idx = self.start_offset - 1;
+    pub fn push_front(&mut self, value: T)
+    where
+        T: Clone,
+    {
+        let new_start_idx = self.start_index - 1;
         let new_start_offset_in_chunk = new_start_idx.rem_euclid(CHUNK_SIZE as isize) as usize;
 
         if new_start_offset_in_chunk == CHUNK_SIZE - 1 {
             let new_chunk = Arc::new(std::array::from_fn(|_| None));
             self.chunks.push_front(new_chunk);
             let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
-            chunk[CHUNK_SIZE - 1] = Some(arc_value);
+            chunk[CHUNK_SIZE - 1] = Some(value);
         } else {
             let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
-            chunk[new_start_offset_in_chunk] = Some(arc_value);
+            chunk[new_start_offset_in_chunk] = Some(value);
         }
 
-        self.start_offset -= 1;
+        self.start_index -= 1;
     }
 
-    pub fn pop_back(&mut self) -> Option<Arc<T>> {
-        let back_idx = self.end_offset - 1;
-        let (chunk_idx, offset) = self.index_to_chunk_and_offset(back_idx)?;
+    pub fn pop_back(&mut self) -> Option<T>
+    where
+        T: Clone,
+    {
+        if self.is_empty() {
+            return None;
+        }
 
-        let value = self.chunks[chunk_idx][offset].clone().unwrap();
+        let back_idx = self.end_index - 1;
+        let (chunk_idx, offset) = self.index_to_chunk_and_offset(back_idx);
 
-        self.end_offset -= 1;
+        let chunk = Arc::make_mut(&mut self.chunks[chunk_idx]);
+        let value = chunk[offset].take().unwrap();
+
+        self.end_index -= 1;
 
         if offset == 0 {
             self.chunks.pop_back();
@@ -123,13 +169,21 @@ impl<T> ChunkedDeque<T> {
         Some(value)
     }
 
-    pub fn pop_front(&mut self) -> Option<Arc<T>> {
-        let start_idx = self.start_offset;
-        let (chunk_idx, offset) = self.index_to_chunk_and_offset(start_idx)?;
+    pub fn pop_front(&mut self) -> Option<T>
+    where
+        T: Clone,
+    {
+        if self.is_empty() {
+            return None;
+        }
 
-        let value = self.chunks[chunk_idx][offset].clone().unwrap();
+        let start_idx = self.start_index;
+        let (chunk_idx, offset) = self.index_to_chunk_and_offset(start_idx);
 
-        self.start_offset += 1;
+        let chunk = Arc::make_mut(&mut self.chunks[chunk_idx]);
+        let value = chunk[offset].take().unwrap();
+
+        self.start_index += 1;
 
         if offset == CHUNK_SIZE - 1 {
             self.chunks.pop_front();
@@ -138,15 +192,49 @@ impl<T> ChunkedDeque<T> {
         Some(value)
     }
 
-    pub fn front(&self) -> Option<&Arc<T>> {
-        self.get(self.start_offset)
+    pub fn front(&self) -> Option<&T> {
+        self.get(self.start_index)
     }
 
-    pub fn back(&self) -> Option<&Arc<T>> {
-        self.get(self.end_offset - 1)
+    pub fn back(&self) -> Option<&T> {
+        self.get(self.end_index - 1)
     }
 
-    pub fn structural_eq_range(&self, other: &Self, range: std::ops::Range<isize>) -> bool {
+    pub fn iter(&self) -> ChunkedDequeIter<'_, T> {
+        let (start_chunk_idx, start_offset) = self.index_to_chunk_and_offset(self.start_index);
+        let (end_chunk_idx, end_offset) = self.index_to_chunk_and_offset(self.end_index);
+
+        ChunkedDequeIter {
+            deque: self,
+            current_chunk_idx: start_chunk_idx,
+            current_offset: start_offset,
+            end_chunk_idx,
+            end_offset,
+        }
+    }
+
+    pub fn range(&self, range: std::ops::Range<isize>) -> ChunkedDequeIter<'_, T> {
+        let std::ops::Range { start, end } = range;
+        assert!(start >= self.start_index && start <= self.end_index);
+        assert!(end >= self.start_index && end <= self.end_index);
+        assert!(start <= end);
+
+        let (start_chunk_idx, start_offset) = self.index_to_chunk_and_offset(start);
+        let (end_chunk_idx, end_offset) = self.index_to_chunk_and_offset(end);
+
+        ChunkedDequeIter {
+            deque: self,
+            current_chunk_idx: start_chunk_idx,
+            current_offset: start_offset,
+            end_chunk_idx,
+            end_offset,
+        }
+    }
+
+    pub fn range_eq(&self, other: &Self, range: std::ops::Range<isize>) -> bool
+    where
+        T: PartialEq,
+    {
         let std::ops::Range { start, end } = range;
 
         assert!(start >= self.start_index() && start <= self.end_index());
@@ -156,8 +244,8 @@ impl<T> ChunkedDeque<T> {
         assert!(start <= end);
 
         let mut cur = start;
-        let (mut self_chunk_idx, mut offset) = self.index_to_chunk_and_offset(cur).unwrap();
-        let (mut other_chunk_idx, offset2) = other.index_to_chunk_and_offset(cur).unwrap();
+        let (mut self_chunk_idx, mut offset) = self.index_to_chunk_and_offset(cur);
+        let (mut other_chunk_idx, offset2) = other.index_to_chunk_and_offset(cur);
         debug_assert_eq!(offset, offset2);
 
         while cur < end {
@@ -172,9 +260,9 @@ impl<T> ChunkedDeque<T> {
             } else {
                 // Check each element within the current chunk
                 while cur < end && offset < CHUNK_SIZE {
-                    let self_arc = self_chunk[offset].as_ref().unwrap();
-                    let other_arc = other_chunk[offset].as_ref().unwrap();
-                    if !Arc::ptr_eq(self_arc, other_arc) {
+                    let self_val = self_chunk[offset].as_ref().unwrap();
+                    let other_val = other_chunk[offset].as_ref().unwrap();
+                    if self_val != other_val {
                         return false;
                     }
                     offset += 1;
@@ -197,14 +285,22 @@ impl<T> ChunkedDeque<T> {
 
         if index >= self.end_index() {
             self.chunks.clear();
-            self.start_offset = index;
-            self.end_offset = index;
+            self.start_index = index;
+            self.end_index = index;
             return;
         }
 
-        let (chunk_idx, _offset) = self.index_to_chunk_and_offset(index).unwrap();
+        let (chunk_idx, _offset) = self.index_to_chunk_and_offset(index);
         self.chunks.drain(0..chunk_idx);
-        self.start_offset = index;
+        self.start_index = index;
+    }
+}
+
+impl<T> Index<isize> for ChunkedDeque<T> {
+    type Output = T;
+
+    fn index(&self, index: isize) -> &T {
+        self.get(index).expect("index out of bounds")
     }
 }
 
@@ -216,24 +312,24 @@ mod tests {
     fn test_basic_operations() {
         let mut deque = ChunkedDeque::new();
 
-        deque.push_back(Arc::new(1));
-        deque.push_back(Arc::new(2));
-        deque.push_back(Arc::new(3));
+        deque.push_back(1);
+        deque.push_back(2);
+        deque.push_back(3);
 
         assert_eq!(deque.len(), 3);
-        assert_eq!(**deque.front().unwrap(), 1);
-        assert_eq!(**deque.back().unwrap(), 3);
+        assert_eq!(*deque.front().unwrap(), 1);
+        assert_eq!(*deque.back().unwrap(), 3);
 
-        deque.push_front(Arc::new(0));
+        deque.push_front(0);
         assert_eq!(deque.len(), 4);
-        assert_eq!(**deque.front().unwrap(), 0);
+        assert_eq!(*deque.front().unwrap(), 0);
 
         let val = deque.pop_back().unwrap();
-        assert_eq!(*val, 3);
+        assert_eq!(val, 3);
         assert_eq!(deque.len(), 3);
 
         let val = deque.pop_front().unwrap();
-        assert_eq!(*val, 0);
+        assert_eq!(val, 0);
         assert_eq!(deque.len(), 2);
     }
 
@@ -242,41 +338,41 @@ mod tests {
         let mut deque1 = ChunkedDeque::new();
 
         for i in 0..10 {
-            deque1.push_front(Arc::new(i));
+            deque1.push_front(i);
         }
 
         for i in 0..10 {
-            deque1.push_back(Arc::new(i));
+            deque1.push_back(i);
         }
 
         let deque2 = deque1.clone();
 
-        assert!(deque1.structural_eq_range(&deque2, -10isize..10isize));
+        assert!(deque1.range_eq(&deque2, -10isize..10isize));
 
         let mut deque3 = deque1.clone();
-        deque3.push_back(Arc::new(10));
-        // Replace front element with a new one (same value)
+        deque3.push_back(10);
+        // Replace front element with a different one
         deque3.pop_front();
-        deque3.push_front(Arc::new(9));
+        deque3.push_front(999);
         // deque1 has -10..10, deque3 has -10..11
         // They should be structurally equal in the range -9..10
-        assert!(deque1.structural_eq_range(&deque3, -9isize..10isize));
+        assert!(deque1.range_eq(&deque3, -9isize..10isize));
 
         // They should be structurally unequal in the range -10..10
         // since the front element was replaced
-        assert!(!deque1.structural_eq_range(&deque3, -10isize..10isize));
+        assert!(!deque1.range_eq(&deque3, -10isize..10isize));
     }
 
     #[test]
-    fn test_clone_o1() {
+    fn test_clone() {
         let mut deque = ChunkedDeque::new();
         for i in 0..1000 {
-            deque.push_back(Arc::new(i));
+            deque.push_back(i);
         }
 
         let cloned = deque.clone();
 
-        assert!(deque.structural_eq_range(&cloned, 0isize..1000isize));
+        assert!(deque.range_eq(&cloned, 0isize..1000isize));
     }
 
     #[test]
@@ -284,7 +380,7 @@ mod tests {
         let mut deque = ChunkedDeque::new();
 
         for i in 0..20 {
-            deque.push_back(Arc::new(i));
+            deque.push_back(i);
         }
 
         assert_eq!(deque.start_index(), 0);
@@ -295,7 +391,7 @@ mod tests {
         assert_eq!(deque.start_index(), 5);
         assert_eq!(deque.end_index(), 20);
         assert_eq!(deque.len(), 15);
-        assert_eq!(**deque.front().unwrap(), 5);
+        assert_eq!(*deque.front().unwrap(), 5);
     }
 
     #[test]
@@ -303,12 +399,12 @@ mod tests {
         let mut deque = ChunkedDeque::new();
 
         for i in 0..10 {
-            deque.push_front(Arc::new(i));
+            deque.push_front(i);
         }
 
         assert_eq!(deque.len(), 10);
-        assert_eq!(**deque.front().unwrap(), 9);
-        assert_eq!(**deque.back().unwrap(), 0);
+        assert_eq!(*deque.front().unwrap(), 9);
+        assert_eq!(*deque.back().unwrap(), 0);
     }
 
     #[test]
@@ -316,11 +412,11 @@ mod tests {
         let mut deque = ChunkedDeque::new();
 
         for i in 0..CHUNK_SIZE * 2 + 10 {
-            deque.push_back(Arc::new(i));
+            deque.push_back(i);
         }
 
         for i in 0..CHUNK_SIZE * 2 + 10 {
-            assert_eq!(**deque.get(i as isize).unwrap(), i);
+            assert_eq!(*deque.get(i as isize).unwrap(), i);
         }
 
         assert_eq!(deque.chunks.len(), 3);
@@ -331,19 +427,98 @@ mod tests {
         let mut deque = ChunkedDeque::new();
 
         for i in 0..10 {
-            deque.push_back(Arc::new(i));
+            deque.push_back(i);
         }
 
         for i in 0..5 {
-            deque.push_front(Arc::new(100 + i));
+            deque.push_front(100 + i);
         }
 
         assert_eq!(deque.start_index(), -5);
         assert_eq!(deque.end_index(), 10);
         assert_eq!(deque.len(), 15);
-        assert_eq!(**deque.get(-5).unwrap(), 104);
-        assert_eq!(**deque.get(-1).unwrap(), 100);
-        assert_eq!(**deque.get(0).unwrap(), 0);
-        assert_eq!(**deque.get(9).unwrap(), 9);
+        assert_eq!(*deque.get(-5).unwrap(), 104);
+        assert_eq!(*deque.get(-1).unwrap(), 100);
+        assert_eq!(*deque.get(0).unwrap(), 0);
+        assert_eq!(*deque.get(9).unwrap(), 9);
+    }
+}
+
+impl<T: Serialize> Serialize for ChunkedDeque<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ChunkedDeque", 2)?;
+
+        // Collect all elements into a Vec
+        let elements: Vec<&T> = self.iter().collect();
+        state.serialize_field("elements", &elements)?;
+        state.serialize_field("start_index", &self.start_index)?;
+        state.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de> + Clone> Deserialize<'de> for ChunkedDeque<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct ChunkedDequeVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de> + Clone> Visitor<'de> for ChunkedDequeVisitor<T> {
+            type Value = ChunkedDeque<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("struct ChunkedDeque")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut elements: Option<Vec<T>> = None;
+                let mut start_index: Option<isize> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "elements" => {
+                            elements = Some(map.next_value()?);
+                        }
+                        "start_index" => {
+                            start_index = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let elements = elements.ok_or_else(|| de::Error::missing_field("elements"))?;
+                let start_index =
+                    start_index.ok_or_else(|| de::Error::missing_field("start_index"))?;
+
+                // Reconstruct the ChunkedDeque by pushing elements
+                let mut deque = ChunkedDeque::new();
+                deque.start_index = start_index;
+                deque.end_index = start_index;
+
+                for element in elements {
+                    deque.push_back(element);
+                }
+
+                Ok(deque)
+            }
+        }
+
+        const FIELDS: &[&str] = &["elements", "start_index"];
+        deserializer.deserialize_struct(
+            "ChunkedDeque",
+            FIELDS,
+            ChunkedDequeVisitor(std::marker::PhantomData),
+        )
     }
 }

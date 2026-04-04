@@ -11,24 +11,24 @@ pub enum AudioError {
 
 #[derive(Debug, Clone, Copy)]
 pub struct FeedResult {
-    pub last_played_seq_num: Option<usize>,
+    pub last_played_seq_num: Option<isize>,
     pub underrun: bool,
 }
 
 pub struct AudioBuffer {
-    pub seq_num: usize,
+    pub seq_num: isize,
     pub data: Box<[f32]>,
 }
 
 enum AudioResponse {
-    Played(usize),
+    Played(isize),
     Underrun,
 }
 
 pub struct AudioOutput {
     to_audio_thread: Sender<AudioBuffer>,
     from_audio_thread: Receiver<AudioResponse>,
-    last_played_seq_num: Option<usize>,
+    last_played_seq_num: Option<isize>,
     _stream: cpal::Stream, // Keep stream alive
 }
 
