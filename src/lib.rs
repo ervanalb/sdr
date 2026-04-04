@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod audio;
 pub mod band_info;
+pub mod chunked_deque;
 pub mod document;
 pub mod document_graphics;
 pub mod dsp;
