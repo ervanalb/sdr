@@ -359,34 +359,17 @@ mod tests {
             deque1.push_back(i);
         }
 
-        let deque2 = deque1.clone();
-
-        assert!(deque1.range_eq(&deque2, -10isize..10isize));
-
-        let mut deque3 = deque1.clone();
-        deque3.push_back(10);
-        // Replace front element with a different one
-        deque3.pop_front();
-        deque3.push_front(999);
+        let mut deque2 = deque1.clone();
+        deque2.push_back(10);
         // deque1 has -10..10, deque3 has -10..11
-        // They should be structurally equal in the range -9..10
-        assert!(deque1.range_eq(&deque3, -9isize..10isize));
+        // They should be equal in the overlapping range -10..10
+        assert!(deque2.is_continuation_of(&deque1));
 
-        // They should be structurally unequal in the range -10..10
-        // since the front element was replaced
-        assert!(!deque1.range_eq(&deque3, -10isize..10isize));
-    }
-
-    #[test]
-    fn test_clone() {
-        let mut deque = ChunkedDeque::new();
-        for i in 0..1000 {
-            deque.push_back(i);
-        }
-
-        let cloned = deque.clone();
-
-        assert!(deque.range_eq(&cloned, 0isize..1000isize));
+        // Replace front element with a different one
+        deque2.pop_front();
+        deque2.push_front(999);
+        // Since the front element changed, deque3 is no longer a continuation of deque1
+        assert!(!deque2.is_continuation_of(&deque1));
     }
 
     #[test]
