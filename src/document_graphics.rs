@@ -33,18 +33,6 @@ pub struct DocumentGraphics {
 }
 
 impl DocumentGraphics {
-    /*
-    pub fn new() -> DocumentGraphics {
-        DocumentGraphics {
-            clips: BTreeMap::new(),
-            prev_document: Arc::new(Document::new()),
-            selected: BTreeSet::new(),
-            hovered: BTreeSet::new(),
-            draw_order: Vec::new(),
-        }
-    }
-    */
-
     pub fn process(
         &mut self,
         device: &Device,
