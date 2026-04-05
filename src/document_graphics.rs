@@ -52,6 +52,34 @@ impl DocumentGraphics {
         self.hovered
             .retain(|clip_id| document.document.clips.contains_key(clip_id));
 
+        // Reset the graphics for clips that changed in a meaningful way,
+        // or update graphics for clips that changed in a trivial way
+        for (&clip_id, clip_graphics) in self.clips.iter_mut() {
+            let clip = document.document.clips.get(&clip_id).unwrap();
+
+            let ClipDescriptor {
+                name: _,
+                frequency: _,
+                sample_rate: prev_sample_rate,
+                start_time: _,
+                chunk_size: prev_chunk_size,
+            } = clip_graphics.descriptor;
+            let ClipDescriptor {
+                name: _,
+                frequency: _,
+                sample_rate,
+                start_time: _,
+                chunk_size,
+            } = clip.descriptor;
+
+            if sample_rate != prev_sample_rate || chunk_size != prev_chunk_size {
+                *clip_graphics =
+                    ClipGraphics::new(device, clip.descriptor.clone(), clip.chunks.start_index())
+            } else {
+                clip_graphics.descriptor = clip.descriptor.clone();
+            }
+        }
+
         // Add clip graphics for new clips
         for (&clip_id, clip) in document.document.clips.iter() {
             self.clips.entry(clip_id).or_insert_with(|| {
@@ -282,7 +310,7 @@ impl ClipGraphics {
         viewport: &crate::ui::Viewport,
         clip_id: ClipId,
         is_selected: bool,
-    ) -> egui::Response {
+    ) -> (egui::Response, egui::Response) {
         let y_top = viewport.screen_space_y(self.descriptor.freq_max());
         let y_bottom = viewport.screen_space_y(self.descriptor.freq_min());
         let x_left = viewport.screen_space_x(self.descriptor.time(self.start_index as f64));
@@ -363,6 +391,16 @@ impl ClipGraphics {
         let clip_interact_id = ui.id().with(("clip_interact", clip_id));
         let response = ui.interact(clip_interact_rect, clip_interact_id, egui::Sense::click());
 
+        // Create separate interaction area for the head bar to enable dragging
+        let head_bar_rect = egui::Rect::from_min_max(
+            egui::pos2(clip_rect.min.x, clip_rect.min.y - bar_height),
+            egui::pos2(clip_rect.max.x, clip_rect.min.y),
+        )
+        .intersect(figure_rect);
+
+        let head_bar_id = ui.id().with(("clip_head_bar", clip_id));
+        let head_bar_response = ui.interact(head_bar_rect, head_bar_id, egui::Sense::drag());
+
         // Draw border based on selection and hover state
         let stroke = if is_selected {
             // Selected clips get a brighter border
@@ -412,7 +450,7 @@ impl ClipGraphics {
             }
         }
 
-        response
+        (response, head_bar_response)
     }
 }
 

@@ -23,7 +23,7 @@ enum ClipCursor {
 
 #[derive(Clone)]
 struct Cursor {
-    cursors: BTreeMap<ClipId, ClipCursor>,
+    cursors: BTreeMap<ClipId, (Clip, ClipCursor)>,
 }
 
 impl Cursor {
@@ -31,8 +31,8 @@ impl Cursor {
         Self {
             cursors: document
                 .clips
-                .keys()
-                .map(|clip_id| (*clip_id, ClipCursor::Before))
+                .iter()
+                .map(|(clip_id, clip)| (*clip_id, (clip.clone(), ClipCursor::Before)))
                 .collect(),
         }
     }
@@ -40,17 +40,30 @@ impl Cursor {
     fn try_update(mut self, document: &DocumentSnapshot) -> Option<Self> {
         let mut invalidated = false;
         // Check for removed clips
-        self.cursors.retain(|clip_id, clip_cursor| {
-            // Reset cursor if a started clip was deleted
-            if !document.clips.contains_key(clip_id) {
-                if !matches!(clip_cursor, ClipCursor::Before) {
-                    invalidated = true;
+        self.cursors.retain(|clip_id, (clip, clip_cursor)| {
+            let mut retain = false;
+            let mut clip_is_same = false;
+            if let Some(new_clip) = document.clips.get(clip_id) {
+                retain = true;
+                if new_clip.chunks.start_index() >= clip.chunks.start_index()
+                    && new_clip.chunks.end_index() >= clip.chunks.end_index()
+                {
+                    let start = new_clip.chunks.start_index().max(clip.chunks.start_index());
+                    let end = new_clip.chunks.end_index().min(clip.chunks.end_index());
+                    if end > start {
+                        // Check if overlap is equal
+                        if new_clip.chunks.range_eq(&clip.chunks, start..end) {
+                            clip_is_same = true;
+                        }
+                    }
                 }
-                // Remove the clip from the cursor
-                false
-            } else {
-                true
+                *clip = new_clip.clone();
             }
+            // Reset cursor if a started clip was deleted or edited
+            if !clip_is_same && !matches!(clip_cursor, ClipCursor::Before) {
+                invalidated = true;
+            }
+            retain
         });
 
         if invalidated {
@@ -58,7 +71,7 @@ impl Cursor {
         }
 
         // Check for added clips
-        let t = self.time(document);
+        let t = self.time();
         for (&clip_id, clip) in document.clips.iter() {
             // Reset cursor if a clip was added that starts before the cursor
             match self.cursors.entry(clip_id) {
@@ -69,7 +82,7 @@ impl Cursor {
                         return None;
                     }
                     // Otherwise, add the clip to the cursor
-                    e.insert(ClipCursor::Before);
+                    e.insert((clip.clone(), ClipCursor::Before));
                 }
                 Entry::Occupied(_) => {}
             }
@@ -80,13 +93,10 @@ impl Cursor {
 
     // Calculate the time of this cursor position.
     // Returns None if there are no clips in the document
-    fn time(&self, document: &DocumentSnapshot) -> Option<f64> {
+    fn time(&self) -> Option<f64> {
         self.cursors
-            .iter()
-            .map(|(&clip_id, &clip_cursor)| {
-                let clip = document.clips.get(&clip_id).unwrap();
-                Self::clip_time_at_index(clip, clip_cursor)
-            })
+            .values()
+            .map(|(clip, clip_cursor)| Self::clip_time_at_index(clip, *clip_cursor))
             .min_by(|a, b| a.partial_cmp(b).unwrap())
     }
 
@@ -103,23 +113,22 @@ impl Cursor {
     fn is_before(&self, other: &Cursor) -> bool {
         assert_eq!(self.cursors.len(), other.cursors.len());
 
-        for (clip_id, a) in self.cursors.iter() {
-            let b = other.cursors.get(clip_id).unwrap();
-            if a < b {
+        for (clip_id, (_clip_a, cursor_a)) in self.cursors.iter() {
+            let (_clip_b, cursor_b) = other.cursors.get(clip_id).unwrap();
+            if cursor_a < cursor_b {
                 return true;
             }
         }
         false
     }
 
-    fn advance(&mut self, document: &DocumentSnapshot) -> Option<Event> {
+    fn advance(&mut self, active_clips: &BTreeSet<ClipId>) -> Option<Event> {
         // Collect all clips with their times and sort by time
         let mut clips_by_time: Vec<(f64, ClipId)> = self
             .cursors
             .iter()
-            .map(|(&clip_id, &clip_cursor)| {
-                let clip = document.clips.get(&clip_id).unwrap();
-                let time = Self::clip_time_at_index(clip, clip_cursor);
+            .map(|(&clip_id, (clip, clip_cursor))| {
+                let time = Self::clip_time_at_index(clip, *clip_cursor);
                 (time, clip_id)
             })
             .collect();
@@ -128,8 +137,7 @@ impl Cursor {
 
         // Try to advance each clip in order of earliest time
         for (_time, clip_id) in clips_by_time {
-            let clip = document.clips.get(&clip_id).unwrap();
-            let clip_cursor = self.cursors.get_mut(&clip_id).unwrap();
+            let (clip, clip_cursor) = self.cursors.get_mut(&clip_id).unwrap();
 
             let event = match *clip_cursor {
                 ClipCursor::Before => {
@@ -146,7 +154,7 @@ impl Cursor {
                         Some(Some(event))
                     } else {
                         // We're at the end of available chunks
-                        if document.active_clips.contains(&clip_id) {
+                        if active_clips.contains(&clip_id) {
                             // Clip is still active, don't advance to After,
                             // and furthermore, stop iteration here
                             Some(None) // Return None; don't try to advance a different clip
@@ -384,7 +392,7 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
                 });
 
             // 4. Process from the preprocessor cursor (which will be the earliest)
-            while let Some(event) = preprocessor_cursor.advance(&document) {
+            while let Some(event) = preprocessor_cursor.advance(&document.active_clips) {
                 match event {
                     Event::ClipStart(clip_id) => {
                         let clip = document.clips.get(&clip_id).unwrap();

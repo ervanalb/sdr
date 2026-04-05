@@ -348,10 +348,11 @@ pub fn ui(
     for clip_id in sorted_draw_order {
         let clip = document_graphics.clips.get(&clip_id).unwrap();
         let is_selected = document_graphics.selected.contains(&clip_id);
-        let response = clip.draw(ui, figure_rect, viewport, clip_id, is_selected);
+        let (response, head_bar_response) =
+            clip.draw(ui, figure_rect, viewport, clip_id, is_selected);
 
         // Update hover state for next frame
-        if response.hovered() {
+        if response.hovered() || head_bar_response.hovered() {
             document_graphics.hovered.insert(clip_id);
         }
 
@@ -376,6 +377,16 @@ pub fn ui(
                 // Regular click: replace selection
                 document_graphics.selected.clear();
                 document_graphics.selected.insert(clip_id);
+            }
+        }
+
+        // Handle dragging the clip in X by dragging its head bar
+        if head_bar_response.dragged_by(egui::PointerButton::Primary) {
+            let drag = head_bar_response.drag_delta();
+            let time_delta = drag.x as f64 / viewport.scale_x;
+
+            if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
+                doc_clip.descriptor.start_time += time_delta;
             }
         }
     }
@@ -415,10 +426,10 @@ pub fn ui(
         }
     }
 
+    // Clear selection if background is clicked
     if figure_response.clicked_by(egui::PointerButton::Primary) {
         let modifiers = ui.input(|i| i.modifiers);
         if !modifiers.shift && !modifiers.ctrl && !modifiers.command {
-            // Clear selection if background is clicked
             document_graphics.selected.clear();
         }
     }
