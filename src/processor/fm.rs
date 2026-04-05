@@ -74,15 +74,15 @@ impl Processor for FmProcessor {
         self.sender.send(FmMessage::Reset).ok();
     }
 
-    fn start_clip(&mut self, clip_id: usize, stream_descriptor: &PreprocessedClipDescriptor) {
+    fn start_clip(&mut self, clip_id: usize, clip_descriptor: &PreprocessedClipDescriptor) {
         match self.clips.entry(clip_id) {
             Entry::Vacant(e) => {
-                if let Some(processor) = ClipProcessor::new(&self.parameters, stream_descriptor) {
+                if let Some(processor) = ClipProcessor::new(&self.parameters, clip_descriptor) {
                     e.insert(processor);
                 }
             }
             Entry::Occupied(_) => {
-                panic!("start_clip() called with a stream that already exists");
+                panic!("start_clip() called with a clip that already exists");
             }
         }
     }
@@ -124,32 +124,31 @@ pub struct ClipProcessor {
     audio_interpolator: CubicInterpolator<f32>,
     active_transmission: Option<TransmissionId>,
     output_sample_rate: f64,
-    stream_start_time: f64,
-    stream_chunk_size: usize,
-    stream_sample_rate: f64,
-    stream_chunk_count: usize,
+    clip_start_time: f64,
+    clip_chunk_size: usize,
+    clip_sample_rate: f64,
+    clip_chunk_count: usize,
 }
 
 impl ClipProcessor {
     fn new(
         parameters: &FmProcessorParameters,
-        stream_descriptor: &PreprocessedClipDescriptor,
+        clip_descriptor: &PreprocessedClipDescriptor,
     ) -> Option<ClipProcessor> {
-        let fft_size = stream_descriptor.fft_size;
+        let fft_size = clip_descriptor.fft_size;
 
         // Compute channel width, in bins
-        let signal_bin_count =
-            fft_size as f64 * parameters.bandwidth / stream_descriptor.sample_rate;
+        let signal_bin_count = fft_size as f64 * parameters.bandwidth / clip_descriptor.sample_rate;
         let signal_bin_count = (signal_bin_count / 2.).max(1.).ceil() as usize * 2; // Round up to even size of at least 2
         let margin_bin_count =
-            fft_size as f64 * parameters.bandwidth * CHANNEL_MARGIN / stream_descriptor.sample_rate;
+            fft_size as f64 * parameters.bandwidth * CHANNEL_MARGIN / clip_descriptor.sample_rate;
         let margin_bin_count = margin_bin_count.max(1.).ceil() as usize;
         let ifft_size = signal_bin_count + 2 * margin_bin_count;
 
         // Find the bins of interest
         let center_bin = fft_freq2bin(
             fft_size,
-            (parameters.frequency - stream_descriptor.frequency) / stream_descriptor.sample_rate,
+            (parameters.frequency - clip_descriptor.frequency) / clip_descriptor.sample_rate,
         );
         // If left bin < 0, skip this channel
         let left_bin = center_bin.checked_sub(fft_dc_bin(ifft_size) - margin_bin_count)?;
@@ -160,8 +159,8 @@ impl ClipProcessor {
         }
         let bins = left_bin..right_bin;
 
-        let tuning_error = fft_bin2freq(fft_size, center_bin) * stream_descriptor.sample_rate
-            + stream_descriptor.frequency
+        let tuning_error = fft_bin2freq(fft_size, center_bin) * clip_descriptor.sample_rate
+            + clip_descriptor.frequency
             - parameters.frequency;
 
         // Phasor to correct the phase shift caused by overlapping chunks.
@@ -170,7 +169,7 @@ impl ClipProcessor {
         // General form: [phasor^0, phasor^1, phasor^2, ...]
         let phasors = [1., phasor];
 
-        let output_sample_rate = stream_descriptor.sample_rate * ifft_size as f64 / fft_size as f64;
+        let output_sample_rate = clip_descriptor.sample_rate * ifft_size as f64 / fft_size as f64;
 
         let audio_fft_size =
             2 * (0.5 * ifft_size as f64 * audio::SAMPLE_RATE / output_sample_rate).ceil() as usize;
@@ -200,10 +199,10 @@ impl ClipProcessor {
             audio_interpolator: CubicInterpolator::new(audio_ifft_sample_rate / audio::SAMPLE_RATE),
             active_transmission: None,
             output_sample_rate,
-            stream_start_time: stream_descriptor.start_time,
-            stream_chunk_size: stream_descriptor.chunk_size,
-            stream_sample_rate: stream_descriptor.sample_rate,
-            stream_chunk_count: 0,
+            clip_start_time: clip_descriptor.start_time,
+            clip_chunk_size: clip_descriptor.chunk_size,
+            clip_sample_rate: clip_descriptor.sample_rate,
+            clip_chunk_count: 0,
         })
     }
 
@@ -214,7 +213,7 @@ impl ClipProcessor {
         transmission_id_factory: &mut IdFactory,
     ) {
         // Calculate time based on chunk count
-        self.stream_chunk_count += 1;
+        self.clip_chunk_count += 1;
         // Pick out the relevant bins from the overall FFT data
         let fft_count = preprocessed_data.len() / self.fft_size;
         let chunk_slice_len = self.bins.end - self.bins.start;
@@ -259,12 +258,12 @@ impl ClipProcessor {
                 if energy > self.squelch_high {
                     let transmission_id = transmission_id_factory.create();
                     let transmission = self.active_transmission.insert(transmission_id);
-                    let period = self.stream_chunk_size as f64 / self.stream_sample_rate;
+                    let period = self.clip_chunk_size as f64 / self.clip_sample_rate;
                     sender
                         .send(FmMessage::StartTransmission {
                             transmission_id,
-                            reference_time: self.stream_start_time
-                                + self.stream_chunk_count as f64 * period,
+                            reference_time: self.clip_start_time
+                                + self.clip_chunk_count as f64 * period,
                             period,
                             iq_sample_rate: self.output_sample_rate,
                         })

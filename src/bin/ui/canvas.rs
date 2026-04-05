@@ -335,7 +335,8 @@ pub fn ui(
     document_graphics.process(
         &wgpu_render_state.device,
         &wgpu_render_state.queue,
-        document,
+        &document.document,
+        &document.active_clips,
     );
 
     // Sort draw_order by hover state (non-hovered first, hovered last)
@@ -386,7 +387,7 @@ pub fn ui(
             let time_delta = drag.x as f64 / viewport.scale_x;
 
             if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
-                doc_clip.descriptor.start_time += time_delta;
+                Arc::make_mut(doc_clip).descriptor.start_time += time_delta;
             }
         }
     }

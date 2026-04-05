@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{array, collections::VecDeque, ops::Index, sync::Arc};
 
-const CHUNK_SIZE: usize = 1024;
+const CHUNK_SIZE: usize = 256;
 
 // TODO: Replace Option<T> with MaybeUninit<T>
 #[derive(Clone)]
@@ -231,22 +231,36 @@ impl<T> ChunkedDeque<T> {
         }
     }
 
-    pub fn range_eq(&self, other: &Self, range: std::ops::Range<isize>) -> bool
+    // Returns true if all of the following conditions are met:
+    // * `self` overlaps `other`,
+    // * `other` doesn't contain any data newer than `self`
+    // * `self` doesn't contain any data older than `other`
+    // * the data in the overlap matches
+    //
+    // Example of a "true" case:
+    // self:     [defghijklmno]
+    // other: [abcdefghijk]
+    pub fn is_continuation_of(&self, other: &Self) -> bool
     where
         T: PartialEq,
     {
-        let std::ops::Range { start, end } = range;
+        if self.start_index < other.start_index || self.end_index < other.end_index {
+            return false;
+        }
 
-        assert!(start >= self.start_index() && start <= self.end_index());
-        assert!(start >= other.start_index() && start <= other.end_index());
-        assert!(end >= self.start_index() && end <= self.end_index());
-        assert!(end >= other.start_index() && end <= other.end_index());
-        assert!(start <= end);
+        // Region of possible overlap
+        let start = self.start_index;
+        let end = other.end_index;
 
-        let mut cur = start;
-        let (mut self_chunk_idx, mut offset) = self.index_to_chunk_and_offset(cur);
-        let (mut other_chunk_idx, offset2) = other.index_to_chunk_and_offset(cur);
+        if start >= end {
+            // The two queues are disjoint
+            return false;
+        }
+
+        let (mut self_chunk_idx, mut offset) = self.index_to_chunk_and_offset(start);
+        let (mut other_chunk_idx, offset2) = other.index_to_chunk_and_offset(start);
         debug_assert_eq!(offset, offset2);
+        let mut cur = start;
 
         while cur < end {
             let self_chunk = &self.chunks[self_chunk_idx];

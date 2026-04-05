@@ -1,12 +1,12 @@
 use crate::{
-    document::{ActiveDocument, Clip, ClipId},
+    document::{Clip, ClipDescriptor, ClipId, Document},
     id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
     processor::{Processor, ProcessorHistory, ProcessorParameters},
 };
 use rayon::prelude::*;
 use std::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     sync::mpsc::{Receiver, Sender, channel},
     thread::{JoinHandle, spawn},
 };
@@ -14,89 +14,49 @@ use std::{
 pub type ProcessorId = usize;
 type ProcessorInstanceId = usize;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ClipCursor {
     Before,
     Index(isize),
     After,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Cursor {
-    cursors: BTreeMap<ClipId, (Clip, ClipCursor)>,
+    cursors: BTreeMap<ClipId, ClipCursor>,
 }
 
 impl Cursor {
-    fn start_of_document(document: &DocumentSnapshot) -> Self {
+    fn start_of_document(document: &Document) -> Self {
         Self {
             cursors: document
                 .clips
-                .iter()
-                .map(|(clip_id, clip)| (*clip_id, (clip.clone(), ClipCursor::Before)))
+                .keys()
+                .map(|clip_id| (*clip_id, ClipCursor::Before))
                 .collect(),
         }
     }
 
-    fn try_update(mut self, document: &DocumentSnapshot) -> Option<Self> {
-        let mut invalidated = false;
-        // Check for removed clips
-        self.cursors.retain(|clip_id, (clip, clip_cursor)| {
-            let mut retain = false;
-            let mut clip_is_same = false;
-            if let Some(new_clip) = document.clips.get(clip_id) {
-                retain = true;
-                if new_clip.chunks.start_index() >= clip.chunks.start_index()
-                    && new_clip.chunks.end_index() >= clip.chunks.end_index()
-                {
-                    let start = new_clip.chunks.start_index().max(clip.chunks.start_index());
-                    let end = new_clip.chunks.end_index().min(clip.chunks.end_index());
-                    if end > start {
-                        // Check if overlap is equal
-                        if new_clip.chunks.range_eq(&clip.chunks, start..end) {
-                            clip_is_same = true;
-                        }
-                    }
-                }
-                *clip = new_clip.clone();
-            }
-            // Reset cursor if a started clip was deleted or edited
-            if !clip_is_same && !matches!(clip_cursor, ClipCursor::Before) {
-                invalidated = true;
-            }
-            retain
-        });
+    fn get(&mut self, clip_id: ClipId) -> ClipCursor {
+        self.cursors.get(&clip_id).unwrap().clone()
+    }
 
-        if invalidated {
-            return None;
-        }
+    fn add_clip(&mut self, clip_id: ClipId) {
+        self.cursors.insert(clip_id, ClipCursor::Before);
+    }
 
-        // Check for added clips
-        let t = self.time();
-        for (&clip_id, clip) in document.clips.iter() {
-            // Reset cursor if a clip was added that starts before the cursor
-            match self.cursors.entry(clip_id) {
-                Entry::Vacant(e) => {
-                    if let Some(t) = t
-                        && clip.descriptor.start_time < t
-                    {
-                        return None;
-                    }
-                    // Otherwise, add the clip to the cursor
-                    e.insert((clip.clone(), ClipCursor::Before));
-                }
-                Entry::Occupied(_) => {}
-            }
-        }
-
-        Some(self)
+    fn remove_clip(&mut self, clip_id: ClipId) {
+        self.cursors.remove(&clip_id);
     }
 
     // Calculate the time of this cursor position.
     // Returns None if there are no clips in the document
-    fn time(&self) -> Option<f64> {
+    fn time(&self, document: &Document) -> Option<f64> {
         self.cursors
-            .values()
-            .map(|(clip, clip_cursor)| Self::clip_time_at_index(clip, *clip_cursor))
+            .iter()
+            .map(|(clip_id, clip_cursor)| {
+                Self::clip_time_at_index(document.clips.get(clip_id).unwrap(), *clip_cursor)
+            })
             .min_by(|a, b| a.partial_cmp(b).unwrap())
     }
 
@@ -113,8 +73,8 @@ impl Cursor {
     fn is_before(&self, other: &Cursor) -> bool {
         assert_eq!(self.cursors.len(), other.cursors.len());
 
-        for (clip_id, (_clip_a, cursor_a)) in self.cursors.iter() {
-            let (_clip_b, cursor_b) = other.cursors.get(clip_id).unwrap();
+        for (clip_id, cursor_a) in self.cursors.iter() {
+            let cursor_b = other.cursors.get(clip_id).unwrap();
             if cursor_a < cursor_b {
                 return true;
             }
@@ -122,31 +82,37 @@ impl Cursor {
         false
     }
 
-    fn advance(&mut self, active_clips: &BTreeSet<ClipId>) -> Option<Event> {
+    fn advance(&mut self, document: &Document, active_clips: &BTreeSet<ClipId>) -> Option<Event> {
         // Collect all clips with their times and sort by time
-        let mut clips_by_time: Vec<(f64, ClipId)> = self
+        let mut clips_by_time: Vec<_> = self
             .cursors
             .iter()
-            .map(|(&clip_id, (clip, clip_cursor))| {
+            .map(|(&clip_id, clip_cursor)| {
+                let clip = document.clips.get(&clip_id).unwrap();
                 let time = Self::clip_time_at_index(clip, *clip_cursor);
-                (time, clip_id)
+                (
+                    time,
+                    clip_id,
+                    clip.chunks.start_index(),
+                    clip.chunks.end_index(),
+                )
             })
             .collect();
 
         clips_by_time.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         // Try to advance each clip in order of earliest time
-        for (_time, clip_id) in clips_by_time {
-            let (clip, clip_cursor) = self.cursors.get_mut(&clip_id).unwrap();
+        for (_time, clip_id, start_index, end_index) in clips_by_time {
+            let clip_cursor = self.cursors.get_mut(&clip_id).unwrap();
 
             let event = match *clip_cursor {
                 ClipCursor::Before => {
                     // Transition from Before to Index(start_index)
-                    *clip_cursor = ClipCursor::Index(clip.chunks.start_index());
+                    *clip_cursor = ClipCursor::Index(start_index);
                     Some(Some(Event::ClipStart(clip_id)))
                 }
                 ClipCursor::Index(chunk_index) => {
-                    if chunk_index < clip.chunks.end_index() {
+                    if chunk_index < end_index {
                         // We have a chunk to process
                         let event = Event::Chunk(clip_id, chunk_index);
                         // Advance to next chunk
@@ -182,28 +148,6 @@ impl Cursor {
     }
 }
 
-#[derive(Clone)]
-struct DocumentSnapshot {
-    clips: BTreeMap<ClipId, Clip>,
-    active_clips: BTreeSet<ClipId>,
-}
-
-impl DocumentSnapshot {
-    fn new() -> Self {
-        DocumentSnapshot {
-            clips: BTreeMap::new(),
-            active_clips: BTreeSet::new(),
-        }
-    }
-
-    fn from_document(document: &ActiveDocument) -> Self {
-        DocumentSnapshot {
-            clips: document.document.clips.clone(),
-            active_clips: document.active_clips.clone(),
-        }
-    }
-}
-
 pub struct Analysis {
     instance_id_factory: IdFactory,
     processors: BTreeMap<ProcessorId, MainThreadProcessorState>,
@@ -234,7 +178,8 @@ impl Analysis {
     pub fn process(
         &mut self,
         processor_parameters: &mut BTreeMap<ProcessorId, ProcessorParameters>,
-        document: &ActiveDocument,
+        document: &Document,
+        active_clips: &BTreeSet<ClipId>,
     ) {
         // 1. Add & remove processor states
         let mut removed_processors = vec![];
@@ -289,7 +234,8 @@ impl Analysis {
         let msg = ProcessingInputMessage {
             removed_processors,
             new_processors,
-            document: DocumentSnapshot::from_document(document),
+            document: document.clone(),
+            active_clips: active_clips.clone(),
         };
         self.processing_thread_sender.send(msg).unwrap();
     }
@@ -329,7 +275,8 @@ struct ChildThreadProcessorState {
 struct ProcessingInputMessage {
     removed_processors: Vec<ProcessorInstanceId>,
     new_processors: Vec<(ProcessorInstanceId, Box<dyn Processor>)>,
-    document: DocumentSnapshot,
+    document: Document,
+    active_clips: BTreeSet<ClipId>,
 }
 
 #[derive(Debug)]
@@ -340,62 +287,142 @@ enum Event {
 }
 
 fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage>) {
-    let mut document = DocumentSnapshot::new();
+    let mut prev_document = Document::new();
     let mut preprocessors: BTreeMap<ClipId, StreamPreprocessor> = BTreeMap::new();
-    let mut preprocessor_cursor = Cursor::start_of_document(&document);
+    let mut preprocessor_cursor = Cursor::start_of_document(&prev_document);
     let mut processors = BTreeMap::<ProcessorInstanceId, ChildThreadProcessorState>::new();
 
     while let Ok(mut msg) = child_thread_receiver.recv() {
         'interrupted: loop {
-            // 1. Read new document
-            document = msg.document;
-
-            // 2. Add and remove processors
+            // 1. Remove processors
             for instance_id in msg.removed_processors {
                 processors.remove(&instance_id);
             }
+
+            // 2. Get the document update
+            // and see if we need to restart all processors from the beginning.
+            let new_document = msg.document;
+            let mut restart_all = false;
+
+            // 2a. Deleted clips
+            for (clip_id, _prev_clip) in prev_document.removed_clips(&new_document) {
+                // See if this clip removal invalidates the cursor
+                let clip_cursor = preprocessor_cursor.get(clip_id);
+                if matches!(clip_cursor, ClipCursor::Index(_) | ClipCursor::After) {
+                    // This clip invalidates all cursors
+                    restart_all = true;
+                } else {
+                    // Remove this clip from all cursors
+                    preprocessor_cursor.remove_clip(clip_id);
+                    for processor in processors.values_mut() {
+                        processor.cursor.remove_clip(clip_id);
+                    }
+                }
+            }
+
+            // 2b. Modified clips
+            if let Some(cursor_t) = preprocessor_cursor.time(&prev_document) {
+                for (clip_id, prev_clip, new_clip) in prev_document.modified_clips(&new_document) {
+                    let ClipDescriptor {
+                        name: _,
+                        frequency: prev_frequency,
+                        sample_rate: prev_sample_rate,
+                        start_time: prev_start_time,
+                        chunk_size: prev_chunk_size,
+                    } = prev_clip.descriptor;
+                    let ClipDescriptor {
+                        name: _,
+                        frequency,
+                        sample_rate,
+                        start_time,
+                        chunk_size,
+                    } = new_clip.descriptor;
+
+                    let clip_cursor = preprocessor_cursor.get(clip_id);
+                    let new_clip_start_t = new_clip
+                        .descriptor
+                        .time(new_clip.chunks.start_index() as f64);
+                    let clip_affects_history =
+                        matches!(clip_cursor, ClipCursor::Index(_) | ClipCursor::After)
+                            || new_clip_start_t < cursor_t;
+
+                    let descriptor_changed = frequency != prev_frequency
+                        || sample_rate != prev_sample_rate
+                        || start_time != prev_start_time
+                        || chunk_size != prev_chunk_size;
+
+                    if clip_affects_history
+                        && (descriptor_changed
+                            || !new_clip.chunks.is_continuation_of(&prev_clip.chunks)
+                            || {
+                                // If we are are `After` the clip, it has already been "finalized" in the processors.
+                                // So we don't allow any further edits to the chunk data,
+                                // even if the edits constitute a continuation.
+                                matches!(clip_cursor, ClipCursor::After)
+                                    && (new_clip.chunks.start_index()
+                                        > prev_clip.chunks.start_index()
+                                        || new_clip.chunks.end_index()
+                                            > prev_clip.chunks.end_index())
+                            })
+                    {
+                        // This clip invalidates all cursors
+                        restart_all = true;
+                    }
+                }
+            }
+
+            // 2c. New clips
+            for (clip_id, new_clip) in prev_document.added_clips(&new_document) {
+                if let Some(cursor_t) = preprocessor_cursor.time(&prev_document)
+                    && {
+                        let clip_start_t = new_clip
+                            .descriptor
+                            .time(new_clip.chunks.start_index() as f64);
+                        clip_start_t < cursor_t
+                    }
+                {
+                    // This clip invalidates all cursors
+                    restart_all = true;
+                } else {
+                    // Add this clip to all cursors
+                    preprocessor_cursor.add_clip(clip_id);
+                    for processor in processors.values_mut() {
+                        processor.cursor.add_clip(clip_id);
+                    }
+                }
+            }
+
+            // 2d. Invalidate all cursors if the flag was set
+            if restart_all {
+                preprocessor_cursor = Cursor::start_of_document(&new_document);
+                for processor in processors.values_mut() {
+                    processor.processor.reset();
+                    processor.cursor = preprocessor_cursor.clone();
+                }
+            }
+
+            // 2e. Update prev_document
+            prev_document = new_document.clone();
+
+            // 3. Add new processors
             for (instance_id, processor) in msg.new_processors {
+                // Adding a new processor means we need to preprocess from the beginning
+                // (but we don't need to invalidate existing processors)
+                preprocessor_cursor = Cursor::start_of_document(&new_document);
                 processors.insert(
                     instance_id,
                     ChildThreadProcessorState {
                         processor,
-                        cursor: Cursor::start_of_document(&document),
+                        cursor: preprocessor_cursor.clone(),
                     },
                 );
             }
 
-            // 3. Reset processors and preprocessor if invalidated
-            for processor_state in processors.values_mut() {
-                processor_state.cursor = processor_state
-                    .cursor
-                    .clone()
-                    .try_update(&document)
-                    .unwrap_or_else(|| {
-                        processor_state.processor.reset();
-                        Cursor::start_of_document(&document)
-                    });
-            }
-
-            // Reset the preprocessor if try_update fails
-            // or if any processor has a cursor that falls before the preprocessor cursor
-            preprocessor_cursor = preprocessor_cursor
-                .clone()
-                .try_update(&document)
-                .filter(|preprocessor_cursor| {
-                    processors
-                        .values_mut()
-                        .all(|ps| !ps.cursor.is_before(preprocessor_cursor))
-                })
-                .unwrap_or_else(|| {
-                    preprocessors.clear();
-                    Cursor::start_of_document(&document)
-                });
-
             // 4. Process from the preprocessor cursor (which will be the earliest)
-            while let Some(event) = preprocessor_cursor.advance(&document.active_clips) {
+            while let Some(event) = preprocessor_cursor.advance(&new_document, &msg.active_clips) {
                 match event {
                     Event::ClipStart(clip_id) => {
-                        let clip = document.clips.get(&clip_id).unwrap();
+                        let clip = new_document.clips.get(&clip_id).unwrap();
                         let (preprocessor, desc) = StreamPreprocessor::new(&clip.descriptor);
                         preprocessors.insert(clip_id, preprocessor);
 
@@ -421,7 +448,7 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
                         }
                     }
                     Event::Chunk(clip_id, chunk_index) => {
-                        let clip = document.clips.get(&clip_id).unwrap();
+                        let clip = new_document.clips.get(&clip_id).unwrap();
                         let chunk = clip.chunks.get(chunk_index).unwrap();
 
                         // Preprocess

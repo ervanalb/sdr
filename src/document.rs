@@ -85,9 +85,86 @@ impl<'de> serde::Deserialize<'de> for Chunk {
 }
 
 /// The serializable document containing clips
-#[derive(Debug, Serialize, Deserialize)]
+// TODO: Remove Clone and pass around Arc<Document>
+#[derive(Clone, Debug, Default)]
 pub struct Document {
-    pub clips: BTreeMap<ClipId, Clip>,
+    pub clips: BTreeMap<ClipId, Arc<Clip>>,
+}
+
+impl serde::Serialize for Document {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Document", 1)?;
+        // Serialize the BTreeMap<ClipId, Arc<Clip>> as BTreeMap<ClipId, Clip>
+        let clips: BTreeMap<ClipId, &Clip> = self
+            .clips
+            .iter()
+            .map(|(id, clip)| (*id, clip.as_ref()))
+            .collect();
+        state.serialize_field("clips", &clips)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Document {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DocumentHelper {
+            clips: BTreeMap<ClipId, Clip>,
+        }
+
+        let helper = DocumentHelper::deserialize(deserializer)?;
+        Ok(Document {
+            clips: helper
+                .clips
+                .into_iter()
+                .map(|(id, clip)| (id, Arc::new(clip)))
+                .collect(),
+        })
+    }
+}
+
+impl Document {
+    pub fn new() -> Self {
+        Document {
+            clips: BTreeMap::new(),
+        }
+    }
+
+    pub fn removed_clips<'a>(
+        &'a self,
+        new: &'a Document,
+    ) -> impl Iterator<Item = (ClipId, &'a Arc<Clip>)> {
+        self.clips.iter().filter_map(|(clip_id, clip)| {
+            (!new.clips.contains_key(clip_id)).then_some((*clip_id, clip))
+        })
+    }
+
+    pub fn added_clips<'a>(
+        &'a self,
+        new: &'a Document,
+    ) -> impl Iterator<Item = (ClipId, &'a Arc<Clip>)> {
+        new.clips.iter().filter_map(|(clip_id, clip)| {
+            (!self.clips.contains_key(clip_id)).then_some((*clip_id, clip))
+        })
+    }
+
+    pub fn modified_clips<'a>(
+        &'a self,
+        new: &'a Document,
+    ) -> impl Iterator<Item = (ClipId, &'a Arc<Clip>, &'a Arc<Clip>)> {
+        self.clips.iter().filter_map(|(clip_id, old_clip)| {
+            new.clips.get(clip_id).and_then(|new_clip| {
+                (!Arc::ptr_eq(old_clip, new_clip)).then_some((*clip_id, old_clip, new_clip))
+            })
+        })
+    }
 }
 
 /// Magic number for SDR file format: "SDR\0" + version byte
@@ -196,7 +273,9 @@ impl ActiveDocument {
         Ok(())
     }
 
-    pub fn load_from_file(path: &std::path::Path) -> Result<ActiveDocument, Box<dyn std::error::Error>> {
+    pub fn load_from_file(
+        path: &std::path::Path,
+    ) -> Result<ActiveDocument, Box<dyn std::error::Error>> {
         let file = std::fs::File::open(path)?;
         let saved: SavedDocument = bincode::deserialize_from(file)?;
         saved.validate_magic()?;
@@ -281,7 +360,7 @@ impl ActiveDocument {
                     self.clip_name_counter += 1;
                     self.document.clips.insert(
                         clip_id,
-                        Clip {
+                        Arc::new(Clip {
                             descriptor: ClipDescriptor {
                                 name: clip_name,
                                 frequency: descriptor.frequency,
@@ -290,13 +369,15 @@ impl ActiveDocument {
                                 chunk_size: descriptor.chunk_size,
                             },
                             chunks: ChunkedDeque::new(),
-                        },
+                        }),
                     );
                     clip_id
                 });
 
             let clip = self.document.clips.get_mut(&clip_id).unwrap();
-            clip.chunks.push_back(Chunk::new(chunk.chunk));
+            Arc::make_mut(clip)
+                .chunks
+                .push_back(Chunk::new(chunk.chunk));
         }
     }
 
@@ -314,7 +395,7 @@ impl ActiveDocument {
                     clip.chunks.end_index() as f64,
                 );
                 let retain_index = retain_index as isize;
-                clip.chunks.remove_front(retain_index);
+                Arc::make_mut(clip).chunks.remove_front(retain_index);
 
                 // Retain empty clips that are part of an active recording
                 !clip.chunks.is_empty() || self.active_clips.contains(clip_id)

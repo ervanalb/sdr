@@ -140,10 +140,11 @@ impl eframe::App for SdrApp {
 
         // Document graphics processing now happens in canvas.rs
 
-        self.analysis
-            .process(&mut self.processor_parameters, &self.document);
-        // TODO: bring back expire
-        //self.analysis.expire(todo!());
+        self.analysis.process(
+            &mut self.processor_parameters,
+            &self.document.document,
+            &self.document.active_clips,
+        );
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {

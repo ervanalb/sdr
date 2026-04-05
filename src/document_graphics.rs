@@ -1,5 +1,5 @@
 use crate::{
-    document::{ActiveDocument, ClipDescriptor, ClipId},
+    document::{ClipDescriptor, ClipId, Document},
     dsp::{Fft, OverlapExpand, hann_window, log_mix_f32},
     hardware::RawIqSamples,
     waterfall_renderer::{WaterfallDrawInfo, WaterfallRenderer},
@@ -26,91 +26,114 @@ const TEXTURE_HEIGHT: u32 = 1024;
 #[derive(Default)]
 pub struct DocumentGraphics {
     pub clips: BTreeMap<ClipId, ClipGraphics>,
+    pub prev_document: Document,
     pub selected: BTreeSet<ClipId>,
     pub hovered: BTreeSet<ClipId>,
     pub draw_order: Vec<ClipId>,
 }
 
 impl DocumentGraphics {
+    /*
     pub fn new() -> DocumentGraphics {
         DocumentGraphics {
             clips: BTreeMap::new(),
+            prev_document: Arc::new(Document::new()),
             selected: BTreeSet::new(),
             hovered: BTreeSet::new(),
             draw_order: Vec::new(),
         }
     }
+    */
 
-    pub fn process(&mut self, device: &Device, queue: &Queue, document: &ActiveDocument) {
+    pub fn process(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        document: &Document,
+        active_clips: &BTreeSet<ClipId>,
+    ) {
         // Remove clip graphics for deleted clips
-        self.clips
-            .retain(|&clip_id, _| document.document.clips.contains_key(&clip_id));
-
-        // Remove deleted clips from draw_order and hovered
-        self.draw_order
-            .retain(|clip_id| document.document.clips.contains_key(clip_id));
-        self.hovered
-            .retain(|clip_id| document.document.clips.contains_key(clip_id));
+        for (clip_id, _prev_clip) in self.prev_document.removed_clips(document) {
+            self.clips.remove(&clip_id);
+            self.draw_order.retain(|&i| i != clip_id);
+            self.hovered.remove(&clip_id);
+        }
 
         // Reset the graphics for clips that changed in a meaningful way,
         // or update graphics for clips that changed in a trivial way
-        for (&clip_id, clip_graphics) in self.clips.iter_mut() {
-            let clip = document.document.clips.get(&clip_id).unwrap();
-
+        for (clip_id, prev_clip, new_clip) in self.prev_document.modified_clips(document) {
             let ClipDescriptor {
                 name: _,
                 frequency: _,
                 sample_rate: prev_sample_rate,
                 start_time: _,
                 chunk_size: prev_chunk_size,
-            } = clip_graphics.descriptor;
+            } = prev_clip.descriptor;
             let ClipDescriptor {
                 name: _,
                 frequency: _,
                 sample_rate,
                 start_time: _,
                 chunk_size,
-            } = clip.descriptor;
+            } = new_clip.descriptor;
 
-            if sample_rate != prev_sample_rate || chunk_size != prev_chunk_size {
-                *clip_graphics =
-                    ClipGraphics::new(device, clip.descriptor.clone(), clip.chunks.start_index())
+            let clip_graphics = self.clips.get_mut(&clip_id).unwrap();
+
+            if sample_rate != prev_sample_rate
+                || chunk_size != prev_chunk_size
+                || !new_clip.chunks.is_continuation_of(&prev_clip.chunks)
+                || (clip_graphics.finalized()
+                    && new_clip.chunks.end_index() > clip_graphics.end_index)
+            {
+                *clip_graphics = ClipGraphics::new(
+                    device,
+                    new_clip.descriptor.clone(),
+                    new_clip.chunks.start_index(),
+                )
             } else {
-                clip_graphics.descriptor = clip.descriptor.clone();
+                clip_graphics.descriptor = new_clip.descriptor.clone();
             }
         }
 
         // Add clip graphics for new clips
-        for (&clip_id, clip) in document.document.clips.iter() {
-            self.clips.entry(clip_id).or_insert_with(|| {
-                // Add new clips to the end of the draw_order
-                self.draw_order.push(clip_id);
-                ClipGraphics::new(device, clip.descriptor.clone(), clip.chunks.start_index())
-            });
+        for (clip_id, new_clip) in self.prev_document.added_clips(document) {
+            self.clips.insert(
+                clip_id,
+                ClipGraphics::new(
+                    device,
+                    new_clip.descriptor.clone(),
+                    new_clip.chunks.start_index(),
+                ),
+            );
+            self.draw_order.push(clip_id);
         }
+
+        self.prev_document = document.clone();
 
         // Gather work items
-        let mut work = Vec::new();
-        for (&clip_id, clip_graphics) in self.clips.iter_mut() {
-            let clip = document.document.clips.get(&clip_id).unwrap();
-            let next_chunk = clip_graphics.end_index;
-            if next_chunk < clip.chunks.end_index() {
-                work.push((clip_graphics, clip, next_chunk, clip.chunks.end_index()));
-            }
-        }
+        let work: Vec<_> = self
+            .clips
+            .iter_mut()
+            .filter_map(|(clip_id, clip_graphics)| {
+                let new_clip = document.clips.get(clip_id).unwrap();
+                (clip_graphics.end_index < new_clip.chunks.end_index())
+                    .then_some((clip_graphics, new_clip))
+            })
+            .collect();
 
         // Run the work in parallel
-        work.into_par_iter()
-            .for_each(|(clip_graphics, clip, start_index, end_index)| {
-                for chunk in clip.chunks.range(start_index..end_index) {
-                    clip_graphics.process(device, queue, chunk.as_ref());
-                }
-                clip_graphics.end_index = end_index;
-            });
+        work.into_par_iter().for_each(|(clip_graphics, clip)| {
+            let start_index = clip_graphics.end_index;
+            let end_index = clip.chunks.end_index();
+            for chunk in clip.chunks.range(start_index..end_index) {
+                clip_graphics.process(device, queue, chunk.as_ref());
+            }
+            clip_graphics.end_index = end_index;
+        });
 
         // Finalize processing for any clips that are no longer active
         for (&clip_id, clip_graphics) in self.clips.iter_mut() {
-            if !clip_graphics.finalized() && !document.active_clips.contains(&clip_id) {
+            if !clip_graphics.finalized() && !active_clips.contains(&clip_id) {
                 clip_graphics.finalize(device, queue);
             }
         }
@@ -123,10 +146,6 @@ impl DocumentGraphics {
             // Add it to the end of list (visually, on top)
             self.draw_order.push(clip_id);
         }
-    }
-
-    pub fn expire(&mut self, _retain_time: f64) {
-        todo!();
     }
 }
 
@@ -311,6 +330,8 @@ impl ClipGraphics {
         clip_id: ClipId,
         is_selected: bool,
     ) -> (egui::Response, egui::Response) {
+        // TODO: Consider moving these into self
+        // instead of calculating them every frame from descriptor
         let y_top = viewport.screen_space_y(self.descriptor.freq_max());
         let y_bottom = viewport.screen_space_y(self.descriptor.freq_min());
         let x_left = viewport.screen_space_x(self.descriptor.time(self.start_index as f64));
