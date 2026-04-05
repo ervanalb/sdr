@@ -23,6 +23,13 @@ const AVAILABLE_TIME_GRIDLINES: [f64; 15] = [
 
 const BAR_WIDTH: f32 = 14.;
 
+#[derive(Clone)]
+struct RxStreamDragState {
+    device_id: String,
+    channel_idx: usize,
+    proposed_frequency: f64,
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
@@ -242,10 +249,9 @@ pub fn ui(
     // RX Streams
     for (device_id, device_params) in &mut hardware_params.devices {
         for (channel_idx, rx_channel_params) in device_params.rx_streams.iter_mut().enumerate() {
-            let channel_min_freq =
-                rx_channel_params.frequency.unwrap() - 0.5 * rx_channel_params.sample_rate.unwrap();
-            let channel_max_freq =
-                rx_channel_params.frequency.unwrap() + 0.5 * rx_channel_params.sample_rate.unwrap();
+            let current_freq = rx_channel_params.frequency.unwrap();
+            let channel_min_freq = current_freq - 0.5 * rx_channel_params.sample_rate.unwrap();
+            let channel_max_freq = current_freq + 0.5 * rx_channel_params.sample_rate.unwrap();
 
             let rect_left = figure_rect.left() - 114.;
             let rect_right = rect_left + BAR_WIDTH;
@@ -258,6 +264,8 @@ pub fn ui(
             };
             let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
             let visuals = ui.visuals().widgets.style(&response);
+
+            // Draw the original rect
             painter.rect(
                 rect,
                 visuals.corner_radius,
@@ -265,11 +273,7 @@ pub fn ui(
                 visuals.fg_stroke,
                 egui::StrokeKind::Outside,
             );
-            if response.dragged_by(egui::PointerButton::Primary) {
-                let drag = response.drag_delta();
-                // Y axis is flipped, so negate the drag delta
-                *rx_channel_params.frequency.as_mut().unwrap() -= drag.y as f64 / viewport.scale_y;
-            }
+
             paint_elided_text(
                 &painter,
                 rect.intersect(ui_rect),
@@ -279,6 +283,73 @@ pub fn ui(
                 true,
                 true,
             );
+
+            // Get RX stream drag state from egui memory
+            let drag_state_id = ui.id().with("rx_stream_drag_state");
+            let mut drag_state: Option<RxStreamDragState> = ui.ctx().memory_mut(|m| {
+                m.data
+                    .get_temp::<Option<RxStreamDragState>>(drag_state_id)
+                    .flatten()
+                    .clone()
+            });
+
+            // Handle starting drag
+            if response.drag_started() {
+                drag_state = Some(RxStreamDragState {
+                    device_id: device_id.clone(),
+                    channel_idx,
+                    proposed_frequency: current_freq,
+                });
+
+                // Store drag state back to egui memory
+                ui.ctx().memory_mut(|m| {
+                    m.data.insert_temp(drag_state_id, drag_state.clone());
+                });
+            }
+
+            // Handle active drag
+            if let Some(ref mut state) = drag_state
+                && &state.device_id == device_id
+                && state.channel_idx == channel_idx
+            {
+                if response.dragged() {
+                    let drag = response.drag_delta();
+                    // Y axis is flipped, so negate the drag delta
+                    let freq_delta = -drag.y as f64 / viewport.scale_y;
+                    state.proposed_frequency += freq_delta;
+                }
+
+                // Draw ghost outline if this stream is being dragged
+                let ghost_min_freq =
+                    state.proposed_frequency - 0.5 * rx_channel_params.sample_rate.unwrap();
+                let ghost_max_freq =
+                    state.proposed_frequency + 0.5 * rx_channel_params.sample_rate.unwrap();
+                let ghost_rect_top = figure_rect.top() + viewport.screen_space_y(ghost_max_freq);
+                let ghost_rect_bottom = figure_rect.top() + viewport.screen_space_y(ghost_min_freq);
+                let ghost_rect = egui::Rect {
+                    min: egui::pos2(rect_left, ghost_rect_top),
+                    max: egui::pos2(rect_right, ghost_rect_bottom),
+                };
+                painter.rect_stroke(
+                    ghost_rect,
+                    visuals.corner_radius,
+                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    egui::StrokeKind::Outside,
+                );
+
+                if response.drag_stopped() {
+                    // Apply the frequency change
+                    if let Some(ref state) = drag_state {
+                        *rx_channel_params.frequency.as_mut().unwrap() = state.proposed_frequency;
+                    }
+                    drag_state = None;
+                }
+
+                // Store drag state back to egui memory
+                ui.ctx().memory_mut(|m| {
+                    m.data.insert_temp(drag_state_id, drag_state.clone());
+                });
+            }
         }
     }
 
