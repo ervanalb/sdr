@@ -408,7 +408,9 @@ impl ClipGraphics {
         .intersect(figure_rect);
 
         let head_bar_id = ui.id().with(("clip_head_bar", clip_id));
-        let head_bar_response = ui.interact(head_bar_rect, head_bar_id, egui::Sense::drag());
+        let head_bar_response = ui
+            .interact(head_bar_rect, head_bar_id, egui::Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
 
         // Draw border based on selection and hover state
         let stroke = if is_selected {

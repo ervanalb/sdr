@@ -30,6 +30,12 @@ struct RxStreamDragState {
     proposed_frequency: f64,
 }
 
+#[derive(Clone)]
+struct ClipDragState {
+    clip_id: usize,
+    proposed_start_time: f64,
+}
+
 pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
@@ -293,8 +299,8 @@ pub fn ui(
                     .clone()
             });
 
-            // Handle starting drag
-            if response.drag_started() {
+            // Handle starting drag (disabled during recording)
+            if !is_recording && response.drag_started() {
                 drag_state = Some(RxStreamDragState {
                     device_id: device_id.clone(),
                     channel_idx,
@@ -410,6 +416,15 @@ pub fn ui(
         &document.active_clips,
     );
 
+    // Get clip drag state from egui memory
+    let clip_drag_state_id = ui.id().with("clip_drag_state");
+    let mut clip_drag_state: Option<ClipDragState> = ui.ctx().memory_mut(|m| {
+        m.data
+            .get_temp::<Option<ClipDragState>>(clip_drag_state_id)
+            .flatten()
+            .clone()
+    });
+
     // Sort draw_order by hover state (non-hovered first, hovered last)
     let mut sorted_draw_order = document_graphics.draw_order.clone();
     sorted_draw_order.sort_by_key(|clip_id| document_graphics.hovered.contains(clip_id));
@@ -452,14 +467,67 @@ pub fn ui(
             }
         }
 
-        // Handle dragging the clip in X by dragging its head bar
-        if head_bar_response.dragged_by(egui::PointerButton::Primary) {
-            let drag = head_bar_response.drag_delta();
-            let time_delta = drag.x as f64 / viewport.scale_x;
+        // Refresh for the borrow checker
+        let clip = document_graphics.clips.get(&clip_id).unwrap();
 
-            if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
-                Arc::make_mut(doc_clip).descriptor.start_time += time_delta;
+        // Handle starting drag (disabled during recording)
+        if !is_recording && head_bar_response.drag_started() {
+            clip_drag_state = Some(ClipDragState {
+                clip_id,
+                proposed_start_time: clip.descriptor.start_time,
+            });
+
+            // Store drag state back to egui memory
+            ui.ctx().memory_mut(|m| {
+                m.data
+                    .insert_temp(clip_drag_state_id, clip_drag_state.clone());
+            });
+        }
+
+        // Handle active drag
+        if let Some(ref mut state) = clip_drag_state
+            && state.clip_id == clip_id
+        {
+            if head_bar_response.dragged() {
+                let drag = head_bar_response.drag_delta();
+                let time_delta = drag.x as f64 / viewport.scale_x;
+                state.proposed_start_time = (state.proposed_start_time + time_delta).max(0.0);
             }
+
+            // Draw ghost outline if this clip is being dragged
+            let time_offset = state.proposed_start_time - clip.descriptor.start_time;
+            let y_top = viewport.screen_space_y(clip.descriptor.freq_max());
+            let y_bottom = viewport.screen_space_y(clip.descriptor.freq_min());
+            let x_left = viewport.screen_space_x(clip.descriptor.time(clip.start_index as f64))
+                + time_offset as f32 * viewport.scale_x as f32;
+            let x_right = viewport.screen_space_x(clip.descriptor.time(clip.end_index as f64))
+                + time_offset as f32 * viewport.scale_x as f32;
+
+            let ghost_clip_rect = egui::Rect::from_min_max(
+                figure_rect.min + egui::vec2(x_left, y_top),
+                figure_rect.min + egui::vec2(x_right, y_bottom),
+            );
+
+            painter.rect_stroke(
+                ghost_clip_rect,
+                0.0,
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+                egui::StrokeKind::Outside,
+            );
+
+            if head_bar_response.drag_stopped() {
+                // Apply the time change
+                if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
+                    Arc::make_mut(doc_clip).descriptor.start_time = state.proposed_start_time;
+                }
+                clip_drag_state = None;
+            }
+
+            // Store drag state back to egui memory
+            ui.ctx().memory_mut(|m| {
+                m.data
+                    .insert_temp(clip_drag_state_id, clip_drag_state.clone());
+            });
         }
     }
 
