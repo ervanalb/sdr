@@ -249,6 +249,7 @@ impl Analysis {
     pub fn draw(
         &self,
         ui: &mut egui::Ui,
+        figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &crate::ui::Viewport,
         dt: f64,
@@ -256,7 +257,7 @@ impl Analysis {
         for (processor_id, processor) in self.processors.iter() {
             processor
                 .history
-                .draw(ui, egui::Id::new(processor_id), figure_rect, viewport, dt);
+                .draw(ui, egui::Id::new(processor_id), figure_painter, figure_rect, viewport, dt);
         }
     }
 }

@@ -192,6 +192,7 @@ pub fn ui(
         .clamp(offset_y, max_translation_y + offset_y);
 
     let painter = ui.painter().with_clip_rect(ui_rect);
+    let figure_painter = ui.painter().with_clip_rect(figure_rect.expand(2.));
     let gridline_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     let gridline_text_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
 
@@ -435,16 +436,22 @@ pub fn ui(
     for clip_id in sorted_draw_order {
         let clip = document_graphics.clips.get(&clip_id).unwrap();
         let is_selected = document_graphics.selected.contains(&clip_id);
-        let (response, head_bar_response) =
-            clip.draw(ui, figure_rect, viewport, clip_id, is_selected);
+        let (response, head_bar_response) = clip.draw(
+            ui,
+            &figure_painter,
+            figure_rect,
+            viewport,
+            clip_id,
+            is_selected,
+        );
 
         // Update hover state for next frame
         if response.hovered() || head_bar_response.hovered() {
             document_graphics.hovered.insert(clip_id);
         }
 
-        // Handle click interactions immediately
-        if response.clicked() {
+        // Handle click interactions immediately (both clip body and header bar)
+        if response.clicked() || head_bar_response.clicked() {
             let modifiers = ui.input(|i| i.modifiers);
 
             // Bring clicked clip to front
@@ -508,7 +515,7 @@ pub fn ui(
                 figure_rect.min + egui::vec2(x_right, y_bottom),
             );
 
-            painter.rect_stroke(
+            figure_painter.rect_stroke(
                 ghost_clip_rect,
                 0.0,
                 egui::Stroke::new(1.5, egui::Color32::WHITE),
@@ -583,5 +590,5 @@ pub fn ui(
     }
 
     // Draw processors
-    analysis.draw(ui, figure_rect, viewport, dt);
+    analysis.draw(ui, &figure_painter, figure_rect, viewport, dt);
 }

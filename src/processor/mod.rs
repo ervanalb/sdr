@@ -37,6 +37,7 @@ pub trait ProcessorHistory {
         &self,
         ui: &mut egui::Ui,
         id: egui::Id,
+        figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
         dt: f64,

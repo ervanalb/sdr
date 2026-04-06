@@ -313,6 +313,7 @@ impl ClipGraphics {
     pub fn draw(
         &self,
         ui: &mut egui::Ui,
+        figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &crate::ui::Viewport,
         clip_id: ClipId,
@@ -371,10 +372,9 @@ impl ClipGraphics {
             .collect();
 
         let id = ui.id().with(("clip", clip_id));
-        let painter = ui.painter().with_clip_rect(figure_rect);
 
         // Draw waterfall
-        painter.add(egui_wgpu::Callback::new_paint_callback(
+        figure_painter.add(egui_wgpu::Callback::new_paint_callback(
             figure_rect,
             Callback {
                 id,
@@ -409,14 +409,14 @@ impl ClipGraphics {
 
         let head_bar_id = ui.id().with(("clip_head_bar", clip_id));
         let head_bar_response = ui
-            .interact(head_bar_rect, head_bar_id, egui::Sense::drag())
+            .interact(head_bar_rect, head_bar_id, egui::Sense::click_and_drag())
             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
 
         // Draw border based on selection and hover state
         let stroke = if is_selected {
             // Selected clips get a brighter border
             egui::Stroke::new(2.0, ui.visuals().widgets.active.fg_stroke.color)
-        } else if response.hovered() {
+        } else if response.hovered() || head_bar_response.hovered() {
             // Hovered clips get the standard hover color
             egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color)
         } else {
@@ -425,7 +425,7 @@ impl ClipGraphics {
         };
 
         if stroke != egui::Stroke::NONE {
-            painter.rect_stroke(clip_rect, 0.0, stroke, egui::StrokeKind::Outside);
+            figure_painter.rect_stroke(clip_rect, 0.0, stroke, egui::StrokeKind::Outside);
 
             // Draw name bar above the clip
             let name_bar_rect = egui::Rect::from_min_max(
@@ -435,7 +435,7 @@ impl ClipGraphics {
             .expand(stroke.width);
 
             // Fill the bar with the border color
-            painter.rect_filled(name_bar_rect, 0.0, stroke.color);
+            figure_painter.rect_filled(name_bar_rect, 0.0, stroke.color);
 
             // Calculate visible text area (keep onscreen)
             let visible_bar_rect = name_bar_rect.intersect(figure_rect);
@@ -450,7 +450,7 @@ impl ClipGraphics {
 
                 // Draw the clip name
                 crate::ui::paint_elided_text(
-                    &painter,
+                    &figure_painter,
                     text_rect,
                     self.descriptor.name.clone(),
                     egui::FontId::proportional(14.0),

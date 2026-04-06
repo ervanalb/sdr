@@ -118,6 +118,7 @@ impl StreamTransmission {
     pub fn show<F, T>(
         self,
         ui: &mut egui::Ui,
+        figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
         dt: f64,
@@ -143,9 +144,8 @@ impl StreamTransmission {
 
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let visuals = ui.visuals().widgets.style(&response);
-        let painter = ui.painter().with_clip_rect(figure_rect);
 
-        painter.rect_stroke(
+        figure_painter.rect_stroke(
             rect,
             visuals.corner_radius,
             visuals.fg_stroke,
@@ -216,7 +216,7 @@ impl StreamTransmission {
         if let Some(inspector) = &mut state.inspector {
             // Draw vertical line across the rectangle in the same color as the outline
             let x = figure_rect.left() + viewport.screen_space_x(inspector.time);
-            painter.line_segment(
+            figure_painter.line_segment(
                 [egui::pos2(x, top), egui::pos2(x, bottom)],
                 egui::Stroke::new(2.0, visuals.fg_stroke.color),
             );

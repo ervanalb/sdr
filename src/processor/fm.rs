@@ -450,6 +450,7 @@ impl ProcessorHistory for FmHistory {
         &self,
         ui: &mut egui::Ui,
         id: egui::Id,
+        figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
         dt: f64,
@@ -465,6 +466,7 @@ impl ProcessorHistory for FmHistory {
 
             let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max).show(
                 ui,
+                figure_painter,
                 figure_rect,
                 viewport,
                 dt,
