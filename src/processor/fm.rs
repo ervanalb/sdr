@@ -478,7 +478,7 @@ impl ProcessorHistory for FmHistory {
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
-        dt: f64,
+        _dt: f64,
         clip_id: ClipId,
         clip_response: &mut egui::Response,
     ) {
@@ -488,66 +488,70 @@ impl ProcessorHistory for FmHistory {
             if transmission.chunks.is_empty() || transmission.clip_id != clip_id {
                 continue;
             }
-            let start_time = transmission.time(transmission.chunks.start_index() as f64);
-            let end_time = transmission.time(transmission.chunks.end_index() as f64);
 
-            let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max).show(
-                ui,
-                figure_painter,
-                figure_rect,
-                viewport,
-                dt,
-                *transmission_id,
-                &mut self.inspector_state,
-            );
+            ui.push_id(("transmission", transmission_id), |ui| {
+                let start_time = transmission.time(transmission.chunks.start_index() as f64);
+                let end_time = transmission.time(transmission.chunks.end_index() as f64);
 
-            // Pass hover/click down to parent
-            *clip_response = clip_response.union(response.clone());
+                let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max)
+                    .show(
+                        ui,
+                        figure_painter,
+                        figure_rect,
+                        viewport,
+                        *transmission_id,
+                        &mut self.inspector_state,
+                    );
 
-            egui::Popup::context_menu(&response)
-                .id(egui::Id::new((id, transmission_id, "context_menu")))
-                .show(|ui| {
-                    if ui.button("Export audio...").clicked() {
-                        ui.close();
+                // Pass hover/click down to parent
+                *clip_response = clip_response.union(response.clone());
 
-                        // Sanitize the channel name for use as a filename
-                        let default_name = format!("fm.wav").replace(" ", "_").replace("/", "_");
+                egui::Popup::context_menu(&response)
+                    .id(egui::Id::new((id, transmission_id, "context_menu")))
+                    .show(|ui| {
+                        if ui.button("Export audio...").clicked() {
+                            ui.close();
 
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name(&default_name)
-                            .add_filter("WAV Audio", &["wav"])
-                            .save_file()
-                        {
-                            if let Err(e) = transmission.export_audio_data(&path) {
-                                eprintln!("Failed to export audio data: {}", e);
+                            // Sanitize the channel name for use as a filename
+                            let default_name =
+                                format!("fm.wav").replace(" ", "_").replace("/", "_");
+
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name(&default_name)
+                                .add_filter("WAV Audio", &["wav"])
+                                .save_file()
+                            {
+                                if let Err(e) = transmission.export_audio_data(&path) {
+                                    eprintln!("Failed to export audio data: {}", e);
+                                }
                             }
                         }
-                    }
-                    if ui.button("Export IQ data...").clicked() {
-                        ui.close();
+                        if ui.button("Export IQ data...").clicked() {
+                            ui.close();
 
-                        // Sanitize the channel name for use as a filename
-                        let default_name =
-                            format!("fm_{}sps.raw", transmission.iq_sample_rate.round())
-                                .replace(" ", "_")
-                                .replace("/", "_");
+                            // Sanitize the channel name for use as a filename
+                            let default_name =
+                                format!("fm_{}sps.raw", transmission.iq_sample_rate.round())
+                                    .replace(" ", "_")
+                                    .replace("/", "_");
 
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name(&default_name)
-                            .add_filter("Raw (complex f32 samples)", &["raw"])
-                            .save_file()
-                        {
-                            if let Err(e) = transmission.export_iq_data(&path) {
-                                eprintln!("Failed to export IQ data: {}", e);
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name(&default_name)
+                                .add_filter("Raw (complex f32 samples)", &["raw"])
+                                .save_file()
+                            {
+                                if let Err(e) = transmission.export_iq_data(&path) {
+                                    eprintln!("Failed to export IQ data: {}", e);
+                                }
                             }
                         }
-                    }
-                });
-            //response.on_hover_text(descriptor.name.clone());
+                    });
+                //response.on_hover_text(descriptor.name.clone());
+            });
         }
     }
 
-    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id) {
+    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id, dt: f64) {
         let mut close_inspector = false;
 
         // Show list of available transmissions
@@ -580,13 +584,14 @@ impl ProcessorHistory for FmHistory {
                     // Handle click and drag behavior similar to canvas
                     match &mut self.inspector_state {
                         None => {
-                            if response.hovered() && ui.ctx().input(|i| i.pointer.primary_down()) {
+                            if response.hovered() && ui.ctx().input(|i| i.pointer.primary_pressed())
+                            {
                                 // Start inspector at the beginning of this transmission with dragging
                                 self.inspector_state =
                                     Some(crate::ui::TransmissionInspectorState {
                                         transmission_id: *transmission_id,
                                         time: start_time,
-                                        dragging: true,
+                                        play_temp: Some(start_time),
                                         play_lock: false,
                                         seek: false,
                                         user_data: FmUiState::default(),
@@ -594,20 +599,27 @@ impl ProcessorHistory for FmHistory {
                             }
                         }
                         Some(inspector) => {
-                            if inspector.dragging && inspector.transmission_id == *transmission_id {
-                                // Release dragging when mouse button is released
+                            if let Some(seek_on_release) = inspector.play_temp {
                                 if !ui.ctx().input(|i| i.pointer.primary_down()) {
-                                    inspector.dragging = false;
+                                    // If play_temp, set inspector position
+                                    // to wherever the play_temp was started
+                                    if !inspector.play_lock {
+                                        inspector.time = seek_on_release;
+                                    }
+                                    inspector.play_temp = None;
                                 }
-                            } else if response.hovered()
-                                && ui.ctx().input(|i| i.pointer.primary_down())
-                            {
-                                // Switch to this transmission with dragging
-                                inspector.transmission_id = *transmission_id;
-                                inspector.time = start_time;
-                                inspector.dragging = true;
-                                inspector.play_lock = false;
-                                inspector.seek = true;
+                            } else {
+                                if response.hovered()
+                                    && ui.ctx().input(|i| i.pointer.primary_pressed())
+                                {
+                                    // Play this transmission
+                                    inspector.transmission_id = *transmission_id;
+                                    inspector.time = start_time;
+                                    inspector.seek = true;
+                                    if !inspector.play_lock {
+                                        inspector.play_temp = Some(start_time);
+                                    }
+                                }
                             }
                         }
                     }
@@ -618,7 +630,46 @@ impl ProcessorHistory for FmHistory {
         ui.separator();
 
         if let Some(inspector) = &mut self.inspector_state {
+            let mut playing = false;
             // Find the transmission being inspected
+            if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
+                // Clamp inspector time to the bounds of the transmission being inspected
+                let start_time = transmission.time(transmission.chunks.start_index() as f64);
+                let end_time = transmission.time(transmission.chunks.end_index() as f64);
+                if inspector.time > end_time {
+                    if inspector.play_lock {
+                        // Advance to next clip if there is one.
+                        // Otherwise, stop playing.
+                        let next_transmission_id = inspector.transmission_id + 1;
+                        if let Some(next_transmission) =
+                            self.transmissions.get(&next_transmission_id)
+                        {
+                            let next_start_time =
+                                next_transmission.time(transmission.chunks.start_index() as f64);
+                            inspector.transmission_id = next_transmission_id;
+                            inspector.time = next_start_time;
+                            inspector.seek = true;
+                        } else {
+                            inspector.time = end_time;
+                        }
+                    } else {
+                        // Clamp to the end of the transmission
+                        inspector.time = end_time;
+                    }
+                } else {
+                    // Clamp inspector playhead to start of clip
+                    if inspector.time < start_time {
+                        inspector.time = start_time;
+                    }
+                    // Advance the inspector playhead
+                    if inspector.play_lock || inspector.play_temp.is_some() {
+                        inspector.time += dt;
+                        playing = true;
+                    }
+                }
+            }
+
+            // Refresh the transmission since we might have changed it
             if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
                 ui.heading("FM Transmission Inspector");
                 ui.separator();
@@ -628,7 +679,7 @@ impl ProcessorHistory for FmHistory {
                     if ui.button("✖ Close").clicked() {
                         close_inspector = true;
                     }
-                    let (enabled, play_text) = if inspector.dragging {
+                    let (enabled, play_text) = if inspector.play_temp.is_some() {
                         (false, "PLAYING")
                     } else {
                         if inspector.play_lock {
@@ -749,11 +800,10 @@ impl ProcessorHistory for FmHistory {
                     });
 
                 // Handle audio playback
-                let play = inspector.play_lock || inspector.dragging;
                 let seek = inspector.seek;
                 let time = inspector.time;
 
-                if play {
+                if playing {
                     if let Some(player) = inspector.user_data.player.as_mut()
                         && !seek
                     {

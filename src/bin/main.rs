@@ -358,7 +358,7 @@ impl eframe::App for SdrApp {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.analysis.draw(ui);
+                    self.analysis.draw(ui, dt);
                 });
             });
 

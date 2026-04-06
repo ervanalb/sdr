@@ -271,12 +271,12 @@ impl Analysis {
         }
     }
 
-    pub fn draw(&mut self, ui: &mut egui::Ui) {
+    pub fn draw(&mut self, ui: &mut egui::Ui, dt: f64) {
         for (processor_id, processor) in self.processors.iter_mut() {
             ui.group(|ui| {
                 ui.heading(processor.history.name());
                 ui.separator();
-                processor.history.draw(ui, egui::Id::new(processor_id));
+                processor.history.draw(ui, egui::Id::new(processor_id), dt);
             });
             ui.add_space(10.0);
         }

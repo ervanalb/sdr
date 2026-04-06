@@ -427,128 +427,133 @@ pub fn ui(
     });
 
     // Sort draw_order by hover state (non-hovered first, hovered last)
-    let mut sorted_draw_order = document_graphics.draw_order.clone();
-    sorted_draw_order.sort_by_key(|clip_id| document_graphics.hovered.contains(clip_id));
+    let mut sorted_draw_order: Vec<_> = document_graphics
+        .draw_order
+        .iter()
+        .map(|&clip_id| (clip_id, document_graphics.hovered.contains(&clip_id)))
+        .collect();
+    sorted_draw_order.sort_by_key(|&(_clip_id, is_hovered)| is_hovered);
 
-    for clip_id in sorted_draw_order.into_iter() {
-        let clip = document_graphics.clips.get(&clip_id).unwrap();
-        let is_selected = document_graphics.selected.contains(&clip_id);
-        let is_hovered = document_graphics.hovered.contains(&clip_id);
-        let (response, head_bar_response) = clip.draw(
-            ui,
-            &figure_painter,
-            figure_rect,
-            viewport,
-            clip_id,
-            is_selected,
-            is_hovered,
-        );
+    document_graphics.hovered.clear();
 
-        // Draw processor UI on top of clip
-        let mut focus_response = response.clone();
-        analysis.draw_clip(
-            ui,
-            &figure_painter,
-            figure_rect,
-            viewport,
-            dt,
-            clip_id,
-            &mut focus_response,
-        );
+    for (clip_id, is_hovered) in sorted_draw_order.into_iter() {
+        ui.push_id(("clip", clip_id), |ui| {
+            let clip = document_graphics.clips.get(&clip_id).unwrap();
+            let is_selected = document_graphics.selected.contains(&clip_id);
+            let (response, head_bar_response) = clip.draw(
+                ui,
+                &figure_painter,
+                figure_rect,
+                viewport,
+                clip_id,
+                is_selected,
+                is_hovered,
+            );
 
-        // Handle hover
-        if focus_response.hovered() {
-            document_graphics.hovered.insert(clip_id);
-        } else {
-            document_graphics.hovered.remove(&clip_id);
-        }
+            // Draw processor UI on top of clip
+            let mut focus_response = response.clone();
+            analysis.draw_clip(
+                ui,
+                &figure_painter,
+                figure_rect,
+                viewport,
+                dt,
+                clip_id,
+                &mut focus_response,
+            );
 
-        // Handle click interactions
-        if focus_response.clicked() {
-            let modifiers = ui.input(|i| i.modifiers);
+            // Handle hover
+            if focus_response.hovered() {
+                document_graphics.hovered.insert(clip_id);
+            }
 
-            // Bring clicked clip to front
-            document_graphics.bring_to_top(clip_id);
+            // Handle click interactions
+            if focus_response.clicked() {
+                let modifiers = ui.input(|i| i.modifiers);
 
-            if modifiers.shift {
-                // Shift-click: add to selection
-                document_graphics.selected.insert(clip_id);
-            } else if modifiers.ctrl || modifiers.command {
-                // Ctrl-click (or Cmd on Mac): toggle in selection
-                if document_graphics.selected.contains(&clip_id) {
-                    document_graphics.selected.remove(&clip_id);
+                // Bring clicked clip to front
+                document_graphics.bring_to_top(clip_id);
+
+                if modifiers.shift {
+                    // Shift-click: add to selection
+                    document_graphics.selected.insert(clip_id);
+                } else if modifiers.ctrl || modifiers.command {
+                    // Ctrl-click (or Cmd on Mac): toggle in selection
+                    if document_graphics.selected.contains(&clip_id) {
+                        document_graphics.selected.remove(&clip_id);
+                    } else {
+                        document_graphics.selected.insert(clip_id);
+                    }
                 } else {
+                    // Regular click: replace selection
+                    document_graphics.selected.clear();
                     document_graphics.selected.insert(clip_id);
                 }
-            } else {
-                // Regular click: replace selection
-                document_graphics.selected.clear();
-                document_graphics.selected.insert(clip_id);
-            }
-        }
-
-        // Refresh for the borrow checker
-        let clip = document_graphics.clips.get(&clip_id).unwrap();
-
-        // Handle starting drag (disabled during recording)
-        if !is_recording && head_bar_response.drag_started() {
-            clip_drag_state = Some(ClipDragState {
-                clip_id,
-                proposed_start_time: clip.descriptor.start_time,
-            });
-
-            // Store drag state back to egui memory
-            ui.ctx().memory_mut(|m| {
-                m.data
-                    .insert_temp(clip_drag_state_id, clip_drag_state.clone());
-            });
-        }
-
-        // Handle active drag
-        if let Some(ref mut state) = clip_drag_state
-            && state.clip_id == clip_id
-        {
-            if head_bar_response.dragged() {
-                let drag = head_bar_response.drag_delta();
-                let time_delta = drag.x as f64 / viewport.scale_x;
-                state.proposed_start_time = (state.proposed_start_time + time_delta).max(0.0);
             }
 
-            // Draw ghost outline if this clip is being dragged
-            let time_offset = state.proposed_start_time - clip.descriptor.start_time;
-            let y_top = viewport.screen_space_y(clip.descriptor.freq_max());
-            let y_bottom = viewport.screen_space_y(clip.descriptor.freq_min());
-            let x_left = viewport.screen_space_x(clip.descriptor.time(clip.start_index as f64))
-                + time_offset as f32 * viewport.scale_x as f32;
-            let x_right = viewport.screen_space_x(clip.descriptor.time(clip.end_index as f64))
-                + time_offset as f32 * viewport.scale_x as f32;
+            // Refresh for the borrow checker
+            let clip = document_graphics.clips.get(&clip_id).unwrap();
 
-            let ghost_clip_rect = egui::Rect::from_min_max(
-                figure_rect.min + egui::vec2(x_left, y_top),
-                figure_rect.min + egui::vec2(x_right, y_bottom),
-            );
+            // Handle starting drag (disabled during recording)
+            if !is_recording && head_bar_response.drag_started() {
+                clip_drag_state = Some(ClipDragState {
+                    clip_id,
+                    proposed_start_time: clip.descriptor.start_time,
+                });
 
-            figure_painter.rect_stroke(
-                ghost_clip_rect,
-                0.0,
-                egui::Stroke::new(1.5, egui::Color32::WHITE),
-                egui::StrokeKind::Outside,
-            );
+                // Store drag state back to egui memory
+                ui.ctx().memory_mut(|m| {
+                    m.data
+                        .insert_temp(clip_drag_state_id, clip_drag_state.clone());
+                });
+            }
 
-            if head_bar_response.drag_stopped() {
-                // Apply the time change
-                if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
-                    Arc::make_mut(doc_clip).descriptor.start_time = state.proposed_start_time;
+            // Handle active drag
+            if let Some(ref mut state) = clip_drag_state
+                && state.clip_id == clip_id
+            {
+                if head_bar_response.dragged() {
+                    let drag = head_bar_response.drag_delta();
+                    let time_delta = drag.x as f64 / viewport.scale_x;
+                    state.proposed_start_time = (state.proposed_start_time + time_delta).max(0.0);
                 }
-                clip_drag_state = None;
-            }
 
-            // Store drag state back to egui memory
-            ui.ctx().memory_mut(|m| {
-                m.data
-                    .insert_temp(clip_drag_state_id, clip_drag_state.clone());
-            });
-        }
+                // Draw ghost outline if this clip is being dragged
+                let time_offset = state.proposed_start_time - clip.descriptor.start_time;
+                let y_top = viewport.screen_space_y(clip.descriptor.freq_max());
+                let y_bottom = viewport.screen_space_y(clip.descriptor.freq_min());
+                let x_left = viewport.screen_space_x(clip.descriptor.time(clip.start_index as f64))
+                    + time_offset as f32 * viewport.scale_x as f32;
+                let x_right = viewport.screen_space_x(clip.descriptor.time(clip.end_index as f64))
+                    + time_offset as f32 * viewport.scale_x as f32;
+
+                let ghost_clip_rect = egui::Rect::from_min_max(
+                    figure_rect.min + egui::vec2(x_left, y_top),
+                    figure_rect.min + egui::vec2(x_right, y_bottom),
+                );
+
+                figure_painter.rect_stroke(
+                    ghost_clip_rect,
+                    0.0,
+                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    egui::StrokeKind::Outside,
+                );
+
+                if head_bar_response.drag_stopped() {
+                    // Apply the time change
+                    if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
+                        Arc::make_mut(doc_clip).descriptor.start_time = state.proposed_start_time;
+                    }
+                    clip_drag_state = None;
+                }
+
+                // Store drag state back to egui memory
+                ui.ctx().memory_mut(|m| {
+                    m.data
+                        .insert_temp(clip_drag_state_id, clip_drag_state.clone());
+                });
+            }
+        });
     }
 
     // Draw hover line in X-axis label region (when not recording)

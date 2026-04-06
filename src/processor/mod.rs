@@ -46,7 +46,7 @@ pub trait ProcessorHistory {
     );
 
     /// Draw the sidebar UI for this processor (e.g., inspector panels, controls)
-    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id);
+    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id, dt: f64);
 
     /// Get a human-readable name for this processor type
     fn name(&self) -> &str;

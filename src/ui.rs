@@ -84,20 +84,10 @@ pub struct StreamTransmission {
 pub struct TransmissionInspectorState<T> {
     pub transmission_id: usize,
     pub time: f64,
-    pub dragging: bool,
+    pub play_temp: Option<f64>, // seek on release
     pub play_lock: bool,
     pub seek: bool,
     pub user_data: T,
-}
-
-pub struct StreamInspectorParameters {
-    pub time: f64,
-    pub seek: bool,
-    pub play: bool,
-}
-
-pub struct StreamInspectorResponse {
-    pub time_adj: f64,
 }
 
 impl StreamTransmission {
@@ -120,7 +110,6 @@ impl StreamTransmission {
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
-        dt: f64,
         transmission_id: usize,
         inspector_state: &mut Option<TransmissionInspectorState<T>>,
     ) -> egui::Response
@@ -140,7 +129,9 @@ impl StreamTransmission {
             max: egui::pos2(right, bottom),
         };
 
-        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let interact_id = ui.id().with("transmission_interact");
+        let response = ui.interact(rect, interact_id, egui::Sense::click_and_drag());
+
         let visuals = ui.visuals().widgets.style(&response);
 
         figure_painter.rect_stroke(
@@ -158,14 +149,14 @@ impl StreamTransmission {
             None => {
                 if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
                     && response.hovered()
-                    && ui.ctx().input(|i| i.pointer.primary_down())
+                    && ui.ctx().input(|i| i.pointer.primary_pressed())
                 {
                     let x = pointer_pos.x - figure_rect.left();
                     let time = viewport.canvas_x(x);
                     *inspector_state = Some(TransmissionInspectorState {
                         transmission_id,
                         time,
-                        dragging: true,
+                        play_temp: Some(time),
                         play_lock: false,
                         seek: false,
                         user_data: Default::default(),
@@ -173,42 +164,21 @@ impl StreamTransmission {
                 }
             }
             Some(inspector) => {
-                if inspector.dragging && is_inspecting_this {
-                    if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-                        if !ui.ctx().input(|i| i.pointer.primary_down()) {
-                            // Set inspector time on mouse button release
-                            if !inspector.play_lock {
-                                let x = pointer_pos.x - figure_rect.left();
-                                let time = viewport.canvas_x(x);
-                                inspector.time = time;
-                            }
-                            inspector.dragging = false;
-                        }
-                    }
-                } else {
-                    if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
-                        && response.hovered()
-                        && ui.ctx().input(|i| i.pointer.primary_down())
-                    {
-                        let x = pointer_pos.x - figure_rect.left();
-                        let time = viewport.canvas_x(x);
-                        // Switch to this transmission or update time
-                        inspector.transmission_id = transmission_id;
-                        inspector.time = time;
-                        inspector.dragging = true;
-                        inspector.play_lock = false;
-                        inspector.seek = true;
+                if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
+                    && response.hovered()
+                    && ui.ctx().input(|i| i.pointer.primary_pressed())
+                {
+                    let x = pointer_pos.x - figure_rect.left();
+                    let time = viewport.canvas_x(x);
+                    // Switch to this transmission or update time
+                    // Play this transmission
+                    inspector.transmission_id = transmission_id;
+                    inspector.time = time;
+                    inspector.seek = true;
+                    if !inspector.play_lock {
+                        inspector.play_temp = Some(time);
                     }
                 }
-            }
-        }
-
-        // Close inspector if its time is out of bounds of the inspected transmission
-        if is_inspecting_this {
-            if let Some(inspector) = inspector_state
-                && (inspector.time < self.start_time || inspector.time > self.end_time)
-            {
-                *inspector_state = None;
             }
         }
 
@@ -220,15 +190,6 @@ impl StreamTransmission {
                     [egui::pos2(x, top), egui::pos2(x, bottom)],
                     egui::Stroke::new(2.0, visuals.fg_stroke.color),
                 );
-            }
-        }
-
-        // Advance inspector if play = true (only for the inspected transmission)
-        if is_inspecting_this {
-            if let Some(inspector) = inspector_state.as_mut()
-                && (inspector.play_lock || inspector.dragging)
-            {
-                inspector.time += dt;
             }
         }
 

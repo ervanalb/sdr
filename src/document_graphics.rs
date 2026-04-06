@@ -373,7 +373,7 @@ impl ClipGraphics {
             }))
             .collect();
 
-        let id = ui.id().with(("clip", clip_id));
+        let id = ui.id().with("waterfall");
 
         // Draw waterfall
         figure_painter.add(egui_wgpu::Callback::new_paint_callback(
@@ -399,7 +399,7 @@ impl ClipGraphics {
         // Intersect with figure_rect to prevent interaction outside the visible area
         let clip_interact_rect = clip_rect_with_bar.intersect(figure_rect);
 
-        let clip_interact_id = ui.id().with(("clip_interact", clip_id));
+        let clip_interact_id = ui.id().with("clip_interact");
         let response = ui.interact(clip_interact_rect, clip_interact_id, egui::Sense::click());
 
         // Create separate interaction area for the head bar to enable dragging
@@ -409,7 +409,7 @@ impl ClipGraphics {
         )
         .intersect(figure_rect);
 
-        let head_bar_id = ui.id().with(("clip_head_bar", clip_id));
+        let head_bar_id = ui.id().with("clip_head_bar");
         let head_bar_response = ui
             .interact(head_bar_rect, head_bar_id, egui::Sense::click_and_drag())
             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
