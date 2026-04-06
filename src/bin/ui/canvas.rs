@@ -430,12 +430,10 @@ pub fn ui(
     let mut sorted_draw_order = document_graphics.draw_order.clone();
     sorted_draw_order.sort_by_key(|clip_id| document_graphics.hovered.contains(clip_id));
 
-    // Clear hovered set for this frame
-    document_graphics.hovered.clear();
-
-    for clip_id in sorted_draw_order {
+    for clip_id in sorted_draw_order.into_iter() {
         let clip = document_graphics.clips.get(&clip_id).unwrap();
         let is_selected = document_graphics.selected.contains(&clip_id);
+        let is_hovered = document_graphics.hovered.contains(&clip_id);
         let (response, head_bar_response) = clip.draw(
             ui,
             &figure_painter,
@@ -443,15 +441,30 @@ pub fn ui(
             viewport,
             clip_id,
             is_selected,
+            is_hovered,
         );
 
-        // Update hover state for next frame
-        if response.hovered() || head_bar_response.hovered() {
+        // Draw processor UI on top of clip
+        let mut focus_response = response.clone();
+        analysis.draw_clip(
+            ui,
+            &figure_painter,
+            figure_rect,
+            viewport,
+            dt,
+            clip_id,
+            &mut focus_response,
+        );
+
+        // Handle hover
+        if focus_response.hovered() {
             document_graphics.hovered.insert(clip_id);
+        } else {
+            document_graphics.hovered.remove(&clip_id);
         }
 
-        // Handle click interactions immediately (both clip body and header bar)
-        if response.clicked() || head_bar_response.clicked() {
+        // Handle click interactions
+        if focus_response.clicked() {
             let modifiers = ui.input(|i| i.modifiers);
 
             // Bring clicked clip to front
@@ -588,7 +601,4 @@ pub fn ui(
         // Delete selected clips (skips active clips and keeps them selected)
         document.delete_selection(&mut document_graphics.selected);
     }
-
-    // Draw processors
-    analysis.draw(ui, &figure_painter, figure_rect, viewport, dt);
 }

@@ -471,7 +471,7 @@ impl ProcessorHistory for FmHistory {
             .retain(|_, transmission| transmission.prune_old_data(retain_time));
     }
 
-    fn draw(
+    fn draw_clip(
         &mut self,
         ui: &mut egui::Ui,
         id: egui::Id,
@@ -479,11 +479,13 @@ impl ProcessorHistory for FmHistory {
         figure_rect: egui::Rect,
         viewport: &Viewport,
         dt: f64,
+        clip_id: ClipId,
+        clip_response: &mut egui::Response,
     ) {
         let freq_min = self.frequency - 0.5 * self.bandwidth;
         let freq_max = self.frequency + 0.5 * self.bandwidth;
         for (transmission_id, transmission) in self.transmissions.iter() {
-            if transmission.chunks.is_empty() {
+            if transmission.chunks.is_empty() || transmission.clip_id != clip_id {
                 continue;
             }
             let start_time = transmission.time(transmission.chunks.start_index() as f64);
@@ -498,6 +500,9 @@ impl ProcessorHistory for FmHistory {
                 *transmission_id,
                 &mut self.inspector_state,
             );
+
+            // Pass hover/click down to parent
+            *clip_response = clip_response.union(response.clone());
 
             egui::Popup::context_menu(&response)
                 .id(egui::Id::new((id, transmission_id, "context_menu")))
@@ -542,7 +547,7 @@ impl ProcessorHistory for FmHistory {
         }
     }
 
-    fn draw_sidebar(&mut self, ui: &mut egui::Ui, id: egui::Id) {
+    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id) {
         let mut close_inspector = false;
 
         // Show list of available transmissions
@@ -823,7 +828,7 @@ impl ProcessorHistory for FmHistory {
 
 pub struct FmTransmission {
     active: bool,
-    _clip_id: ClipId,
+    clip_id: ClipId,
     clip_name: String,
     reference_time: f64,
     period: f64,
@@ -841,7 +846,7 @@ impl FmTransmission {
     ) -> FmTransmission {
         FmTransmission {
             active: true,
-            _clip_id: clip_id,
+            clip_id: clip_id,
             clip_name,
             reference_time,
             period,

@@ -32,8 +32,8 @@ pub trait ProcessorHistory {
     fn update(&mut self);
     fn expire(&mut self, retain_time: f64);
 
-    /// Draw this processor history onto the canvas
-    fn draw(
+    /// Draw UI for a given clip onto the canvas
+    fn draw_clip(
         &mut self,
         ui: &mut egui::Ui,
         id: egui::Id,
@@ -41,10 +41,12 @@ pub trait ProcessorHistory {
         figure_rect: egui::Rect,
         viewport: &Viewport,
         dt: f64,
+        clip_id: ClipId,
+        clip_response: &mut egui::Response,
     );
 
     /// Draw the sidebar UI for this processor (e.g., inspector panels, controls)
-    fn draw_sidebar(&mut self, ui: &mut egui::Ui, id: egui::Id);
+    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id);
 
     /// Get a human-readable name for this processor type
     fn name(&self) -> &str;

@@ -2,6 +2,7 @@ use crate::{
     document::{ClipDescriptor, ClipId, Document},
     dsp::{Fft, OverlapExpand, hann_window, log_mix_f32},
     hardware::RawIqSamples,
+    ui::Viewport,
     waterfall_renderer::{WaterfallDrawInfo, WaterfallRenderer},
 };
 use egui::Rect;
@@ -315,9 +316,10 @@ impl ClipGraphics {
         ui: &mut egui::Ui,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
-        viewport: &crate::ui::Viewport,
+        viewport: &Viewport,
         clip_id: ClipId,
         is_selected: bool,
+        is_hovered: bool,
     ) -> (egui::Response, egui::Response) {
         // TODO: Consider moving these into self
         // instead of calculating them every frame from descriptor
@@ -416,7 +418,7 @@ impl ClipGraphics {
         let stroke = if is_selected {
             // Selected clips get a brighter border
             egui::Stroke::new(2.0, ui.visuals().widgets.active.fg_stroke.color)
-        } else if response.hovered() || head_bar_response.hovered() {
+        } else if is_hovered {
             // Hovered clips get the standard hover color
             egui::Stroke::new(1.0, ui.visuals().widgets.hovered.bg_stroke.color)
         } else {

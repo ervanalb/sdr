@@ -3,6 +3,7 @@ use crate::{
     id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
     processor::{Processor, ProcessorHistory, ProcessorParameters},
+    ui::Viewport,
 };
 use rayon::prelude::*;
 use std::{
@@ -246,29 +247,36 @@ impl Analysis {
         let _ = retain_time;
     }
 
-    pub fn draw(
+    pub fn draw_clip(
         &mut self,
         ui: &mut egui::Ui,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
-        viewport: &crate::ui::Viewport,
+        viewport: &Viewport,
         dt: f64,
+        clip_id: ClipId,
+        clip_response: &mut egui::Response,
     ) {
         for (processor_id, processor) in self.processors.iter_mut() {
-            processor
-                .history
-                .draw(ui, egui::Id::new(processor_id), figure_painter, figure_rect, viewport, dt);
+            processor.history.draw_clip(
+                ui,
+                egui::Id::new(processor_id),
+                figure_painter,
+                figure_rect,
+                viewport,
+                dt,
+                clip_id,
+                clip_response,
+            );
         }
     }
 
-    pub fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+    pub fn draw(&mut self, ui: &mut egui::Ui) {
         for (processor_id, processor) in self.processors.iter_mut() {
             ui.group(|ui| {
                 ui.heading(processor.history.name());
                 ui.separator();
-                processor
-                    .history
-                    .draw_sidebar(ui, egui::Id::new(processor_id));
+                processor.history.draw(ui, egui::Id::new(processor_id));
             });
             ui.add_space(10.0);
         }
