@@ -9,6 +9,7 @@ use std::mem;
 const TARGET_BIN_SIZE: f64 = 2.5e3; // 2.5 KHz
 
 pub struct PreprocessedClipDescriptor {
+    pub clip_name: String,
     pub frequency: f64,
     pub sample_rate: f64,
     pub start_time: f64,
@@ -43,6 +44,7 @@ impl StreamPreprocessor {
             fft,
         };
         let preprocessed_descriptor = PreprocessedClipDescriptor {
+            clip_name: descriptor.name.clone(),
             frequency: descriptor.frequency,
             sample_rate: descriptor.sample_rate,
             start_time: descriptor.start_time,

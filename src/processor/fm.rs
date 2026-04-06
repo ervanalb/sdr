@@ -77,7 +77,9 @@ impl Processor for FmProcessor {
     fn start_clip(&mut self, clip_id: usize, clip_descriptor: &PreprocessedClipDescriptor) {
         match self.clips.entry(clip_id) {
             Entry::Vacant(e) => {
-                if let Some(processor) = ClipProcessor::new(&self.parameters, clip_descriptor) {
+                if let Some(processor) =
+                    ClipProcessor::new(clip_id, &self.parameters, clip_descriptor)
+                {
                     e.insert(processor);
                 }
             }
@@ -105,6 +107,8 @@ impl Processor for FmProcessor {
 }
 
 pub struct ClipProcessor {
+    clip_id: ClipId,
+    clip_name: String,
     fft_size: usize,
     margin_bin_count: usize,
     bins: Range<usize>,
@@ -132,6 +136,7 @@ pub struct ClipProcessor {
 
 impl ClipProcessor {
     fn new(
+        clip_id: ClipId,
         parameters: &FmProcessorParameters,
         clip_descriptor: &PreprocessedClipDescriptor,
     ) -> Option<ClipProcessor> {
@@ -178,6 +183,8 @@ impl ClipProcessor {
         let audio_ifft_sample_rate = audio_fft_size as f64 * output_sample_rate / ifft_size as f64;
 
         Some(ClipProcessor {
+            clip_id,
+            clip_name: clip_descriptor.clip_name.clone(),
             fft_size,
             margin_bin_count,
             bins,
@@ -262,6 +269,8 @@ impl ClipProcessor {
                     sender
                         .send(FmMessage::StartTransmission {
                             transmission_id,
+                            clip_id: self.clip_id,
+                            clip_name: self.clip_name.clone(),
                             reference_time: self.clip_start_time
                                 + self.clip_chunk_count as f64 * period,
                             period,
@@ -336,6 +345,8 @@ pub enum FmMessage {
     Reset,
     StartTransmission {
         transmission_id: TransmissionId,
+        clip_id: ClipId,
+        clip_name: String,
         reference_time: f64,
         period: f64,
         iq_sample_rate: f64,
@@ -354,12 +365,16 @@ impl std::fmt::Debug for FmMessage {
             Self::Reset => write!(f, "Reset"),
             Self::StartTransmission {
                 transmission_id,
+                clip_id,
+                clip_name,
                 reference_time,
                 period,
                 iq_sample_rate,
             } => f
                 .debug_struct("StartTransmission")
                 .field("transmission_id", transmission_id)
+                .field("clip_id", clip_id)
+                .field("clip_name", clip_name)
                 .field("reference_time", reference_time)
                 .field("period", period)
                 .field("iq_sample_rate", iq_sample_rate)
@@ -410,12 +425,20 @@ impl ProcessorHistory for FmHistory {
                 }
                 FmMessage::StartTransmission {
                     transmission_id,
+                    clip_id,
+                    clip_name,
                     reference_time,
                     period,
                     iq_sample_rate,
                 } => match self.transmissions.entry(transmission_id) {
                     Entry::Vacant(e) => {
-                        e.insert(FmTransmission::new(reference_time, period, iq_sample_rate));
+                        e.insert(FmTransmission::new(
+                            clip_id,
+                            clip_name,
+                            reference_time,
+                            period,
+                            iq_sample_rate,
+                        ));
                     }
                     Entry::Occupied(_) => {
                         panic!("Tried to add a new transmission that already exists");
@@ -522,6 +545,73 @@ impl ProcessorHistory for FmHistory {
     fn draw_sidebar(&mut self, ui: &mut egui::Ui, id: egui::Id) {
         let mut close_inspector = false;
 
+        // Show list of available transmissions
+        ui.label("Transmissions:");
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .max_height(400.0)
+            .show(ui, |ui| {
+                for (transmission_id, transmission) in self.transmissions.iter() {
+                    if transmission.chunks.is_empty() {
+                        continue;
+                    }
+                    let start_time = transmission.time(transmission.chunks.start_index() as f64);
+                    let end_time = transmission.time(transmission.chunks.end_index() as f64);
+                    let duration = end_time - start_time;
+
+                    let is_current = self
+                        .inspector_state
+                        .as_ref()
+                        .map_or(false, |s| s.transmission_id == *transmission_id);
+
+                    let label = format!(
+                        "{} | {:.2}s - {:.2}s ({:.2}s)",
+                        transmission.clip_name, start_time, end_time, duration
+                    );
+
+                    let response = ui.selectable_label(is_current, label);
+
+                    // Handle click and drag behavior similar to canvas
+                    match &mut self.inspector_state {
+                        None => {
+                            if response.hovered() && ui.ctx().input(|i| i.pointer.primary_down()) {
+                                // Start inspector at the beginning of this transmission with dragging
+                                self.inspector_state =
+                                    Some(crate::ui::TransmissionInspectorState {
+                                        transmission_id: *transmission_id,
+                                        time: start_time,
+                                        dragging: true,
+                                        play_lock: false,
+                                        seek: false,
+                                        user_data: FmUiState::default(),
+                                    });
+                            }
+                        }
+                        Some(inspector) => {
+                            if inspector.dragging && inspector.transmission_id == *transmission_id {
+                                // Release dragging when mouse button is released
+                                if !ui.ctx().input(|i| i.pointer.primary_down()) {
+                                    inspector.dragging = false;
+                                }
+                            } else if response.hovered()
+                                && ui.ctx().input(|i| i.pointer.primary_down())
+                            {
+                                // Switch to this transmission with dragging
+                                inspector.transmission_id = *transmission_id;
+                                inspector.time = start_time;
+                                inspector.dragging = true;
+                                inspector.play_lock = false;
+                                inspector.seek = true;
+                            }
+                        }
+                    }
+                }
+            });
+
+        ui.add_space(10.0);
+        ui.separator();
+
         if let Some(inspector) = &mut self.inspector_state {
             // Find the transmission being inspected
             if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
@@ -624,8 +714,7 @@ impl ProcessorHistory for FmHistory {
                 let plot_width = 300.0;
                 let plot_height = 200.0;
                 let num_audio_samples = chunk.audio_data.len();
-                let audio_stride =
-                    (num_audio_samples as f32 / plot_width).ceil().max(1.0) as usize;
+                let audio_stride = (num_audio_samples as f32 / plot_width).ceil().max(1.0) as usize;
 
                 // Create audio points for plotting
                 let audio_points: Vec<[f64; 2]> = chunk
@@ -667,8 +756,7 @@ impl ProcessorHistory for FmHistory {
 
                         // Feed new audio data to the audio player
                         let start = p.next_seq_num;
-                        let end = (transmission.index(time + AUDIO_LOOKAHEAD_DURATION)
-                            as isize)
+                        let end = (transmission.index(time + AUDIO_LOOKAHEAD_DURATION) as isize)
                             .min(transmission.chunks.end_index());
                         if end > start {
                             let bufs = transmission.chunks.range(start..end).enumerate().map(
@@ -735,6 +823,8 @@ impl ProcessorHistory for FmHistory {
 
 pub struct FmTransmission {
     active: bool,
+    _clip_id: ClipId,
+    clip_name: String,
     reference_time: f64,
     period: f64,
     iq_sample_rate: f64,
@@ -742,9 +832,17 @@ pub struct FmTransmission {
 }
 
 impl FmTransmission {
-    fn new(reference_time: f64, period: f64, iq_sample_rate: f64) -> FmTransmission {
+    fn new(
+        clip_id: ClipId,
+        clip_name: String,
+        reference_time: f64,
+        period: f64,
+        iq_sample_rate: f64,
+    ) -> FmTransmission {
         FmTransmission {
             active: true,
+            _clip_id: clip_id,
+            clip_name,
             reference_time,
             period,
             iq_sample_rate,
