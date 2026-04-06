@@ -86,6 +86,7 @@ pub struct TransmissionInspectorState<T> {
     pub time: f64,
     pub dragging: bool,
     pub play_lock: bool,
+    pub seek: bool,
     pub user_data: T,
 }
 
@@ -109,24 +110,21 @@ impl StreamTransmission {
         }
     }
 
-    /// Draw the transmission widget with an optional inspector panel
+    /// Draw the transmission widget on the canvas.
     ///
-    /// The inspector_content callback is called when the panel is open, receiving the inspected timestamp.
     /// Inspector state is managed externally and shared across transmissions.
-    pub fn show<F, T>(
+    /// The inspector panel UI is drawn separately in the sidebar.
+    pub fn show<T>(
         self,
         ui: &mut egui::Ui,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
         dt: f64,
-        id: egui::Id,
         transmission_id: usize,
         inspector_state: &mut Option<TransmissionInspectorState<T>>,
-        mut inspector_content: F,
     ) -> egui::Response
     where
-        F: FnMut(&mut egui::Ui, StreamInspectorParameters, &mut T) -> StreamInspectorResponse,
         T: Clone + Default,
     {
         // Convert to screen coordinates (X=time, Y=frequency)
@@ -152,7 +150,6 @@ impl StreamTransmission {
             egui::StrokeKind::Outside,
         );
 
-        let mut seek = false;
         let is_inspecting_this = inspector_state
             .as_ref()
             .map_or(false, |s| s.transmission_id == transmission_id);
@@ -170,6 +167,7 @@ impl StreamTransmission {
                         time,
                         dragging: true,
                         play_lock: false,
+                        seek: false,
                         user_data: Default::default(),
                     });
                 }
@@ -199,7 +197,7 @@ impl StreamTransmission {
                         inspector.time = time;
                         inspector.dragging = true;
                         inspector.play_lock = false;
-                        seek = true;
+                        inspector.seek = true;
                     }
                 }
             }
@@ -214,63 +212,15 @@ impl StreamTransmission {
             }
         }
 
-        let mut close = false;
+        // Draw vertical playhead line if this transmission is being inspected
         if is_inspecting_this {
             if let Some(inspector) = inspector_state.as_mut() {
-                // Draw vertical line across the rectangle in the same color as the outline
                 let x = figure_rect.left() + viewport.screen_space_x(inspector.time);
                 figure_painter.line_segment(
                     [egui::pos2(x, top), egui::pos2(x, bottom)],
                     egui::Stroke::new(2.0, visuals.fg_stroke.color),
                 );
-
-                // Draw inspector panel to the right of the rectangle
-                let panel_pos = egui::pos2(x, bottom + 10.0);
-                egui::Area::new(id.with("inspector"))
-                    .fixed_pos(panel_pos)
-                    .order(egui::Order::Foreground)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add_space(4.0);
-                                let close_button = ui.button("✖");
-                                if close_button.clicked() {
-                                    close = true;
-                                }
-                                let (enabled, play_text) = if inspector.dragging {
-                                    (false, "PLAYING")
-                                } else {
-                                    if inspector.play_lock {
-                                        (true, "PAUSE")
-                                    } else {
-                                        (true, "PLAY")
-                                    }
-                                };
-                                let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
-                                if play_button.clicked() {
-                                    inspector.play_lock = !inspector.play_lock;
-                                    seek = true;
-                                }
-                            });
-                            ui.separator();
-                            let StreamInspectorResponse { time_adj } = inspector_content(
-                                ui,
-                                StreamInspectorParameters {
-                                    time: inspector.time,
-                                    play: inspector.play_lock || inspector.dragging,
-                                    seek,
-                                },
-                                &mut inspector.user_data,
-                            );
-                            inspector.time += time_adj;
-                        });
-                    });
             }
-        }
-
-        // Close inspector if button clicked
-        if close {
-            *inspector_state = None;
         }
 
         // Advance inspector if play = true (only for the inspected transmission)

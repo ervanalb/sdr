@@ -351,6 +351,17 @@ impl eframe::App for SdrApp {
                 });
             });
 
+        egui::SidePanel::right("right_sidebar")
+            .default_width(350.0)
+            .show(ctx, |ui| {
+                ui.heading("Processors");
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.analysis.draw_sidebar(ui);
+                });
+            });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Waterfall Display");
             ui.separator();

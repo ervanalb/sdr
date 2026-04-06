@@ -260,6 +260,19 @@ impl Analysis {
                 .draw(ui, egui::Id::new(processor_id), figure_painter, figure_rect, viewport, dt);
         }
     }
+
+    pub fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
+        for (processor_id, processor) in self.processors.iter_mut() {
+            ui.group(|ui| {
+                ui.heading(processor.history.name());
+                ui.separator();
+                processor
+                    .history
+                    .draw_sidebar(ui, egui::Id::new(processor_id));
+            });
+            ui.add_space(10.0);
+        }
+    }
 }
 
 pub struct MainThreadProcessorState {
