@@ -79,13 +79,10 @@ pub struct StreamTransmission {
     pub freq_max: f64,
 }
 
-#[derive(Clone, Default)]
-struct StreamTransmissionState<T> {
-    inspector: Option<StreamTransmissionInspector<T>>,
-}
-
+/// Generic inspector state that can be stored in processor history to share across transmissions
 #[derive(Clone)]
-struct StreamTransmissionInspector<T> {
+pub struct TransmissionInspectorState<T> {
+    pub transmission_id: usize,
     pub time: f64,
     pub dragging: bool,
     pub play_lock: bool,
@@ -115,6 +112,7 @@ impl StreamTransmission {
     /// Draw the transmission widget with an optional inspector panel
     ///
     /// The inspector_content callback is called when the panel is open, receiving the inspected timestamp.
+    /// Inspector state is managed externally and shared across transmissions.
     pub fn show<F, T>(
         self,
         ui: &mut egui::Ui,
@@ -123,11 +121,13 @@ impl StreamTransmission {
         viewport: &Viewport,
         dt: f64,
         id: egui::Id,
+        transmission_id: usize,
+        inspector_state: &mut Option<TransmissionInspectorState<T>>,
         mut inspector_content: F,
     ) -> egui::Response
     where
         F: FnMut(&mut egui::Ui, StreamInspectorParameters, &mut T) -> StreamInspectorResponse,
-        T: Clone + Default + Send + Sync + 'static,
+        T: Clone + Default,
     {
         // Convert to screen coordinates (X=time, Y=frequency)
         // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
@@ -152,16 +152,12 @@ impl StreamTransmission {
             egui::StrokeKind::Outside,
         );
 
-        // Possible memory leak here--
-        // consider moving this state to History
-        let mut state = ui
-            .ctx()
-            .data_mut(|d| d.get_temp::<StreamTransmissionState<T>>(id))
-            .unwrap_or_default();
-
         let mut seek = false;
+        let is_inspecting_this = inspector_state
+            .as_ref()
+            .map_or(false, |s| s.transmission_id == transmission_id);
 
-        match &mut state.inspector {
+        match inspector_state {
             None => {
                 if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
                     && response.hovered()
@@ -169,7 +165,8 @@ impl StreamTransmission {
                 {
                     let x = pointer_pos.x - figure_rect.left();
                     let time = viewport.canvas_x(x);
-                    state.inspector = Some(StreamTransmissionInspector {
+                    *inspector_state = Some(TransmissionInspectorState {
+                        transmission_id,
                         time,
                         dragging: true,
                         play_lock: false,
@@ -178,7 +175,7 @@ impl StreamTransmission {
                 }
             }
             Some(inspector) => {
-                if inspector.dragging {
+                if inspector.dragging && is_inspecting_this {
                     if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
                         if !ui.ctx().input(|i| i.pointer.primary_down()) {
                             // Set inspector time on mouse button release
@@ -197,85 +194,94 @@ impl StreamTransmission {
                     {
                         let x = pointer_pos.x - figure_rect.left();
                         let time = viewport.canvas_x(x);
+                        // Switch to this transmission or update time
+                        inspector.transmission_id = transmission_id;
                         inspector.time = time;
                         inspector.dragging = true;
+                        inspector.play_lock = false;
                         seek = true;
                     }
                 }
             }
         }
 
-        // Close inspector if its time is out of bounds
-        if let Some(inspector) = &state.inspector
-            && (inspector.time < self.start_time || inspector.time > self.end_time)
-        {
-            state.inspector = None;
+        // Close inspector if its time is out of bounds of the inspected transmission
+        if is_inspecting_this {
+            if let Some(inspector) = inspector_state
+                && (inspector.time < self.start_time || inspector.time > self.end_time)
+            {
+                *inspector_state = None;
+            }
         }
 
         let mut close = false;
-        if let Some(inspector) = &mut state.inspector {
-            // Draw vertical line across the rectangle in the same color as the outline
-            let x = figure_rect.left() + viewport.screen_space_x(inspector.time);
-            figure_painter.line_segment(
-                [egui::pos2(x, top), egui::pos2(x, bottom)],
-                egui::Stroke::new(2.0, visuals.fg_stroke.color),
-            );
+        if is_inspecting_this {
+            if let Some(inspector) = inspector_state.as_mut() {
+                // Draw vertical line across the rectangle in the same color as the outline
+                let x = figure_rect.left() + viewport.screen_space_x(inspector.time);
+                figure_painter.line_segment(
+                    [egui::pos2(x, top), egui::pos2(x, bottom)],
+                    egui::Stroke::new(2.0, visuals.fg_stroke.color),
+                );
 
-            // Draw inspector panel to the right of the rectangle
-            let panel_pos = egui::pos2(x, bottom + 10.0);
-            egui::Area::new(id.with("inspector"))
-                .fixed_pos(panel_pos)
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(4.0);
-                            let close_button = ui.button("✖");
-                            if close_button.clicked() {
-                                close = true;
-                            }
-                            let (enabled, play_text) = if inspector.dragging {
-                                (false, "PLAYING")
-                            } else {
-                                if inspector.play_lock {
-                                    (true, "PAUSE")
-                                } else {
-                                    (true, "PLAY")
+                // Draw inspector panel to the right of the rectangle
+                let panel_pos = egui::pos2(x, bottom + 10.0);
+                egui::Area::new(id.with("inspector"))
+                    .fixed_pos(panel_pos)
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_space(4.0);
+                                let close_button = ui.button("✖");
+                                if close_button.clicked() {
+                                    close = true;
                                 }
-                            };
-                            let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
-                            if play_button.clicked() {
-                                inspector.play_lock = !inspector.play_lock;
-                                seek = true;
-                            }
+                                let (enabled, play_text) = if inspector.dragging {
+                                    (false, "PLAYING")
+                                } else {
+                                    if inspector.play_lock {
+                                        (true, "PAUSE")
+                                    } else {
+                                        (true, "PLAY")
+                                    }
+                                };
+                                let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
+                                if play_button.clicked() {
+                                    inspector.play_lock = !inspector.play_lock;
+                                    seek = true;
+                                }
+                            });
+                            ui.separator();
+                            let StreamInspectorResponse { time_adj } = inspector_content(
+                                ui,
+                                StreamInspectorParameters {
+                                    time: inspector.time,
+                                    play: inspector.play_lock || inspector.dragging,
+                                    seek,
+                                },
+                                &mut inspector.user_data,
+                            );
+                            inspector.time += time_adj;
                         });
-                        ui.separator();
-                        let StreamInspectorResponse { time_adj } = inspector_content(
-                            ui,
-                            StreamInspectorParameters {
-                                time: inspector.time,
-                                play: inspector.play_lock || inspector.dragging,
-                                seek,
-                            },
-                            &mut inspector.user_data,
-                        );
-                        inspector.time += time_adj;
                     });
-                });
+            }
         }
+
         // Close inspector if button clicked
         if close {
-            state.inspector = None;
+            *inspector_state = None;
         }
 
-        // Advance inspector if play = true
-        if let Some(inspector) = &mut state.inspector
-            && (inspector.play_lock || inspector.dragging)
-        {
-            inspector.time += dt;
+        // Advance inspector if play = true (only for the inspected transmission)
+        if is_inspecting_this {
+            if let Some(inspector) = inspector_state.as_mut()
+                && (inspector.play_lock || inspector.dragging)
+            {
+                inspector.time += dt;
+            }
         }
 
-        ui.ctx().data_mut(|d| d.insert_temp(id, state));
         response
     }
 }

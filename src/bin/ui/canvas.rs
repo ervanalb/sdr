@@ -40,7 +40,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
     document: &mut ActiveDocument,
-    analysis: &Analysis,
+    analysis: &mut Analysis,
     playhead: &mut f64,
     dt: f64,
     hardware_params: &mut HardwareParams,

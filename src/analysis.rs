@@ -247,14 +247,14 @@ impl Analysis {
     }
 
     pub fn draw(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &crate::ui::Viewport,
         dt: f64,
     ) {
-        for (processor_id, processor) in self.processors.iter() {
+        for (processor_id, processor) in self.processors.iter_mut() {
             processor
                 .history
                 .draw(ui, egui::Id::new(processor_id), figure_painter, figure_rect, viewport, dt);

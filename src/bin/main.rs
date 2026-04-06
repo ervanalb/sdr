@@ -366,7 +366,7 @@ impl eframe::App for SdrApp {
                 ui,
                 &mut self.viewport_state,
                 &mut self.document,
-                &self.analysis,
+                &mut self.analysis,
                 &mut self.playhead,
                 dt,
                 &mut self.hardware_params,

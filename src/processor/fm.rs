@@ -386,6 +386,7 @@ pub struct FmHistory {
     bandwidth: f64,
     receiver: Receiver<FmMessage>,
     transmissions: BTreeMap<TransmissionId, FmTransmission>,
+    inspector_state: Option<crate::ui::TransmissionInspectorState<FmUiState>>,
 }
 
 impl FmHistory {
@@ -395,6 +396,7 @@ impl FmHistory {
             bandwidth,
             receiver,
             transmissions: BTreeMap::new(),
+            inspector_state: None,
         }
     }
 }
@@ -447,7 +449,7 @@ impl ProcessorHistory for FmHistory {
     }
 
     fn draw(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         id: egui::Id,
         figure_painter: &egui::Painter,
@@ -471,6 +473,8 @@ impl ProcessorHistory for FmHistory {
                 viewport,
                 dt,
                 egui::Id::new((id, transmission_id)),
+                *transmission_id,
+                &mut self.inspector_state,
                 |ui, StreamInspectorParameters { time, play, seek }, FmUiState { player }| {
                     ui.label(format!("Inspecting: {:.3}s", time));
                     ui.separator();

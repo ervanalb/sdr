@@ -34,7 +34,7 @@ pub trait ProcessorHistory {
 
     /// Draw this processor history onto the canvas
     fn draw(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         id: egui::Id,
         figure_painter: &egui::Painter,
