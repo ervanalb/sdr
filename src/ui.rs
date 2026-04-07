@@ -76,9 +76,8 @@ pub fn paint_elided_text(
 pub struct TransmissionInspectorState {
     pub transmission_id: usize,
     pub time: f64,
-    pub play_temp: Option<f64>, // seek on release
+    pub play_temp: Option<f64>, // value = seek on release
     pub play_lock: bool,
-    pub seek: bool,
 }
 
 /// Response from stream_transmission_ui
