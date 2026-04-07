@@ -197,7 +197,9 @@ impl eframe::App for SdrApp {
 
         egui::SidePanel::left("left_sidebar")
             .default_width(300.0)
+            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(egui::Color32::from_gray(40)))
             .show(ctx, |ui| {
+                ui.add_space(8.0);
                 ui.heading("Hardware Control");
                 ui.separator();
 
@@ -225,7 +227,9 @@ impl eframe::App for SdrApp {
                         let device_params =
                             self.hardware_params.devices.get_mut(device_id).unwrap();
 
-                        ui.group(|ui| {
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().window_fill)
+                            .show(ui, |ui| {
                             ui.push_id(device_id, |ui| {
                                 ui.label(format!("Device: {}", device_id));
                                 ui.checkbox(&mut device_params.active, "Active");
@@ -357,7 +361,9 @@ impl eframe::App for SdrApp {
 
         egui::SidePanel::right("right_sidebar")
             .default_width(350.0)
+            .frame(egui::Frame::side_top_panel(&ctx.style()).fill(egui::Color32::from_gray(40)))
             .show(ctx, |ui| {
+                ui.add_space(8.0);
                 ui.heading("Processors");
                 ui.separator();
 

@@ -598,7 +598,6 @@ impl ProcessorHistory for FmHistory {
 
         // Show list of available transmissions
         ui.label("Transmissions:");
-        ui.separator();
 
         egui::ScrollArea::vertical()
             .max_height(400.0)
@@ -634,9 +633,6 @@ impl ProcessorHistory for FmHistory {
                     }
                 }
             });
-
-        ui.add_space(10.0);
-        ui.separator();
 
         // This variable is slightly different from inspector.play_state
         // because it may be set to false if the end of a transmission has been reached
@@ -692,6 +688,9 @@ impl ProcessorHistory for FmHistory {
         }
 
         if let Some(inspector) = &mut self.inspector_state {
+            ui.add_space(10.0);
+            ui.separator();
+
             // Playback controls
             ui.horizontal(|ui| {
                 let (enabled, play_text) = match inspector.play_state {
