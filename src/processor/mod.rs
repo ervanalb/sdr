@@ -25,6 +25,20 @@ impl SpecificProcessorParameters {
             SpecificProcessorParameters::Fm(p) => p.draw_setup(ui),
         }
     }
+
+    /// Get a list of available processor types
+    pub fn available_types() -> Vec<(&'static str, fn() -> Self)> {
+        vec![
+            ("FM Demodulator", || SpecificProcessorParameters::Fm(FmProcessorParameters::default())),
+        ]
+    }
+
+    /// Get the display name for this processor type
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            SpecificProcessorParameters::Fm(_) => "FM Demodulator",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

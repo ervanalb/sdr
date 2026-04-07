@@ -38,6 +38,17 @@ pub struct FmProcessorParameters {
     pub squelch_hysteresis_db: f64,
 }
 
+impl Default for FmProcessorParameters {
+    fn default() -> Self {
+        Self {
+            frequency: 100.0e6,
+            bandwidth: 200e3,
+            squelch_db: -100.0,
+            squelch_hysteresis_db: 3.0,
+        }
+    }
+}
+
 impl FmProcessorParameters {
     pub fn create_processor(
         &self,
@@ -506,7 +517,7 @@ impl ProcessorHistory for FmHistory {
                 continue;
             }
 
-            ui.push_id(("transmission", transmission_id), |ui| {
+            ui.push_id(ui.id().with(("transmission", transmission_id)), |ui| {
                 let start_time = transmission.time(transmission.chunks.start_index() as f64);
                 let end_time = transmission.time(transmission.chunks.end_index() as f64);
 

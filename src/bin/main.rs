@@ -230,125 +230,130 @@ impl eframe::App for SdrApp {
                         egui::Frame::group(ui.style())
                             .fill(ui.visuals().window_fill)
                             .show(ui, |ui| {
-                            ui.push_id(device_id, |ui| {
-                                ui.label(format!("Device: {}", device_id));
-                                ui.checkbox(&mut device_params.active, "Active");
+                                ui.push_id(device_id, |ui| {
+                                    ui.label(format!("Device: {}", device_id));
+                                    ui.checkbox(&mut device_params.active, "Active");
 
-                                if device_params.active {
-                                    ui.separator();
+                                    if device_params.active {
+                                        ui.separator();
 
-                                    for (stream_index, stream) in
-                                        device_params.rx_streams.iter_mut().enumerate()
-                                    {
-                                        ui.collapsing(
-                                            format!("RX Stream {}", stream_index),
-                                            |ui| {
-                                                ui.checkbox(&mut stream.active, "Active");
+                                        for (stream_index, stream) in
+                                            device_params.rx_streams.iter_mut().enumerate()
+                                        {
+                                            ui.collapsing(
+                                                format!("RX Stream {}", stream_index),
+                                                |ui| {
+                                                    ui.checkbox(&mut stream.active, "Active");
 
-                                                if let Some(frequency) = &mut stream.frequency {
-                                                    ui.add(
-                                                        egui::Slider::new(
-                                                            frequency,
-                                                            stream.frequency_min
-                                                                ..=stream.frequency_max,
-                                                        )
-                                                        .text("Frequency (Hz)"),
-                                                    );
-                                                    ui.label(format!(
-                                                        "{:.3} MHz",
-                                                        *frequency / 1e6
-                                                    ));
-                                                }
-
-                                                if let Some(sample_rate) = &mut stream.sample_rate {
-                                                    ui.add(
-                                                        egui::Slider::new(
-                                                            sample_rate,
-                                                            stream.sample_rate_min
-                                                                ..=stream.sample_rate_max,
-                                                        )
-                                                        .text("Sample Rate (Hz)")
-                                                        .logarithmic(true),
-                                                    );
-                                                    ui.label(format!(
-                                                        "{:.3} Msps",
-                                                        *sample_rate / 1e6
-                                                    ));
-                                                }
-
-                                                if let Some(bandwidth) = &mut stream.bandwidth {
-                                                    ui.add(
-                                                        egui::Slider::new(
-                                                            bandwidth,
-                                                            stream.bandwidth_min
-                                                                ..=stream.bandwidth_max,
-                                                        )
-                                                        .text("Bandwidth (Hz)")
-                                                        .logarithmic(true),
-                                                    );
-                                                    ui.label(format!(
-                                                        "{:.3} MHz",
-                                                        *bandwidth / 1e6
-                                                    ));
-                                                }
-
-                                                // Gain controls
-                                                if !stream.gains.is_empty() {
-                                                    ui.separator();
-                                                    ui.label("Gains:");
-
-                                                    let mut gain_names: Vec<String> =
-                                                        stream.gains.keys().cloned().collect();
-                                                    gain_names.sort();
-
-                                                    for gain_name in gain_names {
-                                                        let gain = stream
-                                                            .gains
-                                                            .get_mut(&gain_name)
-                                                            .unwrap();
+                                                    if let Some(frequency) = &mut stream.frequency {
                                                         ui.add(
                                                             egui::Slider::new(
-                                                                &mut gain.value,
-                                                                gain.min..=gain.max,
+                                                                frequency,
+                                                                stream.frequency_min
+                                                                    ..=stream.frequency_max,
                                                             )
-                                                            .text(&gain_name),
+                                                            .text("Frequency (Hz)"),
                                                         );
-                                                        ui.label(format!("{:.1} dB", gain.value));
-                                                    }
-                                                }
-
-                                                // Peak meter
-                                                // TODO: fix by moving into hardware
-                                                /*
-                                                let mut peak = None;
-                                                for active_stream in
-                                                    self.stream_history.active_streams.values()
-                                                {
-                                                    if &active_stream.descriptor.device_id
-                                                        == device_id
-                                                        && active_stream.descriptor.stream_index
-                                                            == stream_index
-                                                    {
-                                                        peak = Some((
-                                                            active_stream.peak,
-                                                            active_stream.overload,
+                                                        ui.label(format!(
+                                                            "{:.3} MHz",
+                                                            *frequency / 1e6
                                                         ));
                                                     }
-                                                }
-                                                if let Some((peak, overload)) = peak {
-                                                    ui.label(format!(
-                                                        "Peak: {:.1} dBFS {}",
-                                                        20. * peak.log10(),
-                                                        if overload { "O" } else { "" }
-                                                    ));
-                                                }
-                                                */
-                                            },
-                                        );
+
+                                                    if let Some(sample_rate) =
+                                                        &mut stream.sample_rate
+                                                    {
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                sample_rate,
+                                                                stream.sample_rate_min
+                                                                    ..=stream.sample_rate_max,
+                                                            )
+                                                            .text("Sample Rate (Hz)")
+                                                            .logarithmic(true),
+                                                        );
+                                                        ui.label(format!(
+                                                            "{:.3} Msps",
+                                                            *sample_rate / 1e6
+                                                        ));
+                                                    }
+
+                                                    if let Some(bandwidth) = &mut stream.bandwidth {
+                                                        ui.add(
+                                                            egui::Slider::new(
+                                                                bandwidth,
+                                                                stream.bandwidth_min
+                                                                    ..=stream.bandwidth_max,
+                                                            )
+                                                            .text("Bandwidth (Hz)")
+                                                            .logarithmic(true),
+                                                        );
+                                                        ui.label(format!(
+                                                            "{:.3} MHz",
+                                                            *bandwidth / 1e6
+                                                        ));
+                                                    }
+
+                                                    // Gain controls
+                                                    if !stream.gains.is_empty() {
+                                                        ui.separator();
+                                                        ui.label("Gains:");
+
+                                                        let mut gain_names: Vec<String> =
+                                                            stream.gains.keys().cloned().collect();
+                                                        gain_names.sort();
+
+                                                        for gain_name in gain_names {
+                                                            let gain = stream
+                                                                .gains
+                                                                .get_mut(&gain_name)
+                                                                .unwrap();
+                                                            ui.add(
+                                                                egui::Slider::new(
+                                                                    &mut gain.value,
+                                                                    gain.min..=gain.max,
+                                                                )
+                                                                .text(&gain_name),
+                                                            );
+                                                            ui.label(format!(
+                                                                "{:.1} dB",
+                                                                gain.value
+                                                            ));
+                                                        }
+                                                    }
+
+                                                    // Peak meter
+                                                    // TODO: fix by moving into hardware
+                                                    /*
+                                                    let mut peak = None;
+                                                    for active_stream in
+                                                        self.stream_history.active_streams.values()
+                                                    {
+                                                        if &active_stream.descriptor.device_id
+                                                            == device_id
+                                                            && active_stream.descriptor.stream_index
+                                                                == stream_index
+                                                        {
+                                                            peak = Some((
+                                                                active_stream.peak,
+                                                                active_stream.overload,
+                                                            ));
+                                                        }
+                                                    }
+                                                    if let Some((peak, overload)) = peak {
+                                                        ui.label(format!(
+                                                            "Peak: {:.1} dBFS {}",
+                                                            20. * peak.log10(),
+                                                            if overload { "O" } else { "" }
+                                                        ));
+                                                    }
+                                                    */
+                                                },
+                                            );
+                                        }
                                     }
-                                }
+                                });
                             });
-                        });
 
                         ui.add_space(10.0);
                     }
@@ -364,11 +369,79 @@ impl eframe::App for SdrApp {
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(egui::Color32::from_gray(40)))
             .show(ctx, |ui| {
                 ui.add_space(8.0);
-                ui.heading("Processors");
+                let processors_root_ui_id = ui.id();
+
+                // Header with "Processors" title and "+" button
+                ui.horizontal(|ui| {
+                    ui.heading("Processors");
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.menu_button("➕", |ui| {
+                            use sdr::processor::SpecificProcessorParameters;
+
+                            for (type_name, create_fn) in
+                                SpecificProcessorParameters::available_types()
+                            {
+                                if ui.button(type_name).clicked() {
+                                    // Find the next available processor ID
+                                    let next_id = self
+                                        .processor_parameters
+                                        .keys()
+                                        .max()
+                                        .map(|&id| id + 1)
+                                        .unwrap_or(1);
+
+                                    // Count existing processors of this type to generate unique name
+                                    let type_count = self
+                                        .processor_parameters
+                                        .values()
+                                        .filter(|p| p.specific_parameters.type_name() == type_name)
+                                        .count();
+
+                                    let specific_params = create_fn();
+                                    let name = format!("{} {}", type_name, type_count + 1);
+
+                                    self.processor_parameters.insert(
+                                        next_id,
+                                        sdr::processor::ProcessorParameters {
+                                            name: name.clone(),
+                                            enabled: true,
+                                            specific_parameters: specific_params,
+                                        },
+                                    );
+
+                                    // Mark this processor for initial editing and setup
+                                    ui.data_mut(|d| {
+                                        d.insert_temp(
+                                            processors_root_ui_id
+                                                .with(("processor", next_id))
+                                                .with("processor_name_editing"),
+                                            Some(name),
+                                        );
+                                        d.insert_temp(
+                                            processors_root_ui_id
+                                                .with(("processor", next_id))
+                                                .with("processor_setup_open"),
+                                            true,
+                                        );
+                                    });
+
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                });
+
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.analysis.draw(ui, &mut self.processor_parameters, dt);
+                    self.analysis.draw(
+                        ui,
+                        &mut self.processor_parameters,
+                        dt,
+                        processors_root_ui_id,
+                    );
                 });
             });
 
