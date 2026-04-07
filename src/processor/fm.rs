@@ -1,10 +1,7 @@
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     ops::Range,
-    sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, Sender, channel},
-    },
+    sync::mpsc::{Receiver, Sender, channel},
 };
 
 use num_complex::Complex;
@@ -21,7 +18,9 @@ use crate::{
     id_factory::IdFactory,
     preprocessor::PreprocessedClipDescriptor,
     processor::{Processor, ProcessorHistory},
-    ui::{StreamTransmission, Viewport},
+    ui::{
+        StreamTransmissionResponse, TransmissionInspectorState, Viewport, stream_transmission_ui,
+    },
 };
 
 type TransmissionId = usize;
@@ -401,7 +400,8 @@ pub struct FmHistory {
     bandwidth: f64,
     receiver: Receiver<FmMessage>,
     transmissions: BTreeMap<TransmissionId, FmTransmission>,
-    inspector_state: Option<crate::ui::TransmissionInspectorState<FmUiState>>,
+    inspector_state: Option<TransmissionInspectorState>,
+    player: Option<Player>,
 }
 
 impl FmHistory {
@@ -412,6 +412,7 @@ impl FmHistory {
             receiver,
             transmissions: BTreeMap::new(),
             inspector_state: None,
+            player: None,
         }
     }
 }
@@ -493,15 +494,51 @@ impl ProcessorHistory for FmHistory {
                 let start_time = transmission.time(transmission.chunks.start_index() as f64);
                 let end_time = transmission.time(transmission.chunks.end_index() as f64);
 
-                let response = StreamTransmission::new(start_time, end_time, freq_min, freq_max)
-                    .show(
-                        ui,
-                        figure_painter,
-                        figure_rect,
-                        viewport,
-                        *transmission_id,
-                        &mut self.inspector_state,
-                    );
+                // Determine playhead position if this transmission is being inspected
+                let playhead = self
+                    .inspector_state
+                    .as_ref()
+                    .filter(|s| s.transmission_id == *transmission_id)
+                    .map(|s| s.time);
+
+                let StreamTransmissionResponse {
+                    response,
+                    pressed_at,
+                } = stream_transmission_ui(
+                    start_time,
+                    end_time,
+                    freq_min,
+                    freq_max,
+                    playhead,
+                    ui,
+                    figure_painter,
+                    figure_rect,
+                    viewport,
+                );
+
+                // Handle inspector state updates based on user interaction
+                if let Some(time) = pressed_at {
+                    // Handle click and drag behavior similar to canvas
+                    if response.hovered() && ui.ctx().input(|i| i.pointer.primary_pressed()) {
+                        let inspector = self.inspector_state.get_or_insert_with(|| {
+                            TransmissionInspectorState {
+                                transmission_id: *transmission_id,
+                                time: start_time,
+                                play_temp: None,
+                                play_lock: false,
+                                seek: false,
+                            }
+                        });
+
+                        // Play this transmission
+                        inspector.transmission_id = *transmission_id;
+                        inspector.time = time;
+                        inspector.seek = true;
+                        if !inspector.play_lock {
+                            inspector.play_temp = Some(time);
+                        }
+                    }
+                }
 
                 // Pass hover/click down to parent
                 *clip_response = clip_response.union(response.clone());
@@ -582,45 +619,23 @@ impl ProcessorHistory for FmHistory {
                     let response = ui.selectable_label(is_current, label);
 
                     // Handle click and drag behavior similar to canvas
-                    match &mut self.inspector_state {
-                        None => {
-                            if response.hovered() && ui.ctx().input(|i| i.pointer.primary_pressed())
-                            {
-                                // Start inspector at the beginning of this transmission with dragging
-                                self.inspector_state =
-                                    Some(crate::ui::TransmissionInspectorState {
-                                        transmission_id: *transmission_id,
-                                        time: start_time,
-                                        play_temp: Some(start_time),
-                                        play_lock: false,
-                                        seek: false,
-                                        user_data: FmUiState::default(),
-                                    });
+                    if response.hovered() && ui.ctx().input(|i| i.pointer.primary_pressed()) {
+                        let inspector = self.inspector_state.get_or_insert_with(|| {
+                            TransmissionInspectorState {
+                                transmission_id: *transmission_id,
+                                time: start_time,
+                                play_temp: None,
+                                play_lock: false,
+                                seek: false,
                             }
-                        }
-                        Some(inspector) => {
-                            if let Some(seek_on_release) = inspector.play_temp {
-                                if !ui.ctx().input(|i| i.pointer.primary_down()) {
-                                    // If play_temp, set inspector position
-                                    // to wherever the play_temp was started
-                                    if !inspector.play_lock {
-                                        inspector.time = seek_on_release;
-                                    }
-                                    inspector.play_temp = None;
-                                }
-                            } else {
-                                if response.hovered()
-                                    && ui.ctx().input(|i| i.pointer.primary_pressed())
-                                {
-                                    // Play this transmission
-                                    inspector.transmission_id = *transmission_id;
-                                    inspector.time = start_time;
-                                    inspector.seek = true;
-                                    if !inspector.play_lock {
-                                        inspector.play_temp = Some(start_time);
-                                    }
-                                }
-                            }
+                        });
+
+                        // Play this transmission
+                        inspector.transmission_id = *transmission_id;
+                        inspector.time = start_time;
+                        inspector.seek = true;
+                        if !inspector.play_lock {
+                            inspector.play_temp = Some(start_time);
                         }
                     }
                 }
@@ -630,6 +645,19 @@ impl ProcessorHistory for FmHistory {
         ui.separator();
 
         if let Some(inspector) = &mut self.inspector_state {
+            // Handle mouse release--stop play_temp
+            if let Some(seek_on_release) = inspector.play_temp
+                && !ui.ctx().input(|i| i.pointer.primary_down())
+            {
+                // If play_temp, set inspector position
+                // to wherever the play_temp was started
+                if !inspector.play_lock {
+                    inspector.time = seek_on_release;
+                    inspector.seek = true;
+                }
+                inspector.play_temp = None;
+            }
+
             let mut playing = false;
             // Find the transmission being inspected
             if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
@@ -800,38 +828,45 @@ impl ProcessorHistory for FmHistory {
                     });
 
                 // Handle audio playback
-                let seek = inspector.seek;
                 let time = inspector.time;
 
                 if playing {
-                    if let Some(player) = inspector.user_data.player.as_mut()
-                        && !seek
-                    {
-                        let mut p = player.lock().unwrap();
+                    // Create new player if needed (first play or after seek)
+                    if self.player.is_none() || inspector.seek {
+                        self.player = Some(Player {
+                            audio_output: AudioOutput::new().unwrap(),
+                            next_seq_num: chunk_index,
+                            time_adj: 0.,
+                        });
+                    }
 
+                    if let Some(player) = &mut self.player {
                         // Feed new audio data to the audio player
-                        let start = p.next_seq_num;
+                        let start = player.next_seq_num;
                         let end = (transmission.index(time + AUDIO_LOOKAHEAD_DURATION) as isize)
                             .min(transmission.chunks.end_index());
                         if end > start {
-                            let bufs = transmission.chunks.range(start..end).enumerate().map(
-                                |(i, chunk)| {
-                                    let seq_num = start + i as isize;
-                                    AudioBuffer {
-                                        seq_num,
-                                        data: chunk.audio_data.clone(),
-                                    }
-                                },
-                            );
+                            let bufs =
+                                transmission
+                                    .chunks
+                                    .range(start..end)
+                                    .enumerate()
+                                    .map(|(i, chunk)| {
+                                        let seq_num = start + i as isize;
+                                        AudioBuffer {
+                                            seq_num,
+                                            data: chunk.audio_data.clone(),
+                                        }
+                                    });
 
                             let FeedResult {
                                 last_played_seq_num,
                                 underrun,
-                            } = p.audio_output.feed(bufs).unwrap(); // TODO replace unwrap
+                            } = player.audio_output.feed(bufs).unwrap(); // TODO replace unwrap
                             if underrun {
                                 eprintln!("Audio underrun!");
                             }
-                            p.next_seq_num = end;
+                            player.next_seq_num = end;
 
                             // Look up last_played_seq_num and set_time based on it,
                             // to keep the inspector time (playhead)
@@ -842,21 +877,14 @@ impl ProcessorHistory for FmHistory {
                                 // Apply strong LPF since we have relatively poor introspection into audio
                                 let new_adj = (player_time - chunk_time) as f32;
                                 let alpha = 0.0001;
-                                p.time_adj += alpha * (new_adj - p.time_adj);
-                                inspector.time += p.time_adj as f64;
+                                player.time_adj += alpha * (new_adj - player.time_adj);
+                                inspector.time += player.time_adj as f64;
                             }
                         }
-                    } else {
-                        let audio_output = AudioOutput::new().unwrap(); // TODO replace unwrap
-
-                        inspector.user_data.player = Some(Arc::new(Mutex::new(Player {
-                            audio_output,
-                            next_seq_num: chunk_index,
-                            time_adj: 0.,
-                        })));
                     }
                 } else {
-                    inspector.user_data.player = None;
+                    // Stop playing - clear the player
+                    self.player = None;
                 }
 
                 // Reset seek flag after processing
@@ -868,6 +896,7 @@ impl ProcessorHistory for FmHistory {
 
         if close_inspector {
             self.inspector_state = None;
+            self.player = None;
         }
     }
 
@@ -980,11 +1009,6 @@ pub struct FmTransmissionChunk {
 
 const IQ_PLOT_MARGIN: f32 = 1.5;
 const AUDIO_LOOKAHEAD_DURATION: f64 = 0.2;
-
-#[derive(Default, Clone)]
-struct FmUiState {
-    player: Option<Arc<Mutex<Player>>>,
-}
 
 struct Player {
     audio_output: AudioOutput,

@@ -71,129 +71,84 @@ pub fn paint_elided_text(
     painter.add(shape);
 }
 
-/// A custom egui widget for drawing a transmission rectangle on a stream
-pub struct StreamTransmission {
-    pub start_time: f64,
-    pub end_time: f64,
-    pub freq_min: f64,
-    pub freq_max: f64,
-}
-
-/// Generic inspector state that can be stored in processor history to share across transmissions
+/// Inspector state that can be stored in processor history to share across transmissions
 #[derive(Clone)]
-pub struct TransmissionInspectorState<T> {
+pub struct TransmissionInspectorState {
     pub transmission_id: usize,
     pub time: f64,
     pub play_temp: Option<f64>, // seek on release
     pub play_lock: bool,
     pub seek: bool,
-    pub user_data: T,
 }
 
-impl StreamTransmission {
-    pub fn new(start_time: f64, end_time: f64, freq_min: f64, freq_max: f64) -> Self {
-        Self {
-            start_time,
-            end_time,
-            freq_min,
-            freq_max,
-        }
+/// Response from stream_transmission_ui
+pub struct StreamTransmissionResponse {
+    pub response: egui::Response,
+    pub pressed_at: Option<f64>,
+}
+
+/// Draw a transmission rectangle on a stream.
+///
+/// Returns a response containing the egui response and optionally the time where the transmission was pressed.
+pub fn stream_transmission_ui(
+    start_time: f64,
+    end_time: f64,
+    freq_min: f64,
+    freq_max: f64,
+    playhead: Option<f64>,
+    ui: &mut egui::Ui,
+    figure_painter: &egui::Painter,
+    figure_rect: egui::Rect,
+    viewport: &Viewport,
+) -> StreamTransmissionResponse {
+    // Convert to screen coordinates (X=time, Y=frequency)
+    // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
+    let left = figure_rect.left() + viewport.screen_space_x(start_time);
+    let right = figure_rect.left() + viewport.screen_space_x(end_time);
+    let top = figure_rect.top() + viewport.screen_space_y(freq_max);
+    let bottom = figure_rect.top() + viewport.screen_space_y(freq_min);
+
+    // Draw a rectangle around the channel
+    let rect = egui::Rect {
+        min: egui::pos2(left, top),
+        max: egui::pos2(right, bottom),
+    };
+
+    let interact_id = ui.id().with("transmission_interact");
+    let response = ui.interact(rect, interact_id, egui::Sense::click_and_drag());
+
+    let visuals = ui.visuals().widgets.style(&response);
+
+    figure_painter.rect_stroke(
+        rect,
+        visuals.corner_radius,
+        visuals.fg_stroke,
+        egui::StrokeKind::Outside,
+    );
+
+    // Check if the transmission was pressed and calculate the time
+    let pressed_at = if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
+        && response.hovered()
+        && ui.ctx().input(|i| i.pointer.primary_pressed())
+    {
+        let x = pointer_pos.x - figure_rect.left();
+        Some(viewport.canvas_x(x))
+    } else {
+        None
+    };
+
+    // Draw vertical playhead line if provided
+    if let Some(playhead_time) = playhead {
+        let x = figure_rect.left() + viewport.screen_space_x(playhead_time);
+        figure_painter.line_segment(
+            [egui::pos2(x, top), egui::pos2(x, bottom)],
+            egui::Stroke::new(2.0, visuals.fg_stroke.color),
+        );
     }
 
-    /// Draw the transmission widget on the canvas.
-    ///
-    /// Inspector state is managed externally and shared across transmissions.
-    /// The inspector panel UI is drawn separately in the sidebar.
-    pub fn show<T>(
-        self,
-        ui: &mut egui::Ui,
-        figure_painter: &egui::Painter,
-        figure_rect: egui::Rect,
-        viewport: &Viewport,
-        transmission_id: usize,
-        inspector_state: &mut Option<TransmissionInspectorState<T>>,
-    ) -> egui::Response
-    where
-        T: Clone + Default,
-    {
-        // Convert to screen coordinates (X=time, Y=frequency)
-        // Y axis is flipped: max freq (larger value) has smaller Y pixel coordinate
-        let left = figure_rect.left() + viewport.screen_space_x(self.start_time);
-        let right = figure_rect.left() + viewport.screen_space_x(self.end_time);
-        let top = figure_rect.top() + viewport.screen_space_y(self.freq_max);
-        let bottom = figure_rect.top() + viewport.screen_space_y(self.freq_min);
-
-        // Draw a rectangle around the channel
-        let rect = egui::Rect {
-            min: egui::pos2(left, top),
-            max: egui::pos2(right, bottom),
-        };
-
-        let interact_id = ui.id().with("transmission_interact");
-        let response = ui.interact(rect, interact_id, egui::Sense::click_and_drag());
-
-        let visuals = ui.visuals().widgets.style(&response);
-
-        figure_painter.rect_stroke(
-            rect,
-            visuals.corner_radius,
-            visuals.fg_stroke,
-            egui::StrokeKind::Outside,
-        );
-
-        let is_inspecting_this = inspector_state
-            .as_ref()
-            .map_or(false, |s| s.transmission_id == transmission_id);
-
-        match inspector_state {
-            None => {
-                if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
-                    && response.hovered()
-                    && ui.ctx().input(|i| i.pointer.primary_pressed())
-                {
-                    let x = pointer_pos.x - figure_rect.left();
-                    let time = viewport.canvas_x(x);
-                    *inspector_state = Some(TransmissionInspectorState {
-                        transmission_id,
-                        time,
-                        play_temp: Some(time),
-                        play_lock: false,
-                        seek: false,
-                        user_data: Default::default(),
-                    });
-                }
-            }
-            Some(inspector) => {
-                if let Some(pointer_pos) = ui.ctx().pointer_interact_pos()
-                    && response.hovered()
-                    && ui.ctx().input(|i| i.pointer.primary_pressed())
-                {
-                    let x = pointer_pos.x - figure_rect.left();
-                    let time = viewport.canvas_x(x);
-                    // Switch to this transmission or update time
-                    // Play this transmission
-                    inspector.transmission_id = transmission_id;
-                    inspector.time = time;
-                    inspector.seek = true;
-                    if !inspector.play_lock {
-                        inspector.play_temp = Some(time);
-                    }
-                }
-            }
-        }
-
-        // Draw vertical playhead line if this transmission is being inspected
-        if is_inspecting_this {
-            if let Some(inspector) = inspector_state.as_mut() {
-                let x = figure_rect.left() + viewport.screen_space_x(inspector.time);
-                figure_painter.line_segment(
-                    [egui::pos2(x, top), egui::pos2(x, bottom)],
-                    egui::Stroke::new(2.0, visuals.fg_stroke.color),
-                );
-            }
-        }
-
-        response
+    StreamTransmissionResponse {
+        response,
+        pressed_at,
     }
 }
 
