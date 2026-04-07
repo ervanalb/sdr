@@ -5,20 +5,33 @@ use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::View
 use num_complex::Complex;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ProcessorParameters {
+pub enum SpecificProcessorParameters {
     Fm(FmProcessorParameters),
 }
 
-impl ProcessorParameters {
-    pub fn create_processor(
+impl SpecificProcessorParameters {
+    pub fn create_instance(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         match self {
-            ProcessorParameters::Fm(p) => p.create_processor(device, queue),
+            SpecificProcessorParameters::Fm(p) => p.create_processor(device, queue),
         }
     }
+
+    pub fn draw_setup(&mut self, ui: &mut egui::Ui) {
+        match self {
+            SpecificProcessorParameters::Fm(p) => p.draw_setup(ui),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessorParameters {
+    pub name: String,
+    pub enabled: bool,
+    pub specific_parameters: SpecificProcessorParameters,
 }
 
 pub trait Processor: Send {

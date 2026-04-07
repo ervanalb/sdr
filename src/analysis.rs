@@ -5,6 +5,7 @@ use crate::{
     processor::{Processor, ProcessorHistory, ProcessorParameters},
     ui::Viewport,
 };
+use egui::vec2;
 use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -185,7 +186,10 @@ impl Analysis {
         // 1. Add & remove processor states
         let mut removed_processors = vec![];
         self.processors.retain(|&processor_id, processor_state| {
-            let keep = processor_parameters.contains_key(&processor_id);
+            // Keep processor if it exists in parameters and is enabled
+            let keep = processor_parameters
+                .get(&processor_id)
+                .map_or(false, |p| p.enabled);
             if !keep {
                 removed_processors.push(processor_state.instance_id);
             }
@@ -194,9 +198,15 @@ impl Analysis {
 
         let mut new_processors = vec![];
         for (processor_id, processor_parameters) in processor_parameters.iter() {
+            // Only create instances for enabled processors
+            if !processor_parameters.enabled {
+                continue;
+            }
+
             if !self.processors.contains_key(processor_id) {
-                let (processor, history) =
-                    processor_parameters.create_processor(&self.device, &self.queue);
+                let (processor, history) = processor_parameters
+                    .specific_parameters
+                    .create_instance(&self.device, &self.queue);
                 let instance_id = self.instance_id_factory.create();
                 self.processors.insert(
                     *processor_id,
@@ -210,19 +220,26 @@ impl Analysis {
             }
         }
 
-        // Check for parameter changes
+        // Check for specific parameter changes (not name changes)
         for (processor_id, processor_state) in self.processors.iter_mut() {
             let parameters = processor_parameters.get_mut(processor_id).unwrap();
-            if parameters != &processor_state.last_parameters {
+            // Only recreate if specific_parameters changed, not name or enabled
+            if parameters.specific_parameters != processor_state.last_parameters.specific_parameters
+            {
                 removed_processors.push(processor_state.instance_id);
                 let instance_id = self.instance_id_factory.create();
-                let (processor, history) = parameters.create_processor(&self.device, &self.queue);
+                let (processor, history) = parameters
+                    .specific_parameters
+                    .create_instance(&self.device, &self.queue);
                 *processor_state = MainThreadProcessorState {
                     instance_id,
                     last_parameters: parameters.clone(),
                     history,
                 };
                 new_processors.push((instance_id, processor));
+            } else {
+                // Update last_parameters to reflect name changes without recreating
+                processor_state.last_parameters = parameters.clone();
             }
         }
 
@@ -271,14 +288,92 @@ impl Analysis {
         }
     }
 
-    pub fn draw(&mut self, ui: &mut egui::Ui, dt: f64) {
-        for (processor_id, processor) in self.processors.iter_mut() {
+    pub fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        processor_parameters: &mut BTreeMap<ProcessorId, ProcessorParameters>,
+        dt: f64,
+    ) {
+        let mut to_remove = None;
+
+        for (processor_id, parameters) in processor_parameters.iter_mut() {
             ui.group(|ui| {
-                ui.heading(processor.history.name());
+                // Header row with checkbox, name, setup toggle, and delete button
+                let setup_id = ui.id().with(("processor_setup_open", processor_id));
+                let mut show_setup = ui.data(|d| d.get_temp::<bool>(setup_id).unwrap_or(false));
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut parameters.enabled, "");
+
+                    let name_edit_id = ui.id().with(("processor_name_editing", processor_id));
+                    let editing_name =
+                        ui.data(|d| d.get_temp::<Option<String>>(name_edit_id).flatten());
+
+                    if let Some(mut temp_name) = editing_name {
+                        // We're in edit mode
+                        let response = ui.add_sized(
+                            (ui.available_size() - vec2(100.0, 0.0)).max(vec2(0., 0.)), // Leave space for Setup and X buttons
+                            egui::TextEdit::singleline(&mut temp_name),
+                        );
+
+                        let accept = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let cancel =
+                            ui.input(|i| i.key_pressed(egui::Key::Escape)) || response.lost_focus();
+
+                        if accept {
+                            parameters.name = temp_name;
+                            ui.data_mut(|d| d.insert_temp(name_edit_id, None::<String>));
+                        } else if cancel {
+                            ui.data_mut(|d| d.insert_temp(name_edit_id, None::<String>));
+                        } else {
+                            // Update the temp value and request focus
+                            ui.data_mut(|d| d.insert_temp(name_edit_id, Some(temp_name)));
+                            if !response.has_focus() {
+                                response.request_focus();
+                            }
+                        }
+                    } else {
+                        // Not editing - show as heading
+                        let response = ui.heading(&parameters.name);
+                        if response.clicked() {
+                            ui.data_mut(|d| {
+                                d.insert_temp(name_edit_id, Some(parameters.name.clone()))
+                            });
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✖").clicked() {
+                            to_remove = Some(*processor_id);
+                        }
+
+                        ui.toggle_value(&mut show_setup, "Setup");
+                    });
+                });
+
+                ui.data_mut(|d| d.insert_temp(setup_id, show_setup));
+
                 ui.separator();
-                processor.history.draw(ui, egui::Id::new(processor_id), dt);
+
+                // Draw setup UI if toggle is on
+                if show_setup {
+                    parameters.specific_parameters.draw_setup(ui);
+                    ui.separator();
+                }
+
+                // Draw history UI if processor is enabled and exists (always visible, no collapse)
+                if parameters.enabled {
+                    if let Some(processor) = self.processors.get_mut(processor_id) {
+                        processor.history.draw(ui, egui::Id::new(processor_id), dt);
+                    }
+                }
             });
             ui.add_space(10.0);
+        }
+
+        // Remove processor if delete was clicked
+        if let Some(id) = to_remove {
+            processor_parameters.remove(&id);
         }
     }
 }

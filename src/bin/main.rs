@@ -6,8 +6,8 @@ use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
 use sdr::document::{ActiveDocument, RecordingId};
 use sdr::hardware::{Hardware, HardwareParams};
-use sdr::processor::ProcessorParameters;
 use sdr::processor::fm::FmProcessorParameters;
+use sdr::processor::{ProcessorParameters, SpecificProcessorParameters};
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -76,12 +76,16 @@ impl SdrApp {
 
         processor_parameters.insert(
             1,
-            ProcessorParameters::Fm(FmProcessorParameters {
-                frequency: tmp_freq,
-                bandwidth: 200e3,
-                squelch_db: -100.,
-                squelch_hysteresis_db: 3.,
-            }),
+            ProcessorParameters {
+                name: "FM Demodulator".to_string(),
+                enabled: true,
+                specific_parameters: SpecificProcessorParameters::Fm(FmProcessorParameters {
+                    frequency: tmp_freq,
+                    bandwidth: 200e3,
+                    squelch_db: -100.,
+                    squelch_hysteresis_db: 3.,
+                }),
+            },
         );
 
         Self {
@@ -358,19 +362,11 @@ impl eframe::App for SdrApp {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.analysis.draw(ui, dt);
+                    self.analysis.draw(ui, &mut self.processor_parameters, dt);
                 });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Waterfall Display");
-            ui.separator();
-
-            let freq = match self.processor_parameters.get_mut(&1).unwrap() {
-                ProcessorParameters::Fm(p) => &mut p.frequency,
-            };
-            ui.add(egui::Slider::new(freq, 88e6..=108e6).text("FM TUNER"));
-
             let wgpu_render_state = frame.wgpu_render_state().unwrap();
 
             self::ui::canvas::ui(

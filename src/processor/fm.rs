@@ -49,6 +49,20 @@ impl FmProcessorParameters {
         let history = FmHistory::new(self.frequency, self.bandwidth, receiver);
         (Box::new(processor), Box::new(history))
     }
+
+    pub fn draw_setup(&mut self, ui: &mut egui::Ui) {
+        ui.label("Frequency (Hz):");
+        ui.add(egui::DragValue::new(&mut self.frequency).suffix(" Hz"));
+
+        ui.label("Bandwidth (Hz):");
+        ui.add(egui::DragValue::new(&mut self.bandwidth).suffix(" Hz"));
+
+        ui.label("Squelch (dB):");
+        ui.add(egui::DragValue::new(&mut self.squelch_db).suffix(" dB"));
+
+        ui.label("Squelch Hysteresis (dB):");
+        ui.add(egui::DragValue::new(&mut self.squelch_hysteresis_db).suffix(" dB"));
+    }
 }
 
 pub struct FmProcessor {
