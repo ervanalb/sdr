@@ -71,13 +71,20 @@ pub fn paint_elided_text(
     painter.add(shape);
 }
 
+/// Play state for the transmission inspector
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlayState {
+    Paused,
+    PlayTemp { seek_on_release: f64 }, // Temporary play mode, with time to seek to on release
+    Play,                               // Locked play mode
+}
+
 /// Inspector state that can be stored in processor history to share across transmissions
 #[derive(Clone)]
 pub struct TransmissionInspectorState {
     pub transmission_id: usize,
     pub time: f64,
-    pub play_temp: Option<f64>, // value = seek on release
-    pub play_lock: bool,
+    pub play_state: PlayState,
 }
 
 /// Response from stream_transmission_ui

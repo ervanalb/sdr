@@ -19,7 +19,8 @@ use crate::{
     preprocessor::PreprocessedClipDescriptor,
     processor::{Processor, ProcessorHistory},
     ui::{
-        StreamTransmissionResponse, TransmissionInspectorState, Viewport, stream_transmission_ui,
+        PlayState, StreamTransmissionResponse, TransmissionInspectorState, Viewport,
+        stream_transmission_ui,
     },
 };
 
@@ -624,20 +625,23 @@ impl ProcessorHistory for FmHistory {
 
         if let Some(inspector) = &mut self.inspector_state {
             // Handle mouse release--stop temp play
-            if let Some(seek_on_release) = inspector.play_temp
+            if let PlayState::PlayTemp { seek_on_release } = inspector.play_state
                 && !ui.ctx().input(|i| i.pointer.primary_down())
             {
                 Self::stop_temp_play(inspector, &mut self.player, seek_on_release);
             }
 
+            // This variable is slightly different from inspector.play_state
+            // because it may be set to false if the end of a transmission has been reached
             let mut playing = false;
+
             // Find the transmission being inspected
             if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
                 // Clamp inspector time to the bounds of the transmission being inspected
                 let start_time = transmission.time(transmission.chunks.start_index() as f64);
                 let end_time = transmission.time(transmission.chunks.end_index() as f64);
                 if inspector.time > end_time {
-                    if inspector.play_lock {
+                    if inspector.play_state == PlayState::Play {
                         // Advance to next clip if there is one.
                         // Otherwise, stop playing.
                         let next_transmission_id = inspector.transmission_id + 1;
@@ -662,7 +666,9 @@ impl ProcessorHistory for FmHistory {
                         inspector.time = start_time;
                     }
                     // Advance the inspector playhead
-                    if inspector.play_lock || inspector.play_temp.is_some() {
+                    if !matches!(inspector.play_state, PlayState::Paused)
+                        && inspector.time + dt <= end_time
+                    {
                         inspector.time += dt;
                         playing = true;
                     }
@@ -670,34 +676,86 @@ impl ProcessorHistory for FmHistory {
             }
 
             // Refresh the transmission since we might have changed it
-            if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
-                ui.heading("FM Transmission Inspector");
-                ui.separator();
+            ui.heading("FM Transmission Inspector");
+            ui.separator();
 
-                // Playback controls
-                ui.horizontal(|ui| {
-                    if ui.button("✖ Close").clicked() {
-                        close_inspector = true;
-                    }
-                    let (enabled, play_text) = if inspector.play_temp.is_some() {
-                        (false, "PLAYING")
-                    } else {
-                        if inspector.play_lock {
-                            (true, "PAUSE")
-                        } else {
-                            (true, "PLAY")
+            // Playback controls
+            ui.horizontal(|ui| {
+                if ui.button("✖ Close").clicked() {
+                    close_inspector = true;
+                }
+
+                let (enabled, play_text) = match inspector.play_state {
+                    PlayState::PlayTemp { .. } => (false, "⏸"),
+                    PlayState::Play => (true, "⏸"),
+                    PlayState::Paused => (true, "▶"),
+                };
+
+                // Seek backwards button
+                let prev_button = ui.add_enabled(enabled, egui::Button::new("⏮"));
+                if prev_button.double_clicked() {
+                    // Double-click: go to previous transmission if it exists
+                    if inspector.transmission_id > 0 {
+                        let prev_transmission_id = inspector.transmission_id - 1;
+                        if let Some(prev_transmission) =
+                            self.transmissions.get(&prev_transmission_id)
+                        {
+                            let prev_start_time = prev_transmission
+                                .time(prev_transmission.chunks.start_index() as f64);
+                            inspector.transmission_id = prev_transmission_id;
+                            inspector.time = prev_start_time;
+                            self.player = None; // Invalidate the player due to seek
                         }
-                    };
-                    let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
-                    if play_button.clicked() {
-                        inspector.play_lock = !inspector.play_lock;
                     }
-                });
+                } else if prev_button.clicked() {
+                    // Single click: go to start of current transmission
+                    if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
+                        let start_time =
+                            transmission.time(transmission.chunks.start_index() as f64);
+                        inspector.time = start_time;
+                        self.player = None; // Invalidate the player due to seek
+                    }
+                }
 
-                ui.separator();
-                ui.label(format!("Inspecting: {:.3}s", inspector.time));
-                ui.separator();
+                // Play button
+                let play_button = ui.add_enabled(enabled, egui::Button::new(play_text));
+                if play_button.clicked() {
+                    inspector.play_state = match inspector.play_state {
+                        PlayState::Play => PlayState::Paused,
+                        PlayState::Paused | PlayState::PlayTemp { .. } => PlayState::Play,
+                    };
+                }
 
+                // Seek forward button
+                let next_button = ui.add_enabled(enabled, egui::Button::new("⏭"));
+                if next_button.clicked() {
+                    if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
+                        let end_time = transmission.time(transmission.chunks.end_index() as f64);
+
+                        // Try to advance to next transmission
+                        let next_transmission_id = inspector.transmission_id + 1;
+                        if let Some(next_transmission) =
+                            self.transmissions.get(&next_transmission_id)
+                        {
+                            let next_start_time = next_transmission
+                                .time(next_transmission.chunks.start_index() as f64);
+                            inspector.transmission_id = next_transmission_id;
+                            inspector.time = next_start_time;
+                            self.player = None; // Invalidate the player due to seek
+                        } else {
+                            // No next transmission, go to end of current
+                            inspector.time = end_time;
+                            self.player = None; // Invalidate the player due to seek
+                        }
+                    }
+                }
+            });
+
+            ui.separator();
+            ui.label(format!("Inspecting: {:.3}s", inspector.time));
+            ui.separator();
+
+            if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
                 // Find the chunk closest to the inspected time
                 let chunk_index = (transmission.index(inspector.time) as isize).clamp(
                     transmission.chunks.start_index(),
@@ -876,17 +934,18 @@ impl FmHistory {
     ) {
         let inspector = inspector_state.get_or_insert_with(|| TransmissionInspectorState {
             transmission_id,
-            time: time,
-            play_temp: None,
-            play_lock: false,
+            time,
+            play_state: PlayState::Paused,
         });
 
         inspector.time = time;
         inspector.transmission_id = transmission_id;
 
         // Play this transmission
-        if !inspector.play_lock {
-            inspector.play_temp = Some(time);
+        if inspector.play_state != PlayState::Play {
+            inspector.play_state = PlayState::PlayTemp {
+                seek_on_release: time,
+            };
         }
         *player = None; // Invalidate the player due to seek
     }
@@ -896,13 +955,13 @@ impl FmHistory {
         player: &mut Option<Player>,
         seek_time: f64,
     ) {
-        if !inspector_state.play_lock {
+        if inspector_state.play_state != PlayState::Play {
             inspector_state.time = seek_time;
             *player = None; // Invalidate the player due to seek
         }
 
         // Clear temp_play
-        inspector_state.play_temp = None;
+        inspector_state.play_state = PlayState::Paused;
     }
 }
 
