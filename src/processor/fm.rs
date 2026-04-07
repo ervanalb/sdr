@@ -502,7 +502,6 @@ impl ProcessorHistory for FmHistory {
     fn draw_clip(
         &mut self,
         ui: &mut egui::Ui,
-        id: egui::Id,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
@@ -560,7 +559,7 @@ impl ProcessorHistory for FmHistory {
                 *clip_response = clip_response.union(response.clone());
 
                 egui::Popup::context_menu(&response)
-                    .id(egui::Id::new((id, transmission_id, "context_menu")))
+                    .id(ui.id().with("context_menu"))
                     .show(|ui| {
                         if ui.button("Export audio...").clicked() {
                             ui.close();

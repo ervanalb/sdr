@@ -6,13 +6,41 @@ use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
 use sdr::document::{ActiveDocument, RecordingId};
 use sdr::hardware::{Hardware, HardwareParams};
-use sdr::processor::fm::FmProcessorParameters;
-use sdr::processor::{ProcessorParameters, SpecificProcessorParameters};
+use sdr::processor::ProcessorParameters;
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 mod ui;
+
+/// How often to check if processor parameters need to be saved (in seconds)
+const PROCESSOR_AUTOSAVE_INTERVAL_SECONDS: i64 = 10;
+
+fn get_processors_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let config_dir = dirs::data_local_dir()
+        .ok_or("Could not find local data directory")?
+        .join("sdr");
+
+    std::fs::create_dir_all(&config_dir)?;
+    Ok(config_dir.join("processors.json"))
+}
+
+fn save_processors(
+    processors: &BTreeMap<ProcessorId, ProcessorParameters>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = get_processors_path()?;
+    let json = serde_json::to_string_pretty(processors)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+fn load_processors()
+-> Result<BTreeMap<ProcessorId, ProcessorParameters>, Box<dyn std::error::Error>> {
+    let path = get_processors_path()?;
+    let data = std::fs::read_to_string(path)?;
+    let processors: BTreeMap<ProcessorId, ProcessorParameters> = serde_json::from_str(&data)?;
+    Ok(processors)
+}
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
@@ -51,12 +79,15 @@ struct SdrApp {
     hardware_params: HardwareParams,
     viewport_state: Viewport,
     processor_parameters: BTreeMap<ProcessorId, ProcessorParameters>,
+    last_saved_processors: BTreeMap<ProcessorId, ProcessorParameters>,
+    last_save_check: DateTime<Utc>,
     document: ActiveDocument,
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
     prev_time: DateTime<Utc>,
     bands_info: BandsInfo,
     playhead: f64,
+    delete_confirmation_processor: Option<(ProcessorId, String)>,
 }
 
 impl SdrApp {
@@ -70,41 +101,34 @@ impl SdrApp {
         const BANDS_JSON: &str = include_str!("../../bands.json");
         let bands_info: BandsInfo = serde_json::from_str(BANDS_JSON).unwrap();
 
-        let mut processor_parameters = BTreeMap::<ProcessorId, ProcessorParameters>::new();
-
-        let tmp_freq = 90.9e6;
-
-        processor_parameters.insert(
-            1,
-            ProcessorParameters {
-                name: "FM Demodulator".to_string(),
-                enabled: true,
-                specific_parameters: SpecificProcessorParameters::Fm(FmProcessorParameters {
-                    frequency: tmp_freq,
-                    bandwidth: 200e3,
-                    squelch_db: -100.,
-                    squelch_hysteresis_db: 3.,
-                }),
-            },
-        );
+        // Try to load processors from disk, or use defaults
+        let processor_parameters = load_processors().unwrap_or_default();
 
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
             viewport_state: Viewport::new(),
+            last_saved_processors: processor_parameters.clone(),
             processor_parameters,
+            last_save_check: now,
             document: ActiveDocument::new(),
             recording: None,
             analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
             prev_time: now,
             bands_info,
             playhead: 0.,
+            delete_confirmation_processor: None,
         }
     }
 }
 
 impl eframe::App for SdrApp {
     fn on_exit(&mut self) {
+        // Save processors before exiting
+        if let Err(e) = save_processors(&self.processor_parameters) {
+            eprintln!("Failed to save processors on exit: {}", e);
+        }
+
         if let Some(hardware) = self.hardware.take() {
             hardware.shutdown();
         }
@@ -122,6 +146,19 @@ impl eframe::App for SdrApp {
         let dt_duration = now.signed_duration_since(self.prev_time);
         let dt = dt_duration.as_seconds_f64();
         self.prev_time = now;
+
+        // Periodically check if we need to save processors
+        let save_check_duration = now.signed_duration_since(self.last_save_check);
+        if save_check_duration.num_seconds() >= PROCESSOR_AUTOSAVE_INTERVAL_SECONDS {
+            self.last_save_check = now;
+            if self.processor_parameters != self.last_saved_processors {
+                if let Err(e) = save_processors(&self.processor_parameters) {
+                    eprintln!("Failed to save processors: {}", e);
+                } else {
+                    self.last_saved_processors = self.processor_parameters.clone();
+                }
+            }
+        }
 
         // Update hardware every frame
         let hardware_results = hardware.update(&mut self.hardware_params);
@@ -436,8 +473,6 @@ impl eframe::App for SdrApp {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut to_remove = None;
-
                     for (processor_id, parameters) in self.processor_parameters.iter_mut() {
                         let id = processors_root_ui_id.with(("processor", processor_id));
                         ui.push_id(id, |ui| {
@@ -456,19 +491,23 @@ impl eframe::App for SdrApp {
                                             ui.checkbox(&mut parameters.enabled, "");
 
                                             let name_edit_id = id.with("processor_name_editing");
-                                            let editing_name = ui
-                                                .data(|d| d.get_temp::<Option<String>>(name_edit_id).flatten());
+                                            let editing_name = ui.data(|d| {
+                                                d.get_temp::<Option<String>>(name_edit_id).flatten()
+                                            });
 
                                             if let Some(mut temp_name) = editing_name {
                                                 // We're in edit mode
-                                                let available_width = (ui.available_width() - 100.0).max(0.); // Leave space for Setup and X buttons
+                                                let available_width =
+                                                    (ui.available_width() - 100.0).max(0.); // Leave space for Setup and X buttons
                                                 let response = ui.add(
                                                     egui::TextEdit::singleline(&mut temp_name)
                                                         .desired_width(available_width),
                                                 );
 
-                                                let accept = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                                let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                                let accept =
+                                                    ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                                let cancel = ui
+                                                    .input(|i| i.key_pressed(egui::Key::Escape))
                                                     || response.lost_focus();
 
                                                 if accept {
@@ -505,8 +544,12 @@ impl eframe::App for SdrApp {
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    if ui.button("✖").clicked() {
-                                                        to_remove = Some(*processor_id);
+                                                    if ui.button("🗑").clicked() {
+                                                        self.delete_confirmation_processor =
+                                                            Some((
+                                                                *processor_id,
+                                                                parameters.name.clone(),
+                                                            ));
                                                     }
 
                                                     ui.toggle_value(&mut show_setup, "Setup");
@@ -533,17 +576,18 @@ impl eframe::App for SdrApp {
 
                                     // Draw history UI if processor is enabled and exists (always visible, no collapse)
                                     if parameters.enabled {
-                                        if let Some(processor_history) = self.analysis.get_processor_history_mut(*processor_id) {
-                                            processor_history.draw(ui, egui::Id::new(processor_id), dt);
+                                        if let Some(processor_history) =
+                                            self.analysis.get_processor_history_mut(*processor_id)
+                                        {
+                                            processor_history.draw(
+                                                ui,
+                                                egui::Id::new(processor_id),
+                                                dt,
+                                            );
                                         }
                                     }
                                 });
                         });
-                    }
-
-                    // Remove processor if delete was clicked
-                    if let Some(id) = to_remove {
-                        self.processor_parameters.remove(&id);
                     }
                 });
             });
@@ -564,5 +608,31 @@ impl eframe::App for SdrApp {
                 &wgpu_render_state,
             );
         });
+
+        // Delete confirmation modal
+        if let Some((processor_id, processor_name)) = self.delete_confirmation_processor.clone() {
+            egui::Window::new("Delete Processor")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Are you sure you want to delete '{}'?",
+                        processor_name
+                    ));
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.delete_confirmation_processor = None;
+                        }
+
+                        if ui.button("Delete").clicked() {
+                            self.processor_parameters.remove(&processor_id);
+                            self.delete_confirmation_processor = None;
+                        }
+                    });
+                });
+        }
     }
 }

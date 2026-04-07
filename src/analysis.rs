@@ -274,16 +274,17 @@ impl Analysis {
         clip_response: &mut egui::Response,
     ) {
         for (processor_id, processor) in self.processors.iter_mut() {
-            processor.history.draw_clip(
-                ui,
-                egui::Id::new(processor_id),
-                figure_painter,
-                figure_rect,
-                viewport,
-                dt,
-                clip_id,
-                clip_response,
-            );
+            ui.push_id(ui.id().with(("processor", processor_id)), |ui| {
+                processor.history.draw_clip(
+                    ui,
+                    figure_painter,
+                    figure_rect,
+                    viewport,
+                    dt,
+                    clip_id,
+                    clip_response,
+                );
+            });
         }
     }
 
@@ -291,7 +292,9 @@ impl Analysis {
         &mut self,
         processor_id: ProcessorId,
     ) -> Option<&mut Box<dyn ProcessorHistory>> {
-        self.processors.get_mut(&processor_id).map(|p| &mut p.history)
+        self.processors
+            .get_mut(&processor_id)
+            .map(|p| &mut p.history)
     }
 }
 

@@ -35,6 +35,7 @@ egui_plot = "0.34.1"
 realfft = "3.5.0"
 hound = "3.5"
 cpal = "0.17"
+dirs = "5.0"
 
 [profile.dev]
 opt-level = 3

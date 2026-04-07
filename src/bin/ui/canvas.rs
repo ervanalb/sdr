@@ -437,7 +437,7 @@ pub fn ui(
     document_graphics.hovered.clear();
 
     for (clip_id, is_hovered) in sorted_draw_order.into_iter() {
-        ui.push_id(("clip", clip_id), |ui| {
+        ui.push_id(ui.id().with(("clip", clip_id)), |ui| {
             let clip = document_graphics.clips.get(&clip_id).unwrap();
             let is_selected = document_graphics.selected.contains(&clip_id);
             let (response, head_bar_response) = clip.draw(

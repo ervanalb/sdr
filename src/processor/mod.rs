@@ -3,8 +3,9 @@ use fm::FmProcessorParameters;
 
 use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::Viewport};
 use num_complex::Complex;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SpecificProcessorParameters {
     Fm(FmProcessorParameters),
 }
@@ -28,9 +29,9 @@ impl SpecificProcessorParameters {
 
     /// Get a list of available processor types
     pub fn available_types() -> Vec<(&'static str, fn() -> Self)> {
-        vec![
-            ("FM Demodulator", || SpecificProcessorParameters::Fm(FmProcessorParameters::default())),
-        ]
+        vec![("FM Demodulator", || {
+            SpecificProcessorParameters::Fm(FmProcessorParameters::default())
+        })]
     }
 
     /// Get the display name for this processor type
@@ -41,7 +42,7 @@ impl SpecificProcessorParameters {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessorParameters {
     pub name: String,
     pub enabled: bool,
@@ -63,7 +64,6 @@ pub trait ProcessorHistory {
     fn draw_clip(
         &mut self,
         ui: &mut egui::Ui,
-        id: egui::Id,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
