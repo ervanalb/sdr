@@ -4,6 +4,7 @@ use std::{
     sync::mpsc::{Receiver, Sender, channel},
 };
 
+use egui::{Align, Layout};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
@@ -623,7 +624,13 @@ impl ProcessorHistory for FmHistory {
         ui.add_space(10.0);
         ui.separator();
 
-        if let Some(inspector) = &mut self.inspector_state {
+        // This variable is slightly different from inspector.play_state
+        // because it may be set to false if the end of a transmission has been reached
+        let mut playing = false;
+
+        if let Some(inspector) = &mut self.inspector_state
+            && let Some(transmission) = self.transmissions.get(&inspector.transmission_id)
+        {
             // Handle mouse release--stop temp play
             if let PlayState::PlayTemp { seek_on_release } = inspector.play_state
                 && !ui.ctx().input(|i| i.pointer.primary_down())
@@ -631,60 +638,48 @@ impl ProcessorHistory for FmHistory {
                 Self::stop_temp_play(inspector, &mut self.player, seek_on_release);
             }
 
-            // This variable is slightly different from inspector.play_state
-            // because it may be set to false if the end of a transmission has been reached
-            let mut playing = false;
-
-            // Find the transmission being inspected
-            if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
-                // Clamp inspector time to the bounds of the transmission being inspected
-                let start_time = transmission.time(transmission.chunks.start_index() as f64);
-                let end_time = transmission.time(transmission.chunks.end_index() as f64);
-                if inspector.time > end_time {
-                    if inspector.play_state == PlayState::Play {
-                        // Advance to next clip if there is one.
-                        // Otherwise, stop playing.
-                        let next_transmission_id = inspector.transmission_id + 1;
-                        if let Some(next_transmission) =
-                            self.transmissions.get(&next_transmission_id)
-                        {
-                            let next_start_time =
-                                next_transmission.time(transmission.chunks.start_index() as f64);
-                            inspector.transmission_id = next_transmission_id;
-                            inspector.time = next_start_time;
-                            self.player = None; // Invalidate the player due to seek
-                        } else {
-                            inspector.time = end_time;
-                        }
-                    } else {
-                        // Clamp to the end of the transmission
-                        inspector.time = end_time;
-                    }
-                } else {
-                    // Clamp inspector playhead to start of clip
-                    if inspector.time < start_time {
-                        inspector.time = start_time;
-                    }
-                    // Advance the inspector playhead
-                    if !matches!(inspector.play_state, PlayState::Paused)
-                        && inspector.time + dt <= end_time
-                    {
-                        inspector.time += dt;
-                        playing = true;
-                    }
-                }
+            // Advance the inspector playhead
+            if !matches!(inspector.play_state, PlayState::Paused) {
+                inspector.time += dt;
+                playing = true;
             }
 
-            // Refresh the transmission since we might have changed it
-            ui.heading("FM Transmission Inspector");
-            ui.separator();
+            // Clamp inspector time to the bounds of the transmission being inspected
+            let start_time = transmission.time(transmission.chunks.start_index() as f64);
+            let end_time = transmission.time(transmission.chunks.end_index() as f64);
+            if inspector.time > end_time {
+                if inspector.play_state == PlayState::Play {
+                    // Advance to next clip if there is one.
+                    // Otherwise, stop playing.
+                    let next_transmission_id = inspector.transmission_id + 1;
+                    if let Some(next_transmission) = self.transmissions.get(&next_transmission_id) {
+                        let next_start_time =
+                            next_transmission.time(transmission.chunks.start_index() as f64);
+                        inspector.transmission_id = next_transmission_id;
+                        inspector.time = next_start_time;
+                        self.player = None; // Invalidate the player due to seek
+                    } else {
+                        inspector.time = end_time;
+                        playing = false;
+                    }
+                } else {
+                    // Clamp to the end of the transmission
+                    inspector.time = end_time;
+                }
+            } else {
+                // Clamp inspector playhead to start of clip
+                if inspector.time < start_time {
+                    inspector.time = start_time;
+                }
+            }
+        } else {
+            self.inspector_state = None;
+            self.player = None;
+        }
 
+        if let Some(inspector) = &mut self.inspector_state {
             // Playback controls
             ui.horizontal(|ui| {
-                if ui.button("✖ Close").clicked() {
-                    close_inspector = true;
-                }
-
                 let (enabled, play_text) = match inspector.play_state {
                     PlayState::PlayTemp { .. } => (false, "⏸"),
                     PlayState::Play => (true, "⏸"),
@@ -749,169 +744,177 @@ impl ProcessorHistory for FmHistory {
                         }
                     }
                 }
+                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                    if ui.button("✖").clicked() {
+                        close_inspector = true;
+                    }
+                });
             });
 
             ui.separator();
             ui.label(format!("Inspecting: {:.3}s", inspector.time));
             ui.separator();
+        }
 
-            if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
-                // Find the chunk closest to the inspected time
-                let chunk_index = (transmission.index(inspector.time) as isize).clamp(
-                    transmission.chunks.start_index(),
-                    transmission.chunks.end_index() - 1,
-                );
-                let chunk = &transmission.chunks[chunk_index];
-                ui.label(format!("Chunk index: {}", chunk_index));
-                ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
-                ui.label(format!("IQ samples: {}", chunk.iq_data.len()));
+        if let Some(inspector) = &mut self.inspector_state
+            && let Some(transmission) = self.transmissions.get(&inspector.transmission_id)
+        {
+            // Find the chunk closest to the inspected time
+            let chunk_index = (transmission.index(inspector.time) as isize).clamp(
+                transmission.chunks.start_index(),
+                transmission.chunks.end_index() - 1,
+            );
+            let chunk = &transmission.chunks[chunk_index];
+            ui.label(format!("Chunk index: {}", chunk_index));
+            ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
+            ui.label(format!("IQ samples: {}", chunk.iq_data.len()));
 
-                ui.separator();
+            ui.separator();
 
-                // IQ Scatter Plot
-                let num_iq_samples = chunk.iq_data.len();
-                let stride = if num_iq_samples <= 100 {
-                    1
-                } else {
-                    num_iq_samples / 100
-                };
+            // IQ Scatter Plot
+            let num_iq_samples = chunk.iq_data.len();
+            let stride = if num_iq_samples <= 100 {
+                1
+            } else {
+                num_iq_samples / 100
+            };
 
-                // Calculate target max value for scaling
-                let target_max_val = chunk
-                    .iq_data
-                    .iter()
-                    .step_by(stride)
-                    .map(|c| c.re.abs().max(c.im.abs()))
-                    .fold(0.0f32, f32::max)
-                    * IQ_PLOT_MARGIN;
+            // Calculate target max value for scaling
+            let target_max_val = chunk
+                .iq_data
+                .iter()
+                .step_by(stride)
+                .map(|c| c.re.abs().max(c.im.abs()))
+                .fold(0.0f32, f32::max)
+                * IQ_PLOT_MARGIN;
 
-                // Store target in memory and animate toward it
-                let iq_plot_id = egui::Id::new((id, inspector.transmission_id, "iq_max"));
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(iq_plot_id, target_max_val));
-                let animated_max_val = ui.ctx().animate_value_with_time(
-                    iq_plot_id.with("animated"),
-                    target_max_val,
-                    1., // animation time in seconds
-                );
+            // Store target in memory and animate toward it
+            let iq_plot_id = egui::Id::new((id, inspector.transmission_id, "iq_max"));
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(iq_plot_id, target_max_val));
+            let animated_max_val = ui.ctx().animate_value_with_time(
+                iq_plot_id.with("animated"),
+                target_max_val,
+                1., // animation time in seconds
+            );
 
-                // Create IQ points for plotting
-                let iq_points: Vec<[f64; 2]> = chunk
-                    .iq_data
-                    .iter()
-                    .step_by(stride)
-                    .map(|c| [c.re as f64, c.im as f64])
-                    .collect();
+            // Create IQ points for plotting
+            let iq_points: Vec<[f64; 2]> = chunk
+                .iq_data
+                .iter()
+                .step_by(stride)
+                .map(|c| [c.re as f64, c.im as f64])
+                .collect();
 
-                use egui_plot::{Line, Plot, Points};
-                Plot::new("iq_scatter")
-                    .allow_axis_zoom_drag(false)
-                    .allow_boxed_zoom(false)
-                    .allow_double_click_reset(false)
-                    .allow_drag(false)
-                    .allow_scroll(false)
-                    .allow_zoom(false)
-                    .show_axes(false)
-                    .width(200.0)
-                    .height(200.0)
-                    .auto_bounds(false)
-                    .default_x_bounds(-animated_max_val as f64, animated_max_val as f64)
-                    .default_y_bounds(-animated_max_val as f64, animated_max_val as f64)
-                    .show(ui, |plot_ui| {
-                        plot_ui.points(Points::new("iq", iq_points).radius(2.0));
-                    });
+            use egui_plot::{Line, Plot, Points};
+            Plot::new("iq_scatter")
+                .allow_axis_zoom_drag(false)
+                .allow_boxed_zoom(false)
+                .allow_double_click_reset(false)
+                .allow_drag(false)
+                .allow_scroll(false)
+                .allow_zoom(false)
+                .show_axes(false)
+                .width(200.0)
+                .height(200.0)
+                .auto_bounds(false)
+                .default_x_bounds(-animated_max_val as f64, animated_max_val as f64)
+                .default_y_bounds(-animated_max_val as f64, animated_max_val as f64)
+                .show(ui, |plot_ui| {
+                    plot_ui.points(Points::new("iq", iq_points).radius(2.0));
+                });
 
-                ui.separator();
+            ui.separator();
 
-                // Audio Waveform Plot
-                let plot_width = 300.0;
-                let plot_height = 200.0;
-                let num_audio_samples = chunk.audio_data.len();
-                let audio_stride = (num_audio_samples as f32 / plot_width).ceil().max(1.0) as usize;
+            // Audio Waveform Plot
+            let plot_width = 300.0;
+            let plot_height = 200.0;
+            let num_audio_samples = chunk.audio_data.len();
+            let audio_stride = (num_audio_samples as f32 / plot_width).ceil().max(1.0) as usize;
 
-                // Create audio points for plotting
-                let audio_points: Vec<[f64; 2]> = chunk
-                    .audio_data
-                    .iter()
-                    .enumerate()
-                    .step_by(audio_stride)
-                    .map(|(i, &sample)| [i as f64, sample as f64])
-                    .collect();
+            // Create audio points for plotting
+            let audio_points: Vec<[f64; 2]> = chunk
+                .audio_data
+                .iter()
+                .enumerate()
+                .step_by(audio_stride)
+                .map(|(i, &sample)| [i as f64, sample as f64])
+                .collect();
 
-                Plot::new("audio_waveform")
-                    .allow_axis_zoom_drag(false)
-                    .allow_boxed_zoom(false)
-                    .allow_double_click_reset(false)
-                    .allow_drag(false)
-                    .allow_scroll(false)
-                    .allow_zoom(false)
-                    .show_axes(false)
-                    .width(plot_width)
-                    .height(plot_height)
-                    .auto_bounds(false)
-                    .default_x_bounds(0., audio_points.len() as f64)
-                    .default_y_bounds(-1., 1.)
-                    .show_grid(false)
-                    .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("audio", audio_points));
-                    });
+            Plot::new("audio_waveform")
+                .allow_axis_zoom_drag(false)
+                .allow_boxed_zoom(false)
+                .allow_double_click_reset(false)
+                .allow_drag(false)
+                .allow_scroll(false)
+                .allow_zoom(false)
+                .show_axes(false)
+                .width(plot_width)
+                .height(plot_height)
+                .auto_bounds(false)
+                .default_x_bounds(0., audio_points.len() as f64)
+                .default_y_bounds(-1., 1.)
+                .show_grid(false)
+                .show(ui, |plot_ui| {
+                    plot_ui.line(Line::new("audio", audio_points));
+                });
 
-                // Handle audio playback
-                let time = inspector.time;
+            // Handle audio playback
+            let time = inspector.time;
 
-                if playing {
-                    let player = self.player.get_or_insert_with(|| Player {
-                        audio_output: AudioOutput::new().unwrap(),
-                        next_seq_num: chunk_index,
-                        time_adj: 0.,
-                    });
-                    // Feed new audio data to the audio player
-                    let start = player.next_seq_num;
-                    let end = (transmission.index(time + AUDIO_LOOKAHEAD_DURATION) as isize)
-                        .min(transmission.chunks.end_index());
-                    if end > start {
-                        let bufs =
-                            transmission
-                                .chunks
-                                .range(start..end)
-                                .enumerate()
-                                .map(|(i, chunk)| {
-                                    let seq_num = start + i as isize;
-                                    AudioBuffer {
-                                        seq_num,
-                                        data: chunk.audio_data.clone(),
-                                    }
-                                });
+            if playing {
+                let player = self.player.get_or_insert_with(|| Player {
+                    audio_output: AudioOutput::new().unwrap(),
+                    next_seq_num: chunk_index,
+                    time_adj: 0.,
+                });
+                // Feed new audio data to the audio player
+                let start = player.next_seq_num;
+                let end = (transmission.index(time + AUDIO_LOOKAHEAD_DURATION) as isize)
+                    .min(transmission.chunks.end_index());
+                if end > start {
+                    let bufs =
+                        transmission
+                            .chunks
+                            .range(start..end)
+                            .enumerate()
+                            .map(|(i, chunk)| {
+                                let seq_num = start + i as isize;
+                                AudioBuffer {
+                                    seq_num,
+                                    data: chunk.audio_data.clone(),
+                                }
+                            });
 
-                        let FeedResult {
-                            last_played_seq_num,
-                            underrun,
-                        } = player.audio_output.feed(bufs).unwrap(); // TODO replace unwrap
-                        if underrun {
-                            eprintln!("Audio underrun!");
-                        }
-                        player.next_seq_num = end;
-
-                        // Look up last_played_seq_num and set_time based on it,
-                        // to keep the inspector time (playhead)
-                        // synchronized to the actual audio rate
-                        if let Some(last_played_seq_num) = last_played_seq_num {
-                            let player_time = transmission.time(last_played_seq_num as f64);
-                            let chunk_time = transmission.time(chunk_index as f64);
-                            // Apply strong LPF since we have relatively poor introspection into audio
-                            let new_adj = (player_time - chunk_time) as f32;
-                            let alpha = 0.0001;
-                            player.time_adj += alpha * (new_adj - player.time_adj);
-                            inspector.time += player.time_adj as f64;
-                        }
+                    let FeedResult {
+                        last_played_seq_num,
+                        underrun,
+                    } = player.audio_output.feed(bufs).unwrap(); // TODO replace unwrap
+                    if underrun {
+                        eprintln!("Audio underrun!");
                     }
-                } else {
-                    // Not playing - clear the player
-                    self.player = None;
+                    player.next_seq_num = end;
+
+                    // Look up last_played_seq_num and set_time based on it,
+                    // to keep the inspector time (playhead)
+                    // synchronized to the actual audio rate
+                    if let Some(last_played_seq_num) = last_played_seq_num {
+                        let player_time = transmission.time(last_played_seq_num as f64);
+                        let chunk_time = transmission.time(chunk_index as f64);
+                        // Apply strong LPF since we have relatively poor introspection into audio
+                        let new_adj = (player_time - chunk_time) as f32;
+                        let alpha = 0.0001;
+                        player.time_adj += alpha * (new_adj - player.time_adj);
+                        inspector.time += player.time_adj as f64;
+                    }
                 }
+            } else {
+                // Not playing - clear the player
+                self.player = None;
             }
         } else {
-            ui.label("Click on a transmission to inspect it");
+            self.inspector_state = None;
+            self.player = None;
         }
 
         if close_inspector {
