@@ -436,12 +436,115 @@ impl eframe::App for SdrApp {
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.analysis.draw(
-                        ui,
-                        &mut self.processor_parameters,
-                        dt,
-                        processors_root_ui_id,
-                    );
+                    let mut to_remove = None;
+
+                    for (processor_id, parameters) in self.processor_parameters.iter_mut() {
+                        let id = processors_root_ui_id.with(("processor", processor_id));
+                        ui.push_id(id, |ui| {
+                            egui::Frame::group(ui.style())
+                                .fill(ui.visuals().window_fill)
+                                .show(ui, |ui| {
+                                    // Header row with checkbox, name, setup toggle, and delete button
+                                    let setup_id = id.with("processor_setup_open");
+                                    let mut show_setup =
+                                        ui.data(|d| d.get_temp::<bool>(setup_id).unwrap_or(false));
+
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(ui.available_width(), 26.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.checkbox(&mut parameters.enabled, "");
+
+                                            let name_edit_id = id.with("processor_name_editing");
+                                            let editing_name = ui
+                                                .data(|d| d.get_temp::<Option<String>>(name_edit_id).flatten());
+
+                                            if let Some(mut temp_name) = editing_name {
+                                                // We're in edit mode
+                                                let available_width = (ui.available_width() - 100.0).max(0.); // Leave space for Setup and X buttons
+                                                let response = ui.add(
+                                                    egui::TextEdit::singleline(&mut temp_name)
+                                                        .desired_width(available_width),
+                                                );
+
+                                                let accept = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                                let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                                    || response.lost_focus();
+
+                                                if accept {
+                                                    parameters.name = temp_name;
+                                                    ui.data_mut(|d| {
+                                                        d.insert_temp(name_edit_id, None::<String>)
+                                                    });
+                                                } else if cancel {
+                                                    ui.data_mut(|d| {
+                                                        d.insert_temp(name_edit_id, None::<String>)
+                                                    });
+                                                } else {
+                                                    // Update the temp value and request focus
+                                                    ui.data_mut(|d| {
+                                                        d.insert_temp(name_edit_id, Some(temp_name))
+                                                    });
+                                                    if !response.has_focus() {
+                                                        response.request_focus();
+                                                    }
+                                                }
+                                            } else {
+                                                // Not editing - show as heading
+                                                let response = ui.heading(&parameters.name);
+                                                if response.clicked() {
+                                                    ui.data_mut(|d| {
+                                                        d.insert_temp(
+                                                            name_edit_id,
+                                                            Some(parameters.name.clone()),
+                                                        )
+                                                    });
+                                                }
+                                            }
+
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if ui.button("✖").clicked() {
+                                                        to_remove = Some(*processor_id);
+                                                    }
+
+                                                    ui.toggle_value(&mut show_setup, "Setup");
+                                                },
+                                            );
+                                        },
+                                    );
+
+                                    ui.data_mut(|d| d.insert_temp(setup_id, show_setup));
+
+                                    // Draw setup UI if toggle is on
+                                    if show_setup {
+                                        egui::Frame::new()
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                ui.visuals().widgets.noninteractive.bg_stroke.color,
+                                            ))
+                                            .inner_margin(egui::Margin::same(8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                parameters.specific_parameters.draw_setup(ui);
+                                            });
+                                    }
+
+                                    // Draw history UI if processor is enabled and exists (always visible, no collapse)
+                                    if parameters.enabled {
+                                        if let Some(processor_history) = self.analysis.get_processor_history_mut(*processor_id) {
+                                            processor_history.draw(ui, egui::Id::new(processor_id), dt);
+                                        }
+                                    }
+                                });
+                        });
+                    }
+
+                    // Remove processor if delete was clicked
+                    if let Some(id) = to_remove {
+                        self.processor_parameters.remove(&id);
+                    }
                 });
             });
 
