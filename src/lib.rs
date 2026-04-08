@@ -11,5 +11,6 @@ pub mod hardware;
 mod id_factory;
 pub mod preprocessor;
 pub mod processor;
+pub mod processor_graphics;
 pub mod ui;
 pub mod waterfall_renderer;

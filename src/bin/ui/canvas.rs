@@ -1,12 +1,15 @@
 use egui::epaint::MarginF32;
 use egui::vec2;
-use sdr::analysis::Analysis;
+use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
 use sdr::document::ActiveDocument;
 use sdr::document_graphics::DocumentGraphics;
 use sdr::format::{format_freq, format_time};
 use sdr::hardware::HardwareParams;
+use sdr::processor::ProcessorParameters;
+use sdr::processor_graphics::ProcessorGraphics;
 use sdr::ui::{Viewport, paint_elided_text};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 const SCROLL_SPEED: f32 = 1.0;
@@ -47,6 +50,8 @@ pub fn ui(
     bands_info: &BandsInfo,
     is_recording: bool,
     wgpu_render_state: &egui_wgpu::RenderState,
+    processor_graphics: &mut ProcessorGraphics,
+    processor_parameters: &BTreeMap<ProcessorId, ProcessorParameters>,
 ) {
     let highest_freq = bands_info.highest_freq;
 
@@ -453,7 +458,7 @@ pub fn ui(
 
             // Draw processor UI on top of clip
             let mut focus_response = response.clone();
-            analysis.draw_clip(
+            processor_graphics.draw_clip(
                 ui,
                 &figure_painter,
                 figure_rect,
@@ -461,6 +466,8 @@ pub fn ui(
                 dt,
                 clip_id,
                 &mut focus_response,
+                processor_parameters,
+                analysis,
             );
 
             // Handle hover

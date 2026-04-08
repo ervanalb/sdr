@@ -18,12 +18,13 @@ use crate::{
     },
     id_factory::IdFactory,
     preprocessor::PreprocessedClipDescriptor,
-    processor::{Processor, ProcessorHistory},
+    processor::{Processor, ProcessorHistory, ProcessorUi},
     ui::{
         PlayState, StreamTransmissionResponse, TransmissionInspectorState, Viewport,
         stream_transmission_ui,
     },
 };
+use std::any::Any;
 
 type TransmissionId = usize;
 
@@ -422,85 +423,62 @@ impl std::fmt::Debug for FmMessage {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-pub struct FmHistory {
-    frequency: f64,
-    bandwidth: f64,
-    receiver: Receiver<FmMessage>,
-    transmissions: BTreeMap<TransmissionId, FmTransmission>,
+pub struct FmUi {
     inspector_state: Option<TransmissionInspectorState>,
     player: Option<Player>,
 }
 
-impl FmHistory {
-    pub fn new(frequency: f64, bandwidth: f64, receiver: Receiver<FmMessage>) -> Self {
-        FmHistory {
-            frequency,
-            bandwidth,
-            receiver,
-            transmissions: BTreeMap::new(),
+impl FmUi {
+    pub fn new() -> Self {
+        FmUi {
             inspector_state: None,
             player: None,
         }
     }
+
+    fn inspect_and_play(
+        inspector_state: &mut Option<TransmissionInspectorState>,
+        player: &mut Option<Player>,
+        transmission_id: TransmissionId,
+        time: f64,
+    ) {
+        let inspector = inspector_state.get_or_insert_with(|| TransmissionInspectorState {
+            transmission_id,
+            time,
+            play_state: PlayState::Paused,
+        });
+
+        inspector.time = time;
+        inspector.transmission_id = transmission_id;
+
+        // Play this transmission
+        if inspector.play_state != PlayState::Play {
+            inspector.play_state = PlayState::PlayTemp {
+                seek_on_release: time,
+            };
+        }
+        *player = None; // Invalidate the player due to seek
+    }
+
+    fn stop_temp_play(
+        inspector_state: &mut TransmissionInspectorState,
+        player: &mut Option<Player>,
+        seek_time: f64,
+    ) {
+        if inspector_state.play_state != PlayState::Play {
+            inspector_state.time = seek_time;
+            *player = None; // Invalidate the player due to seek
+        }
+
+        // Clear temp_play
+        inspector_state.play_state = PlayState::Paused;
+    }
 }
 
-impl ProcessorHistory for FmHistory {
-    fn update(&mut self) {
-        for msg in self.receiver.try_iter() {
-            match msg {
-                FmMessage::Reset => {
-                    self.transmissions.clear();
-                }
-                FmMessage::StartTransmission {
-                    transmission_id,
-                    clip_id,
-                    clip_name,
-                    reference_time,
-                    period,
-                    iq_sample_rate,
-                } => match self.transmissions.entry(transmission_id) {
-                    Entry::Vacant(e) => {
-                        e.insert(FmTransmission::new(
-                            clip_id,
-                            clip_name,
-                            reference_time,
-                            period,
-                            iq_sample_rate,
-                        ));
-                    }
-                    Entry::Occupied(_) => {
-                        panic!("Tried to add a new transmission that already exists");
-                    }
-                },
-                FmMessage::EndTransmission(transmission_id) => {
-                    self.transmissions
-                        .get_mut(&transmission_id)
-                        .expect("Tried to end a transmission that doesn't exist")
-                        .active = false;
-                }
-                FmMessage::PushChunk {
-                    transmission_id,
-                    iq_data,
-                    audio_data,
-                } => {
-                    let transmission = self
-                        .transmissions
-                        .get_mut(&transmission_id)
-                        .expect("Tried to push to a transmission that doesn't exist");
-
-                    transmission.push(iq_data, audio_data);
-                }
-            }
-        }
-    }
-
-    fn expire(&mut self, retain_time: f64) {
-        self.transmissions
-            .retain(|_, transmission| transmission.prune_old_data(retain_time));
-    }
-
+impl ProcessorUi for FmUi {
     fn draw_clip(
         &mut self,
+        history: &mut Box<dyn ProcessorHistory>,
         ui: &mut egui::Ui,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
@@ -509,9 +487,14 @@ impl ProcessorHistory for FmHistory {
         clip_id: ClipId,
         clip_response: &mut egui::Response,
     ) {
-        let freq_min = self.frequency - 0.5 * self.bandwidth;
-        let freq_max = self.frequency + 0.5 * self.bandwidth;
-        for (transmission_id, transmission) in self.transmissions.iter() {
+        let fm_history = history
+            .as_any_mut()
+            .downcast_mut::<FmHistory>()
+            .expect("FmUi should only be used with FmHistory");
+
+        let freq_min = fm_history.frequency - 0.5 * fm_history.bandwidth;
+        let freq_max = fm_history.frequency + 0.5 * fm_history.bandwidth;
+        for (transmission_id, transmission) in fm_history.transmissions.iter() {
             if transmission.chunks.is_empty() || transmission.clip_id != clip_id {
                 continue;
             }
@@ -603,14 +586,25 @@ impl ProcessorHistory for FmHistory {
         }
     }
 
-    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id, dt: f64) {
+    fn draw(
+        &mut self,
+        history: &mut Box<dyn ProcessorHistory>,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        dt: f64,
+    ) {
+        let fm_history = history
+            .as_any_mut()
+            .downcast_mut::<FmHistory>()
+            .expect("FmUi should only be used with FmHistory");
+
         let mut close_inspector = false;
 
         // Show list of available transmissions
         egui::ScrollArea::vertical()
             .max_height(400.0)
             .show(ui, |ui| {
-                for (transmission_id, transmission) in self.transmissions.iter() {
+                for (transmission_id, transmission) in fm_history.transmissions.iter() {
                     if transmission.chunks.is_empty() {
                         continue;
                     }
@@ -651,7 +645,7 @@ impl ProcessorHistory for FmHistory {
         let mut playing = false;
 
         if let Some(inspector) = &mut self.inspector_state
-            && let Some(transmission) = self.transmissions.get(&inspector.transmission_id)
+            && let Some(transmission) = fm_history.transmissions.get(&inspector.transmission_id)
         {
             // Handle mouse release--stop temp play
             if let PlayState::PlayTemp { seek_on_release } = inspector.play_state
@@ -674,7 +668,9 @@ impl ProcessorHistory for FmHistory {
                     // Advance to next clip if there is one.
                     // Otherwise, stop playing.
                     let next_transmission_id = inspector.transmission_id + 1;
-                    if let Some(next_transmission) = self.transmissions.get(&next_transmission_id) {
+                    if let Some(next_transmission) =
+                        fm_history.transmissions.get(&next_transmission_id)
+                    {
                         let next_start_time =
                             next_transmission.time(transmission.chunks.start_index() as f64);
                         inspector.transmission_id = next_transmission_id;
@@ -718,7 +714,7 @@ impl ProcessorHistory for FmHistory {
                     if inspector.transmission_id > 0 {
                         let prev_transmission_id = inspector.transmission_id - 1;
                         if let Some(prev_transmission) =
-                            self.transmissions.get(&prev_transmission_id)
+                            fm_history.transmissions.get(&prev_transmission_id)
                         {
                             let prev_start_time = prev_transmission
                                 .time(prev_transmission.chunks.start_index() as f64);
@@ -729,7 +725,9 @@ impl ProcessorHistory for FmHistory {
                     }
                 } else if prev_button.clicked() {
                     // Single click: go to start of current transmission
-                    if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
+                    if let Some(transmission) =
+                        fm_history.transmissions.get(&inspector.transmission_id)
+                    {
                         let start_time =
                             transmission.time(transmission.chunks.start_index() as f64);
                         inspector.time = start_time;
@@ -749,13 +747,15 @@ impl ProcessorHistory for FmHistory {
                 // Seek forward button
                 let next_button = ui.add_enabled(enabled, egui::Button::new("⏭"));
                 if next_button.clicked() {
-                    if let Some(transmission) = self.transmissions.get(&inspector.transmission_id) {
+                    if let Some(transmission) =
+                        fm_history.transmissions.get(&inspector.transmission_id)
+                    {
                         let end_time = transmission.time(transmission.chunks.end_index() as f64);
 
                         // Try to advance to next transmission
                         let next_transmission_id = inspector.transmission_id + 1;
                         if let Some(next_transmission) =
-                            self.transmissions.get(&next_transmission_id)
+                            fm_history.transmissions.get(&next_transmission_id)
                         {
                             let next_start_time = next_transmission
                                 .time(next_transmission.chunks.start_index() as f64);
@@ -782,7 +782,7 @@ impl ProcessorHistory for FmHistory {
         }
 
         if let Some(inspector) = &mut self.inspector_state
-            && let Some(transmission) = self.transmissions.get(&inspector.transmission_id)
+            && let Some(transmission) = fm_history.transmissions.get(&inspector.transmission_id)
         {
             // Find the chunk closest to the inspected time
             let chunk_index = (transmission.index(inspector.time) as isize).clamp(
@@ -947,49 +947,99 @@ impl ProcessorHistory for FmHistory {
             self.player = None;
         }
     }
+}
+
+pub struct FmHistory {
+    frequency: f64,
+    bandwidth: f64,
+    receiver: Receiver<FmMessage>,
+    pub transmissions: BTreeMap<TransmissionId, FmTransmission>,
+}
+
+impl FmHistory {
+    pub fn new(frequency: f64, bandwidth: f64, receiver: Receiver<FmMessage>) -> Self {
+        FmHistory {
+            frequency,
+            bandwidth,
+            receiver,
+            transmissions: BTreeMap::new(),
+        }
+    }
+}
+
+impl ProcessorHistory for FmHistory {
+    fn update(&mut self) {
+        for msg in self.receiver.try_iter() {
+            match msg {
+                FmMessage::Reset => {
+                    self.transmissions.clear();
+                }
+                FmMessage::StartTransmission {
+                    transmission_id,
+                    clip_id,
+                    clip_name,
+                    reference_time,
+                    period,
+                    iq_sample_rate,
+                } => match self.transmissions.entry(transmission_id) {
+                    Entry::Vacant(e) => {
+                        e.insert(FmTransmission::new(
+                            clip_id,
+                            clip_name,
+                            reference_time,
+                            period,
+                            iq_sample_rate,
+                        ));
+                    }
+                    Entry::Occupied(_) => {
+                        panic!("Tried to add a new transmission that already exists");
+                    }
+                },
+                FmMessage::EndTransmission(transmission_id) => {
+                    self.transmissions
+                        .get_mut(&transmission_id)
+                        .expect("Tried to end a transmission that doesn't exist")
+                        .active = false;
+                }
+                FmMessage::PushChunk {
+                    transmission_id,
+                    iq_data,
+                    audio_data,
+                } => {
+                    let transmission = self
+                        .transmissions
+                        .get_mut(&transmission_id)
+                        .expect("Tried to push to a transmission that doesn't exist");
+
+                    transmission.push(iq_data, audio_data);
+                }
+            }
+        }
+    }
+
+    fn expire(&mut self, retain_time: f64) {
+        self.transmissions
+            .retain(|_, transmission| transmission.prune_old_data(retain_time));
+    }
+
+    fn new_ui(&self) -> Box<dyn ProcessorUi> {
+        Box::new(FmUi::new())
+    }
 
     fn name(&self) -> &str {
         "FM Demodulator"
     }
-}
 
-impl FmHistory {
-    fn inspect_and_play(
-        inspector_state: &mut Option<TransmissionInspectorState>,
-        player: &mut Option<Player>,
-        transmission_id: TransmissionId,
-        time: f64,
-    ) {
-        let inspector = inspector_state.get_or_insert_with(|| TransmissionInspectorState {
-            transmission_id,
-            time,
-            play_state: PlayState::Paused,
-        });
-
-        inspector.time = time;
-        inspector.transmission_id = transmission_id;
-
-        // Play this transmission
-        if inspector.play_state != PlayState::Play {
-            inspector.play_state = PlayState::PlayTemp {
-                seek_on_release: time,
-            };
-        }
-        *player = None; // Invalidate the player due to seek
+    fn has_data(&self) -> bool {
+        !self.transmissions.is_empty()
     }
 
-    fn stop_temp_play(
-        inspector_state: &mut TransmissionInspectorState,
-        player: &mut Option<Player>,
-        seek_time: f64,
-    ) {
-        if inspector_state.play_state != PlayState::Play {
-            inspector_state.time = seek_time;
-            *player = None; // Invalidate the player due to seek
-        }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
-        // Clear temp_play
-        inspector_state.play_state = PlayState::Paused;
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 

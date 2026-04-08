@@ -3,7 +3,6 @@ use crate::{
     id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
     processor::{Processor, ProcessorHistory, ProcessorParameters},
-    ui::Viewport,
 };
 use rayon::prelude::*;
 use std::{
@@ -13,7 +12,7 @@ use std::{
 };
 
 pub type ProcessorId = usize;
-type ProcessorInstanceId = usize;
+pub type ProcessorInstanceId = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ClipCursor {
@@ -263,31 +262,6 @@ impl Analysis {
         let _ = retain_time;
     }
 
-    pub fn draw_clip(
-        &mut self,
-        ui: &mut egui::Ui,
-        figure_painter: &egui::Painter,
-        figure_rect: egui::Rect,
-        viewport: &Viewport,
-        dt: f64,
-        clip_id: ClipId,
-        clip_response: &mut egui::Response,
-    ) {
-        for (processor_id, processor) in self.processors.iter_mut() {
-            ui.push_id(ui.id().with(("processor", processor_id)), |ui| {
-                processor.history.draw_clip(
-                    ui,
-                    figure_painter,
-                    figure_rect,
-                    viewport,
-                    dt,
-                    clip_id,
-                    clip_response,
-                );
-            });
-        }
-    }
-
     pub fn get_processor_history_mut(
         &mut self,
         processor_id: ProcessorId,
@@ -295,6 +269,16 @@ impl Analysis {
         self.processors
             .get_mut(&processor_id)
             .map(|p| &mut p.history)
+    }
+
+    /// Get both the processor instance ID and mutable history reference
+    pub fn get_processor_instance_and_history_mut(
+        &mut self,
+        processor_id: ProcessorId,
+    ) -> Option<(ProcessorInstanceId, &mut Box<dyn ProcessorHistory>)> {
+        self.processors
+            .get_mut(&processor_id)
+            .map(|p| (p.instance_id, &mut p.history))
     }
 }
 

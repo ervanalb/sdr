@@ -4,6 +4,7 @@ use fm::FmProcessorParameters;
 use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::Viewport};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SpecificProcessorParameters {
@@ -60,9 +61,25 @@ pub trait ProcessorHistory {
     fn update(&mut self);
     fn expire(&mut self, retain_time: f64);
 
+    /// Create a new UI instance for this processor type
+    fn new_ui(&self) -> Box<dyn ProcessorUi>;
+
+    /// Get a human-readable name for this processor type
+    fn name(&self) -> &str;
+
+    /// Check if this processor has any data (e.g., transmissions, recordings, etc.)
+    fn has_data(&self) -> bool;
+
+    /// Downcast this trait object to Any for type-specific operations
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+pub trait ProcessorUi {
     /// Draw UI for a given clip onto the canvas
     fn draw_clip(
         &mut self,
+        history: &mut Box<dyn ProcessorHistory>,
         ui: &mut egui::Ui,
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
@@ -73,8 +90,11 @@ pub trait ProcessorHistory {
     );
 
     /// Draw the sidebar UI for this processor (e.g., inspector panels, controls)
-    fn draw(&mut self, ui: &mut egui::Ui, id: egui::Id, dt: f64);
-
-    /// Get a human-readable name for this processor type
-    fn name(&self) -> &str;
+    fn draw(
+        &mut self,
+        history: &mut Box<dyn ProcessorHistory>,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        dt: f64,
+    );
 }

@@ -7,6 +7,7 @@ use sdr::band_info::BandsInfo;
 use sdr::document::{ActiveDocument, RecordingId};
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::ProcessorParameters;
+use sdr::processor_graphics::ProcessorGraphics;
 use sdr::ui::Viewport;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -84,6 +85,7 @@ struct SdrApp {
     document: ActiveDocument,
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
+    processor_graphics: ProcessorGraphics,
     prev_time: DateTime<Utc>,
     bands_info: BandsInfo,
     playhead: f64,
@@ -114,6 +116,7 @@ impl SdrApp {
             document: ActiveDocument::new(),
             recording: None,
             analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
+            processor_graphics: ProcessorGraphics::new(),
             prev_time: now,
             bands_info,
             playhead: 0.,
@@ -402,194 +405,16 @@ impl eframe::App for SdrApp {
             });
 
         egui::SidePanel::right("right_sidebar")
-            .default_width(350.0)
+            .default_width(450.0)
             .frame(egui::Frame::side_top_panel(&ctx.style()).fill(egui::Color32::from_gray(40)))
             .show(ctx, |ui| {
-                ui.add_space(8.0);
-                let processors_root_ui_id = ui.id();
-
-                // Header with "Processors" title and "+" button
-                ui.horizontal(|ui| {
-                    ui.heading("Processors");
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button("➕", |ui| {
-                            use sdr::processor::SpecificProcessorParameters;
-
-                            for (type_name, create_fn) in
-                                SpecificProcessorParameters::available_types()
-                            {
-                                if ui.button(type_name).clicked() {
-                                    // Find the next available processor ID
-                                    let next_id = self
-                                        .processor_parameters
-                                        .keys()
-                                        .max()
-                                        .map(|&id| id + 1)
-                                        .unwrap_or(1);
-
-                                    // Count existing processors of this type to generate unique name
-                                    let type_count = self
-                                        .processor_parameters
-                                        .values()
-                                        .filter(|p| p.specific_parameters.type_name() == type_name)
-                                        .count();
-
-                                    let specific_params = create_fn();
-                                    let name = format!("{} {}", type_name, type_count + 1);
-
-                                    self.processor_parameters.insert(
-                                        next_id,
-                                        sdr::processor::ProcessorParameters {
-                                            name: name.clone(),
-                                            enabled: true,
-                                            specific_parameters: specific_params,
-                                        },
-                                    );
-
-                                    // Mark this processor for initial editing and setup
-                                    ui.data_mut(|d| {
-                                        d.insert_temp(
-                                            processors_root_ui_id
-                                                .with(("processor", next_id))
-                                                .with("processor_name_editing"),
-                                            Some(name),
-                                        );
-                                        d.insert_temp(
-                                            processors_root_ui_id
-                                                .with(("processor", next_id))
-                                                .with("processor_setup_open"),
-                                            true,
-                                        );
-                                    });
-
-                                    ui.close();
-                                }
-                            }
-                        });
-                    });
-                });
-
-                ui.separator();
-
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (processor_id, parameters) in self.processor_parameters.iter_mut() {
-                        let id = processors_root_ui_id.with(("processor", processor_id));
-                        ui.push_id(id, |ui| {
-                            egui::Frame::group(ui.style())
-                                .fill(ui.visuals().window_fill)
-                                .show(ui, |ui| {
-                                    // Header row with checkbox, name, setup toggle, and delete button
-                                    let setup_id = id.with("processor_setup_open");
-                                    let mut show_setup =
-                                        ui.data(|d| d.get_temp::<bool>(setup_id).unwrap_or(false));
-
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(ui.available_width(), 26.0),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            ui.checkbox(&mut parameters.enabled, "");
-
-                                            let name_edit_id = id.with("processor_name_editing");
-                                            let editing_name = ui.data(|d| {
-                                                d.get_temp::<Option<String>>(name_edit_id).flatten()
-                                            });
-
-                                            if let Some(mut temp_name) = editing_name {
-                                                // We're in edit mode
-                                                let available_width =
-                                                    (ui.available_width() - 100.0).max(0.); // Leave space for Setup and X buttons
-                                                let response = ui.add(
-                                                    egui::TextEdit::singleline(&mut temp_name)
-                                                        .desired_width(available_width),
-                                                );
-
-                                                let accept =
-                                                    ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                                let cancel = ui
-                                                    .input(|i| i.key_pressed(egui::Key::Escape))
-                                                    || response.lost_focus();
-
-                                                if accept {
-                                                    parameters.name = temp_name;
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(name_edit_id, None::<String>)
-                                                    });
-                                                } else if cancel {
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(name_edit_id, None::<String>)
-                                                    });
-                                                } else {
-                                                    // Update the temp value and request focus
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(name_edit_id, Some(temp_name))
-                                                    });
-                                                    if !response.has_focus() {
-                                                        response.request_focus();
-                                                    }
-                                                }
-                                            } else {
-                                                // Not editing - show as heading
-                                                let response = ui.heading(&parameters.name);
-                                                if response.clicked() {
-                                                    ui.data_mut(|d| {
-                                                        d.insert_temp(
-                                                            name_edit_id,
-                                                            Some(parameters.name.clone()),
-                                                        )
-                                                    });
-                                                }
-                                            }
-
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if ui.button("🗑").clicked() {
-                                                        self.delete_confirmation_processor =
-                                                            Some((
-                                                                *processor_id,
-                                                                parameters.name.clone(),
-                                                            ));
-                                                    }
-
-                                                    ui.toggle_value(&mut show_setup, "Setup");
-                                                },
-                                            );
-                                        },
-                                    );
-
-                                    ui.data_mut(|d| d.insert_temp(setup_id, show_setup));
-
-                                    // Draw setup UI if toggle is on
-                                    if show_setup {
-                                        egui::Frame::new()
-                                            .stroke(egui::Stroke::new(
-                                                1.0,
-                                                ui.visuals().widgets.noninteractive.bg_stroke.color,
-                                            ))
-                                            .inner_margin(egui::Margin::same(8))
-                                            .show(ui, |ui| {
-                                                ui.set_width(ui.available_width());
-                                                parameters.specific_parameters.draw_setup(ui);
-                                            });
-                                    }
-
-                                    // Draw history UI if processor is enabled and exists (always visible, no collapse)
-                                    if parameters.enabled {
-                                        if let Some(processor_history) =
-                                            self.analysis.get_processor_history_mut(*processor_id)
-                                        {
-                                            processor_history.draw(
-                                                ui,
-                                                egui::Id::new(processor_id),
-                                                dt,
-                                            );
-                                        }
-                                    }
-                                });
-                        });
-                    }
-                });
+                self.processor_graphics.ui(
+                    ui,
+                    &mut self.processor_parameters,
+                    &mut self.analysis,
+                    dt,
+                    &mut self.delete_confirmation_processor,
+                );
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -606,6 +431,8 @@ impl eframe::App for SdrApp {
                 &self.bands_info,
                 self.recording.is_some(),
                 &wgpu_render_state,
+                &mut self.processor_graphics,
+                &self.processor_parameters,
             );
         });
 
