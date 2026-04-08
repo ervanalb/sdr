@@ -607,8 +607,6 @@ impl ProcessorHistory for FmHistory {
         let mut close_inspector = false;
 
         // Show list of available transmissions
-        ui.label("Transmissions:");
-
         egui::ScrollArea::vertical()
             .max_height(400.0)
             .show(ui, |ui| {
@@ -630,7 +628,11 @@ impl ProcessorHistory for FmHistory {
                         transmission.clip_name, start_time, end_time, duration
                     );
 
-                    let response = ui.selectable_label(is_current, label);
+                    let response = ui.add(
+                        egui::Button::new(label)
+                            .selected(is_current)
+                            .sense(egui::Sense::click_and_drag()),
+                    );
 
                     // Handle click and drag behavior similar to canvas
                     if response.hovered() && ui.ctx().input(|i| i.pointer.primary_pressed()) {

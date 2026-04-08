@@ -51,7 +51,8 @@ pub fn ui(
     let highest_freq = bands_info.highest_freq;
 
     let ui_size = ui.available_size();
-    let (ui_rect, response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
+    let (ui_rect, ui_response) = ui.allocate_exact_size(ui_size, egui::Sense::click_and_drag());
+
     let figure_rect = ui_rect
         + MarginF32 {
             left: -154.,
@@ -119,16 +120,16 @@ pub fn ui(
     }
 
     // Handle middle mouse button drag for panning
-    if response.dragged_by(egui::PointerButton::Middle) {
-        let drag = response.drag_delta();
+    if ui_response.dragged_by(egui::PointerButton::Middle) {
+        let drag = ui_response.drag_delta();
         viewport.translation_x += drag.x as f64;
         viewport.translation_y += drag.y as f64;
     }
 
     // Handle right mouse button drag for zooming
-    if response.dragged_by(egui::PointerButton::Secondary) {
+    if ui_response.dragged_by(egui::PointerButton::Secondary) {
         let pointer_pos = ui.input(|i| i.pointer.latest_pos());
-        let drag = response.drag_delta();
+        let drag = ui_response.drag_delta();
         let old_scale_x = viewport.scale_x;
         let old_scale_y = viewport.scale_y;
         viewport.scale_x *= DRAG_ZOOM_SPEED.powf(drag.x) as f64;
@@ -469,6 +470,9 @@ pub fn ui(
 
             // Handle click interactions
             if focus_response.clicked() {
+                // Clicking on a clip should focus the canvas
+                ui_response.request_focus();
+
                 let modifiers = ui.input(|i| i.modifiers);
 
                 // Bring clicked clip to front
@@ -599,11 +603,20 @@ pub fn ui(
         }
     }
 
-    // Handle Delete/Backspace to delete selected clips
-    let delete_pressed =
-        ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
-    if delete_pressed && !document_graphics.selected.is_empty() {
-        // Delete selected clips (skips active clips and keeps them selected)
-        document.delete_selection(&mut document_graphics.selected);
+    // Clicking on background should focus the canvas
+    if ui_response.clicked() || figure_response.clicked() {
+        ui_response.request_focus();
+    }
+
+    // Handle Delete/Backspace to delete selected clips (only when canvas has focus)
+    if ui_response.has_focus() && !document_graphics.selected.is_empty() {
+        let delete_consumed = ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+        });
+        if delete_consumed {
+            // Delete selected clips (skips active clips and keeps them selected)
+            document.delete_selection(&mut document_graphics.selected);
+        }
     }
 }
