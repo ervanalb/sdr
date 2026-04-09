@@ -67,7 +67,8 @@ impl Cursor {
             ClipCursor::After => clip.chunks.end_index(),
         };
         let chunk_period = clip.descriptor.chunk_size as f64 / clip.descriptor.sample_rate;
-        clip.descriptor.start_time + (chunk_index - clip.chunks.start_index()) as f64 * chunk_period
+        clip.descriptor.reference_time
+            + (chunk_index - clip.chunks.start_index()) as f64 * chunk_period
     }
 
     fn is_before(&self, other: &Cursor) -> bool {
@@ -348,14 +349,14 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
                         name: _,
                         frequency: prev_frequency,
                         sample_rate: prev_sample_rate,
-                        start_time: prev_start_time,
+                        reference_time: prev_start_time,
                         chunk_size: prev_chunk_size,
                     } = prev_clip.descriptor;
                     let ClipDescriptor {
                         name: _,
                         frequency,
                         sample_rate,
-                        start_time,
+                        reference_time: start_time,
                         chunk_size,
                     } = new_clip.descriptor;
 
@@ -487,7 +488,7 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
                                 .collect();
 
                             work.into_par_iter().for_each(|processor| {
-                                processor.process_chunk(clip_id, &preprocessed_data);
+                                processor.process_chunk(clip_id, chunk_index, &preprocessed_data);
                             });
                         }
                     }

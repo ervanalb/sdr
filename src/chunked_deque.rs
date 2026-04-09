@@ -73,6 +73,14 @@ impl<T> ChunkedDeque<T> {
         }
     }
 
+    pub fn starting_at(index: isize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            start_index: index,
+            end_index: index,
+        }
+    }
+
     pub fn start_index(&self) -> isize {
         self.start_index
     }
@@ -113,15 +121,12 @@ impl<T> ChunkedDeque<T> {
         let end_idx = self.end_index;
         let end_offset_in_chunk = end_idx.rem_euclid(CHUNK_SIZE as isize) as usize;
 
-        if end_offset_in_chunk == 0 {
+        if self.is_empty() || end_offset_in_chunk == 0 {
             let new_chunk = Arc::new(array::from_fn(|_| None));
             self.chunks.push_back(new_chunk);
-            let chunk = Arc::make_mut(self.chunks.back_mut().unwrap());
-            chunk[0] = Some(value);
-        } else {
-            let chunk = Arc::make_mut(self.chunks.back_mut().unwrap());
-            chunk[end_offset_in_chunk] = Some(value);
         }
+        let chunk = Arc::make_mut(self.chunks.back_mut().unwrap());
+        chunk[end_offset_in_chunk] = Some(value);
 
         self.end_index += 1;
     }
@@ -133,15 +138,12 @@ impl<T> ChunkedDeque<T> {
         let new_start_idx = self.start_index - 1;
         let new_start_offset_in_chunk = new_start_idx.rem_euclid(CHUNK_SIZE as isize) as usize;
 
-        if new_start_offset_in_chunk == CHUNK_SIZE - 1 {
+        if self.is_empty() || new_start_offset_in_chunk == CHUNK_SIZE - 1 {
             let new_chunk = Arc::new(std::array::from_fn(|_| None));
             self.chunks.push_front(new_chunk);
-            let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
-            chunk[CHUNK_SIZE - 1] = Some(value);
-        } else {
-            let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
-            chunk[new_start_offset_in_chunk] = Some(value);
         }
+        let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
+        chunk[new_start_offset_in_chunk] = Some(value);
 
         self.start_index -= 1;
     }

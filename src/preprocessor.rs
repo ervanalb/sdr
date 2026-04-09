@@ -12,7 +12,7 @@ pub struct PreprocessedClipDescriptor {
     pub clip_name: String,
     pub frequency: f64,
     pub sample_rate: f64,
-    pub start_time: f64,
+    pub reference_time: f64,
     pub chunk_size: usize,
     pub fft_size: usize,
 }
@@ -47,7 +47,7 @@ impl StreamPreprocessor {
             clip_name: descriptor.name.clone(),
             frequency: descriptor.frequency,
             sample_rate: descriptor.sample_rate,
-            start_time: descriptor.start_time,
+            reference_time: descriptor.reference_time,
             chunk_size: descriptor.chunk_size,
             fft_size,
         };

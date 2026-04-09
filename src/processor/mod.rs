@@ -53,7 +53,7 @@ pub struct ProcessorParameters {
 pub trait Processor: Send {
     fn reset(&mut self);
     fn start_clip(&mut self, clip_id: ClipId, descriptor: &PreprocessedClipDescriptor);
-    fn process_chunk(&mut self, clip_id: ClipId, preprocessed_data: &[Complex<f32>]);
+    fn process_chunk(&mut self, clip_id: ClipId, index: isize, preprocessed_data: &[Complex<f32>]);
     fn end_clip(&mut self, clip_id: ClipId);
 }
 

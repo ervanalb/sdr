@@ -19,17 +19,17 @@ pub struct ClipDescriptor {
     pub name: String,
     pub frequency: f64,
     pub sample_rate: f64,
-    pub start_time: f64,
+    pub reference_time: f64,
     pub chunk_size: usize,
 }
 
 impl ClipDescriptor {
     pub fn time(&self, index: f64) -> f64 {
-        self.start_time + index * self.chunk_size as f64 / self.sample_rate
+        self.reference_time + index * self.chunk_size as f64 / self.sample_rate
     }
 
     pub fn index(&self, time: f64) -> f64 {
-        (time - self.start_time) * self.sample_rate / self.chunk_size as f64
+        (time - self.reference_time) * self.sample_rate / self.chunk_size as f64
     }
 
     pub fn freq_min(&self) -> f64 {
@@ -365,7 +365,7 @@ impl ActiveDocument {
                                 name: clip_name,
                                 frequency: descriptor.frequency,
                                 sample_rate: descriptor.sample_rate,
-                                start_time: clip_start_time,
+                                reference_time: clip_start_time,
                                 chunk_size: descriptor.chunk_size,
                             },
                             chunks: ChunkedDeque::new(),
@@ -385,7 +385,7 @@ impl ActiveDocument {
         // Remove chunks that are older than retain_time
         self.document.clips.retain(|clip_id, clip| {
             // Calculate elapsed time from clip start to retain_time
-            if retain_time > clip.descriptor.start_time {
+            if retain_time > clip.descriptor.reference_time {
                 // Convert retain_time to retain_index
                 // (the index into clip.chunks where retain_time sits)
                 // by shifting & scaling by the chunk rate

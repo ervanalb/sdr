@@ -179,8 +179,7 @@ impl eframe::App for SdrApp {
         self.document.update();
 
         // Expire old chunks
-        // TODO: bring back expire
-        //self.document.expire(todo!());
+        self.document.expire(self.playhead - 10.); // XXX testing
 
         // Document graphics processing now happens in canvas.rs
 
@@ -189,6 +188,9 @@ impl eframe::App for SdrApp {
             &self.document.document,
             &self.document.active_clips,
         );
+
+        // Expire old processing
+        //self.analysis.expire(self.playhead - 10.); // XXX testing
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {

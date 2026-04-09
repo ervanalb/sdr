@@ -116,9 +116,10 @@ impl Processor for FmProcessor {
         }
     }
 
-    fn process_chunk(&mut self, clip_id: ClipId, preprocessed_data: &[Complex<f32>]) {
+    fn process_chunk(&mut self, clip_id: ClipId, index: isize, preprocessed_data: &[Complex<f32>]) {
         if let Some(processor) = self.clips.get_mut(&clip_id) {
             processor.process_chunk(
+                index,
                 preprocessed_data,
                 &mut self.sender,
                 &mut self.transmission_id_factory,
@@ -155,7 +156,7 @@ pub struct ClipProcessor {
     audio_interpolator: CubicInterpolator<f32>,
     active_transmission: Option<TransmissionId>,
     output_sample_rate: f64,
-    clip_start_time: f64,
+    clip_reference_time: f64,
     clip_chunk_size: usize,
     clip_sample_rate: f64,
     clip_chunk_count: usize,
@@ -233,7 +234,7 @@ impl ClipProcessor {
             audio_interpolator: CubicInterpolator::new(audio_ifft_sample_rate / audio::SAMPLE_RATE),
             active_transmission: None,
             output_sample_rate,
-            clip_start_time: clip_descriptor.start_time,
+            clip_reference_time: clip_descriptor.reference_time,
             clip_chunk_size: clip_descriptor.chunk_size,
             clip_sample_rate: clip_descriptor.sample_rate,
             clip_chunk_count: 0,
@@ -242,12 +243,11 @@ impl ClipProcessor {
 
     fn process_chunk(
         &mut self,
+        index: isize,
         preprocessed_data: &[Complex<f32>],
         sender: &mut Sender<FmMessage>,
         transmission_id_factory: &mut IdFactory,
     ) {
-        // Calculate time based on chunk count
-        self.clip_chunk_count += 1;
         // Pick out the relevant bins from the overall FFT data
         let fft_count = preprocessed_data.len() / self.fft_size;
         let chunk_slice_len = self.bins.end - self.bins.start;
@@ -298,8 +298,8 @@ impl ClipProcessor {
                             transmission_id,
                             clip_id: self.clip_id,
                             clip_name: self.clip_name.clone(),
-                            reference_time: self.clip_start_time
-                                + self.clip_chunk_count as f64 * period,
+                            reference_time: self.clip_reference_time,
+                            start_index: index,
                             period,
                             iq_sample_rate: self.output_sample_rate,
                         })
@@ -375,6 +375,7 @@ pub enum FmMessage {
         clip_id: ClipId,
         clip_name: String,
         reference_time: f64,
+        start_index: isize,
         period: f64,
         iq_sample_rate: f64,
     },
@@ -395,6 +396,7 @@ impl std::fmt::Debug for FmMessage {
                 clip_id,
                 clip_name,
                 reference_time,
+                start_index,
                 period,
                 iq_sample_rate,
             } => f
@@ -403,6 +405,7 @@ impl std::fmt::Debug for FmMessage {
                 .field("clip_id", clip_id)
                 .field("clip_name", clip_name)
                 .field("reference_time", reference_time)
+                .field("start_index", start_index)
                 .field("period", period)
                 .field("iq_sample_rate", iq_sample_rate)
                 .finish(),
@@ -979,6 +982,7 @@ impl ProcessorHistory for FmHistory {
                     clip_id,
                     clip_name,
                     reference_time,
+                    start_index,
                     period,
                     iq_sample_rate,
                 } => match self.transmissions.entry(transmission_id) {
@@ -987,6 +991,7 @@ impl ProcessorHistory for FmHistory {
                             clip_id,
                             clip_name,
                             reference_time,
+                            start_index,
                             period,
                             iq_sample_rate,
                         ));
@@ -1058,6 +1063,7 @@ impl FmTransmission {
         clip_id: ClipId,
         clip_name: String,
         reference_time: f64,
+        start_index: isize,
         period: f64,
         iq_sample_rate: f64,
     ) -> FmTransmission {
@@ -1068,7 +1074,7 @@ impl FmTransmission {
             reference_time,
             period,
             iq_sample_rate,
-            chunks: ChunkedDeque::new(),
+            chunks: ChunkedDeque::starting_at(start_index),
         }
     }
 

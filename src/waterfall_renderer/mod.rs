@@ -11,7 +11,8 @@ pub struct WaterfallDrawInfo {
     pub next_texture: wgpu::Texture,
     pub min: f32,
     pub max: f32,
-    pub v_end: f32, // for active (partially filled) texture, the highest valid V component of UV coordinate
+    pub v_start: f32, // for partially filled texture, the lowest valid V component of UV coordinate
+    pub v_end: f32, // for partially filled texture, the highest valid V component of UV coordinate
 }
 
 #[repr(C)]
@@ -215,7 +216,7 @@ impl WaterfallRenderer {
             let vertices_start = self.vertices.len();
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_top],
-                uv: [1., 0.],
+                uv: [1., chunk.v_start],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {
@@ -225,13 +226,13 @@ impl WaterfallRenderer {
             });
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_bottom],
-                uv: [0., 0.],
+                uv: [0., chunk.v_start],
                 color_range,
             });
 
             self.vertices.push(WaterfallVertex {
                 position: [x_left, y_bottom],
-                uv: [0., 0.],
+                uv: [0., chunk.v_start],
                 color_range,
             });
             self.vertices.push(WaterfallVertex {

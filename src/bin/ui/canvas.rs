@@ -36,7 +36,7 @@ struct RxStreamDragState {
 #[derive(Clone)]
 struct ClipDragState {
     clip_id: usize,
-    proposed_start_time: f64,
+    proposed_reference_time: f64,
 }
 
 pub fn ui(
@@ -451,7 +451,6 @@ pub fn ui(
                 &figure_painter,
                 figure_rect,
                 viewport,
-                clip_id,
                 is_selected,
                 is_hovered,
             );
@@ -509,7 +508,7 @@ pub fn ui(
             if !is_recording && head_bar_response.drag_started() {
                 clip_drag_state = Some(ClipDragState {
                     clip_id,
-                    proposed_start_time: clip.descriptor.start_time,
+                    proposed_reference_time: clip.descriptor.reference_time,
                 });
 
                 // Store drag state back to egui memory
@@ -526,11 +525,14 @@ pub fn ui(
                 if head_bar_response.dragged() {
                     let drag = head_bar_response.drag_delta();
                     let time_delta = drag.x as f64 / viewport.scale_x;
-                    state.proposed_start_time = (state.proposed_start_time + time_delta).max(0.0);
+                    let min_reference_time = clip.descriptor.reference_time
+                        - clip.descriptor.time(clip.start_index as f64);
+                    state.proposed_reference_time =
+                        (state.proposed_reference_time + time_delta).max(min_reference_time);
                 }
 
                 // Draw ghost outline if this clip is being dragged
-                let time_offset = state.proposed_start_time - clip.descriptor.start_time;
+                let time_offset = state.proposed_reference_time - clip.descriptor.reference_time;
                 let y_top = viewport.screen_space_y(clip.descriptor.freq_max());
                 let y_bottom = viewport.screen_space_y(clip.descriptor.freq_min());
                 let x_left = viewport.screen_space_x(clip.descriptor.time(clip.start_index as f64))
@@ -553,7 +555,8 @@ pub fn ui(
                 if head_bar_response.drag_stopped() {
                     // Apply the time change
                     if let Some(doc_clip) = document.document.clips.get_mut(&clip_id) {
-                        Arc::make_mut(doc_clip).descriptor.start_time = state.proposed_start_time;
+                        Arc::make_mut(doc_clip).descriptor.reference_time =
+                            state.proposed_reference_time;
                     }
                     clip_drag_state = None;
                 }

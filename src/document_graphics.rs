@@ -10,19 +10,19 @@ use num_complex::Complex;
 use rayon::prelude::*;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     mem,
 };
 use wgpu::{
-    Device, Extent3d, Origin3d, Queue, TexelCopyTextureInfo, Texture, TextureAspect,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    Device, Extent3d, Origin3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages,
 };
 
 const TARGET_BIN_SIZE: f64 = 2.5e3; // 2.5 KHz
 const MIN_QUANTILE: f64 = 0.1;
 const MAX_QUANTILE: f64 = 0.999;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
-const TEXTURE_HEIGHT: u32 = 1024;
+const TEXTURE_HEIGHT: u32 = 256; //1024;
 
 #[derive(Default)]
 pub struct DocumentGraphics {
@@ -55,14 +55,14 @@ impl DocumentGraphics {
                 name: _,
                 frequency: _,
                 sample_rate: prev_sample_rate,
-                start_time: _,
+                reference_time: _,
                 chunk_size: prev_chunk_size,
             } = prev_clip.descriptor;
             let ClipDescriptor {
                 name: _,
                 frequency: _,
                 sample_rate,
-                start_time: _,
+                reference_time: _,
                 chunk_size,
             } = new_clip.descriptor;
 
@@ -71,7 +71,7 @@ impl DocumentGraphics {
             if sample_rate != prev_sample_rate
                 || chunk_size != prev_chunk_size
                 || !new_clip.chunks.is_continuation_of(&prev_clip.chunks)
-                || (clip_graphics.finalized()
+                || (clip_graphics.active_segment.is_none()
                     && new_clip.chunks.end_index() > clip_graphics.end_index)
             {
                 *clip_graphics = ClipGraphics::new(
@@ -97,6 +97,18 @@ impl DocumentGraphics {
             self.draw_order.push(clip_id);
         }
 
+        // Shrink any clip graphics that have had content removed from the start
+        for (clip_id, clip) in self.clips.iter_mut() {
+            let remove_start_index = clip.start_index;
+            let remove_end_index = document.clips.get(clip_id).unwrap().chunks.start_index();
+            let segments_to_remove: usize = (remove_end_index.div_euclid(TEXTURE_HEIGHT as isize)
+                - remove_start_index.div_euclid(TEXTURE_HEIGHT as isize))
+            .try_into()
+            .unwrap();
+            clip.segments.drain(..segments_to_remove);
+            clip.start_index = remove_end_index;
+        }
+
         self.prev_document = document.clone();
 
         // Gather work items
@@ -112,18 +124,18 @@ impl DocumentGraphics {
 
         // Run the work in parallel
         work.into_par_iter().for_each(|(clip_graphics, clip)| {
-            let start_index = clip_graphics.end_index;
-            let end_index = clip.chunks.end_index();
-            for chunk in clip.chunks.range(start_index..end_index) {
+            let work_start_index = clip_graphics.end_index;
+            let work_end_index = clip.chunks.end_index();
+            for chunk in clip.chunks.range(work_start_index..work_end_index) {
                 clip_graphics.process(device, queue, chunk.as_ref());
             }
-            clip_graphics.end_index = end_index;
+            assert_eq!(clip_graphics.end_index, work_end_index);
         });
 
-        // Finalize processing for any clips that are no longer active
+        // Set active_segment to None for any clips that are no longer active
         for (&clip_id, clip_graphics) in self.clips.iter_mut() {
-            if !clip_graphics.finalized() && !active_clips.contains(&clip_id) {
-                clip_graphics.finalize(device, queue);
+            if clip_graphics.active_segment.is_some() && !active_clips.contains(&clip_id) {
+                clip_graphics.active_segment = None;
             }
         }
     }
@@ -152,7 +164,7 @@ pub struct ClipGraphics {
     min: f32,
     max: f32,
     active_segment: Option<ActiveSegment>,
-    finished_segments: Vec<FinishedSegment>,
+    segments: VecDeque<Segment>,
     blank_texture: Texture,
 }
 
@@ -199,13 +211,8 @@ impl ClipGraphics {
             min_max_alpha,
             min: f32::NAN,
             max: f32::NAN,
-            active_segment: Some(ActiveSegment::new(
-                device,
-                fft_size as u32,
-                start_index,
-                blank_texture.clone(),
-            )),
-            finished_segments: vec![],
+            active_segment: Some(ActiveSegment::new(fft_size as u32)),
+            segments: VecDeque::new(),
             blank_texture,
         }
     }
@@ -286,29 +293,43 @@ impl ClipGraphics {
             self.max = new_max;
         }
 
-        if let Some(finished_segment) = self
+        let active_segment = self
             .active_segment
             .as_mut()
-            .expect("Data was pushed to a clip after it was finalized")
-            .push(&device, &queue, &spectrum)
-        {
-            self.finished_segments.push(finished_segment);
-        }
-    }
+            .expect("Data was pushed to a clip after it was finalized");
 
-    fn finalized(&self) -> bool {
-        self.active_segment.is_none()
-    }
+        // Calculate which segment this row belongs to
+        let segment_index = self.end_index.div_euclid(TEXTURE_HEIGHT as isize)
+            - self.start_index.div_euclid(TEXTURE_HEIGHT as isize);
+        let row_in_segment = self.end_index.rem_euclid(TEXTURE_HEIGHT as isize) as u32;
 
-    fn finalize(&mut self, device: &Device, queue: &Queue) {
-        if let Some(finished_segment) = self
-            .active_segment
-            .take()
-            .expect("Finalize called twice")
-            .finalize(device, queue, self.blank_texture.clone())
-        {
-            self.finished_segments.push(finished_segment);
+        // Create new segment if needed
+        if segment_index >= self.segments.len() as isize {
+            let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
+            let texture = device.create_texture(&TextureDescriptor {
+                label: Some("Waterfall Texture"),
+                size: Extent3d {
+                    width: spectrum.len() as u32,
+                    height: TEXTURE_HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::R32Float,
+                usage: TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+
+            self.segments.push_back(Segment { texture });
         }
+
+        // Push the row to the appropriate segment
+        let segment = &self.segments[segment_index as usize];
+        active_segment.push_row(queue, &segment.texture, row_in_segment, &spectrum);
+        self.end_index += 1;
     }
 
     pub fn draw(
@@ -317,60 +338,68 @@ impl ClipGraphics {
         figure_painter: &egui::Painter,
         figure_rect: egui::Rect,
         viewport: &Viewport,
-        clip_id: ClipId,
         is_selected: bool,
         is_hovered: bool,
     ) -> (egui::Response, egui::Response) {
-        // TODO: Consider moving these into self
-        // instead of calculating them every frame from descriptor
         let y_top = viewport.screen_space_y(self.descriptor.freq_max());
         let y_bottom = viewport.screen_space_y(self.descriptor.freq_min());
         let x_left = viewport.screen_space_x(self.descriptor.time(self.start_index as f64));
         let x_right = viewport.screen_space_x(self.descriptor.time(self.end_index as f64));
 
         let draw_list = self
-            .active_segment
-            .as_ref()
-            .map(move |active_segment| {
-                let x_left =
-                    viewport.screen_space_x(self.descriptor.time(active_segment.start_row as f64));
-                let x_right =
-                    viewport.screen_space_x(self.descriptor.time(active_segment.end_row as f64));
+            .segments
+            .iter()
+            .enumerate()
+            .map(move |(seg_idx, segment)| {
+                // Calculate the unclamped start and end indices for this segment
+                let seg_start_index = self.start_index.div_euclid(TEXTURE_HEIGHT as isize)
+                    * TEXTURE_HEIGHT as isize
+                    + seg_idx as isize * TEXTURE_HEIGHT as isize;
+                let seg_end_index = seg_start_index + TEXTURE_HEIGHT as isize;
 
-                WaterfallDrawInfo {
-                    rect: egui::Rect::from_min_max(
-                        egui::pos2(x_left, y_top),
-                        egui::pos2(x_right, y_bottom),
-                    ),
-                    texture: active_segment.texture.clone(),
-                    prev_texture: active_segment.prev_texture.clone(),
-                    next_texture: self.blank_texture.clone(),
-                    min: self.min,
-                    max: self.max,
-                    v_end: (active_segment.end_row - active_segment.start_row) as f32
-                        / TEXTURE_HEIGHT as f32,
-                }
-            })
-            .into_iter()
-            .chain(self.finished_segments.iter().map(move |finished_segment| {
-                let x_start = viewport
-                    .screen_space_x(self.descriptor.time(finished_segment.start_row as f64));
-                let x_end =
-                    viewport.screen_space_x(self.descriptor.time(finished_segment.end_row as f64));
+                // Calculate v_start and clamp seg_start_index
+                let v_start = ((self.start_index - seg_start_index) as f32
+                    * (1. / TEXTURE_HEIGHT as f32))
+                    .max(0.);
+                let clamped_start_index = seg_start_index.max(self.start_index);
+
+                // Calculate v_end and clamp seg_end_index
+                let v_end = (1.0
+                    - (seg_end_index - self.end_index) as f32 * (1. / TEXTURE_HEIGHT as f32))
+                    .min(1.);
+                let clamped_end_index = seg_end_index.min(self.end_index);
+
+                let x_start =
+                    viewport.screen_space_x(self.descriptor.time(clamped_start_index as f64));
+                let x_end = viewport.screen_space_x(self.descriptor.time(clamped_end_index as f64));
+
+                // Get prev and next textures from array
+                let prev_texture = if seg_idx > 0 {
+                    self.segments[seg_idx - 1].texture.clone()
+                } else {
+                    self.blank_texture.clone()
+                };
+
+                let next_texture = if seg_idx + 1 < self.segments.len() {
+                    self.segments[seg_idx + 1].texture.clone()
+                } else {
+                    self.blank_texture.clone()
+                };
 
                 WaterfallDrawInfo {
                     rect: egui::Rect::from_min_max(
                         egui::pos2(x_start, y_top),
                         egui::pos2(x_end, y_bottom),
                     ),
-                    texture: finished_segment.texture.clone(),
-                    prev_texture: finished_segment.prev_texture.clone(),
-                    next_texture: finished_segment.next_texture.clone(),
+                    texture: segment.texture.clone(),
+                    prev_texture,
+                    next_texture,
                     min: self.min,
                     max: self.max,
-                    v_end: 1.,
+                    v_start,
+                    v_end,
                 }
-            }))
+            })
             .collect();
 
         let id = ui.id().with("waterfall");
@@ -469,39 +498,15 @@ impl ClipGraphics {
 
 #[derive(Debug)]
 pub struct ActiveSegment {
-    prev_texture: Texture,
-    texture: Texture,
-    start_row: isize,
-    end_row: isize,
     mip_level_count: u32,
     mip_buffer: Vec<f32>,
 }
 
 impl ActiveSegment {
-    fn new(device: &Device, spectrum_len: u32, start_row: isize, prev_texture: Texture) -> Self {
+    fn new(spectrum_len: u32) -> Self {
         let mip_level_count = TEXTURE_HEIGHT.ilog2().max(1);
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("Waterfall Texture"),
-            size: Extent3d {
-                width: spectrum_len,
-                height: TEXTURE_HEIGHT,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::R32Float,
-            usage: TextureUsages::TEXTURE_BINDING
-                | TextureUsages::COPY_DST
-                | TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
 
         Self {
-            prev_texture,
-            texture,
-            start_row,
-            end_row: start_row,
             mip_level_count,
             // Allocate some extra space in the mip_buffer
             // in case waterfall_row.len() is very small
@@ -509,24 +514,9 @@ impl ActiveSegment {
         }
     }
 
-    fn new_following(device: &Device, spectrum_len: u32, prev: &ActiveSegment) -> Self {
-        Self::new(device, spectrum_len, prev.end_row, prev.texture.clone())
-    }
-
-    fn push(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        spectrum: &[f32],
-    ) -> Option<FinishedSegment> {
-        let finished_texture = if self.end_row - self.start_row >= TEXTURE_HEIGHT as isize {
-            self.swap(device, queue, spectrum.len() as u32)
-        } else {
-            None
-        };
-
-        let mut row_index = (self.end_row - self.start_row) as u32;
-        let mut row_len = self.texture.width();
+    fn push_row(&mut self, queue: &Queue, texture: &Texture, row_index: u32, spectrum: &[f32]) {
+        let mut row_idx = row_index;
+        let mut row_len = texture.width();
         let mut buffer_offset = 0;
         self.mip_buffer[0..row_len as usize].clone_from_slice(spectrum);
         for mip_level in 0..self.mip_level_count {
@@ -535,11 +525,11 @@ impl ActiveSegment {
             // Upload the row data to the GPU
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.texture,
+                    texture,
                     mip_level,
                     origin: Origin3d {
                         x: 0,
-                        y: row_index,
+                        y: row_idx,
                         z: 0,
                     },
                     aspect: wgpu::TextureAspect::All,
@@ -573,125 +563,21 @@ impl ActiveSegment {
             row.fill(0.);
 
             // See if the next mip level is done accumulating
-            if row_index % 2 == 0 {
+            if row_idx % 2 == 0 {
                 // Not ready yet
                 break;
             }
 
             // Ready--loop
-            row_index = row_index / 2;
+            row_idx = row_idx / 2;
             buffer_offset += row_len as usize;
             row_len = next_row_len;
         }
-        self.end_row += 1;
-
-        finished_texture
-    }
-
-    fn finalize(
-        self,
-        device: &Device,
-        queue: &Queue,
-        next_texture: Texture,
-    ) -> Option<FinishedSegment> {
-        let Self {
-            texture,
-            prev_texture,
-            start_row,
-            end_row,
-            ..
-        } = self;
-
-        if end_row == start_row {
-            return None;
-        }
-
-        let texture = if end_row - start_row < TEXTURE_HEIGHT as isize {
-            // If partial, copy this texture into an appropriately sized one
-            // to free up space
-
-            let mut smaller_size = Extent3d {
-                width: texture.width(),
-                height: (end_row - start_row) as u32,
-                depth_or_array_layers: 1,
-            };
-            let mip_level_count = (end_row - start_row).ilog2().max(1);
-            let smaller_texture = device.create_texture(&TextureDescriptor {
-                label: Some("Waterfall Texture"),
-                size: smaller_size,
-                mip_level_count,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::R32Float,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Texture copy command encoder"),
-            });
-
-            for mip_level in 0..mip_level_count {
-                encoder.copy_texture_to_texture(
-                    TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level,
-                        origin: Origin3d::ZERO,
-                        aspect: TextureAspect::All,
-                    },
-                    TexelCopyTextureInfo {
-                        texture: &smaller_texture,
-                        mip_level,
-                        origin: Origin3d::ZERO,
-                        aspect: TextureAspect::All,
-                    },
-                    smaller_size,
-                );
-
-                smaller_size = Extent3d {
-                    width: (smaller_size.width / 2).max(1),
-                    height: smaller_size.height / 2,
-                    depth_or_array_layers: 1,
-                };
-            }
-
-            queue.submit(Some(encoder.finish()));
-            smaller_texture
-        } else {
-            texture
-        };
-
-        Some(FinishedSegment {
-            texture,
-            prev_texture,
-            next_texture,
-            start_row,
-            end_row,
-        })
-    }
-
-    // When this texture fills up, swap it for a new one
-    fn swap(
-        &mut self,
-        device: &Device,
-        queue: &Queue,
-        spectrum_len: u32,
-    ) -> Option<FinishedSegment> {
-        // Create a new active texture
-        let prev = mem::replace(
-            self,
-            ActiveSegment::new_following(device, spectrum_len, self),
-        );
-        prev.finalize(device, queue, self.texture.clone())
     }
 }
 
-struct FinishedSegment {
+struct Segment {
     texture: Texture,
-    prev_texture: Texture,
-    next_texture: Texture,
-    start_row: isize,
-    end_row: isize,
 }
 
 ///////////////////////////////////////////////////////////////////////////////
