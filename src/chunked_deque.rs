@@ -234,30 +234,24 @@ impl<T> ChunkedDeque<T> {
     }
 
     // Returns true if all of the following conditions are met:
-    // * `self` overlaps `other`,
-    // * `other` doesn't contain any data newer than `self`
-    // * `self` doesn't contain any data older than `other`
-    // * the data in the overlap matches
+    // * `self` and `other` start at the same index
+    // * `self` is equal in length or longer than `other`
+    // * the data in the overlapping region matches
     //
     // Example of a "true" case:
-    // self:     [defghijklmno]
+    // self:  [abcdefghijklmno]
     // other: [abcdefghijk]
     pub fn is_continuation_of(&self, other: &Self) -> bool
     where
         T: PartialEq,
     {
-        if self.start_index < other.start_index || self.end_index < other.end_index {
+        if self.start_index != other.start_index || self.end_index < other.end_index {
             return false;
         }
 
         // Region of possible overlap
         let start = self.start_index;
         let end = other.end_index;
-
-        if start >= end {
-            // The two queues are disjoint
-            return false;
-        }
 
         let (mut self_chunk_idx, mut offset) = self.index_to_chunk_and_offset(start);
         let (mut other_chunk_idx, offset2) = other.index_to_chunk_and_offset(start);

@@ -43,6 +43,7 @@ pub fn ui(
     ui: &mut egui::Ui,
     viewport: &mut Viewport,
     document: &mut ActiveDocument,
+    document_graphics: &mut DocumentGraphics,
     analysis: &mut Analysis,
     playhead: &mut f64,
     dt: f64,
@@ -403,25 +404,6 @@ pub fn ui(
             }
         }
     }
-
-    // Get or create DocumentGraphics from egui memory
-    let document_graphics_id = ui.id().with("document_graphics");
-
-    let document_graphics = ui.ctx().memory_mut(|m| {
-        m.data
-            .get_temp_mut_or_default::<Arc<Mutex<DocumentGraphics>>>(document_graphics_id)
-            .clone()
-    });
-
-    let mut document_graphics = document_graphics.lock().unwrap();
-
-    // Process the document into graphical representation
-    document_graphics.process(
-        &wgpu_render_state.device,
-        &wgpu_render_state.queue,
-        &document.document,
-        &document.active_clips,
-    );
 
     // Get clip drag state from egui memory
     let clip_drag_state_id = ui.id().with("clip_drag_state");

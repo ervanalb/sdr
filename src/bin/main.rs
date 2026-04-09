@@ -5,6 +5,7 @@ use eframe::egui;
 use sdr::analysis::{Analysis, ProcessorId};
 use sdr::band_info::BandsInfo;
 use sdr::document::{ActiveDocument, RecordingId};
+use sdr::document_graphics::DocumentGraphics;
 use sdr::hardware::{Hardware, HardwareParams};
 use sdr::processor::ProcessorParameters;
 use sdr::processor_graphics::ProcessorGraphics;
@@ -83,6 +84,7 @@ struct SdrApp {
     last_saved_processors: BTreeMap<ProcessorId, ProcessorParameters>,
     last_save_check: DateTime<Utc>,
     document: ActiveDocument,
+    document_graphics: DocumentGraphics,
     recording: Option<Rc<RecordingId>>,
     analysis: Analysis,
     processor_graphics: ProcessorGraphics,
@@ -114,6 +116,7 @@ impl SdrApp {
             processor_parameters,
             last_save_check: now,
             document: ActiveDocument::new(),
+            document_graphics: DocumentGraphics::new(),
             recording: None,
             analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
             processor_graphics: ProcessorGraphics::new(),
@@ -144,6 +147,8 @@ impl eframe::App for SdrApp {
         let Some(hardware) = &mut self.hardware else {
             return;
         };
+
+        let wgpu_render_state = frame.wgpu_render_state().unwrap();
 
         let now = Utc::now();
         let dt_duration = now.signed_duration_since(self.prev_time);
@@ -178,19 +183,28 @@ impl eframe::App for SdrApp {
         // Update document
         self.document.update();
 
-        // Expire old chunks
-        self.document.expire(self.playhead - 10.); // XXX testing
+        // Process the document into graphical representation
+        self.document_graphics.process(
+            &wgpu_render_state.device,
+            &wgpu_render_state.queue,
+            &self.document.document,
+            &self.document.active_clips,
+        );
 
-        // Document graphics processing now happens in canvas.rs
-
+        // Analyze the document with all processors
         self.analysis.process(
             &mut self.processor_parameters,
             &self.document.document,
             &self.document.active_clips,
         );
 
-        // Expire old processing
-        //self.analysis.expire(self.playhead - 10.); // XXX testing
+        // Handle expiration
+        let retain_time = self.playhead - 10.; // XXX testing
+        self.document.expire(retain_time);
+        self.document_graphics
+            .process_expiry(&self.document.document, retain_time);
+        self.analysis
+            .process_expiry(&self.document.document, retain_time);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -426,6 +440,7 @@ impl eframe::App for SdrApp {
                 ui,
                 &mut self.viewport_state,
                 &mut self.document,
+                &mut self.document_graphics,
                 &mut self.analysis,
                 &mut self.playhead,
                 dt,

@@ -24,7 +24,6 @@ const MAX_QUANTILE: f64 = 0.999;
 const MIN_MAX_TIME_CONSTANT: f64 = 1.;
 const TEXTURE_HEIGHT: u32 = 256; //1024;
 
-#[derive(Default)]
 pub struct DocumentGraphics {
     pub clips: BTreeMap<ClipId, ClipGraphics>,
     pub prev_document: Document,
@@ -34,6 +33,16 @@ pub struct DocumentGraphics {
 }
 
 impl DocumentGraphics {
+    pub fn new() -> Self {
+        DocumentGraphics {
+            clips: BTreeMap::new(),
+            prev_document: Document::new(),
+            selected: BTreeSet::new(),
+            hovered: BTreeSet::new(),
+            draw_order: Vec::new(),
+        }
+    }
+
     pub fn process(
         &mut self,
         device: &Device,
@@ -97,18 +106,6 @@ impl DocumentGraphics {
             self.draw_order.push(clip_id);
         }
 
-        // Shrink any clip graphics that have had content removed from the start
-        for (clip_id, clip) in self.clips.iter_mut() {
-            let remove_start_index = clip.start_index;
-            let remove_end_index = document.clips.get(clip_id).unwrap().chunks.start_index();
-            let segments_to_remove: usize = (remove_end_index.div_euclid(TEXTURE_HEIGHT as isize)
-                - remove_start_index.div_euclid(TEXTURE_HEIGHT as isize))
-            .try_into()
-            .unwrap();
-            clip.segments.drain(..segments_to_remove);
-            clip.start_index = remove_end_index;
-        }
-
         self.prev_document = document.clone();
 
         // Gather work items
@@ -147,6 +144,37 @@ impl DocumentGraphics {
             // Add it to the end of list (visually, on top)
             self.draw_order.push(clip_id);
         }
+    }
+
+    // Call this after calling .expire() on the document.
+    // It is invalid to call this if the document has been modified
+    // in a way that is not consistent with .expire()
+    // since the last call to .process().
+    pub fn process_expiry(&mut self, document: &Document, _retain_time: f64) {
+        // Remove clip graphics for deleted clips
+        for (clip_id, _prev_clip) in self.prev_document.removed_clips(document) {
+            self.clips.remove(&clip_id);
+            self.draw_order.retain(|&i| i != clip_id);
+            self.hovered.remove(&clip_id);
+        }
+
+        if self.prev_document.added_clips(document).next().is_some() {
+            panic!("Clips added--expiry should not add clips");
+        }
+
+        // Shrink any clip graphics that have had content removed from the start
+        for (clip_id, clip) in self.clips.iter_mut() {
+            let remove_start_index = clip.start_index;
+            let remove_end_index = document.clips.get(clip_id).unwrap().chunks.start_index();
+            let segments_to_remove: usize = (remove_end_index.div_euclid(TEXTURE_HEIGHT as isize)
+                - remove_start_index.div_euclid(TEXTURE_HEIGHT as isize))
+            .try_into()
+            .unwrap();
+            clip.segments.drain(..segments_to_remove);
+            clip.start_index = remove_end_index;
+        }
+
+        self.prev_document = document.clone();
     }
 }
 

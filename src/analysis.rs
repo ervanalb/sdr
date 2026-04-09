@@ -27,6 +27,12 @@ struct Cursor {
 }
 
 impl Cursor {
+    fn new_empty() -> Self {
+        Cursor {
+            cursors: BTreeMap::new(),
+        }
+    }
+
     fn start_of_document(document: &Document) -> Self {
         Self {
             cursors: document
@@ -156,6 +162,7 @@ pub struct Analysis {
     _processing_thread_handle: JoinHandle<()>,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    prev_document: Document,
 }
 
 impl Analysis {
@@ -173,6 +180,7 @@ impl Analysis {
             _processing_thread_handle,
             device: device.clone(),
             queue: queue.clone(),
+            prev_document: Document::new(),
         }
     }
 
@@ -251,10 +259,26 @@ impl Analysis {
         let msg = ProcessingInputMessage {
             removed_processors,
             new_processors,
+            prev_document: self.prev_document.clone(),
             document: document.clone(),
             active_clips: active_clips.clone(),
         };
         self.processing_thread_sender.send(msg).unwrap();
+        self.prev_document = document.clone();
+    }
+
+    // Call this after calling .expire() on the document.
+    // It is invalid to call this if the document has been modified
+    // in a way that is not consistent with .expire()
+    // since the last call to .process().
+    pub fn process_expiry(&mut self, document: &Document, retain_time: f64) {
+        // Call expire on all processor histories
+        for processor_state in self.processors.values_mut() {
+            processor_state.history.expire(retain_time);
+        }
+
+        // This prevents the shortening of clips from triggering reprocessing
+        self.prev_document = document.clone();
     }
 
     pub fn expire(&mut self, retain_time: f64) {
@@ -297,6 +321,7 @@ struct ChildThreadProcessorState {
 struct ProcessingInputMessage {
     removed_processors: Vec<ProcessorInstanceId>,
     new_processors: Vec<(ProcessorInstanceId, Box<dyn Processor>)>,
+    prev_document: Document,
     document: Document,
     active_clips: BTreeSet<ClipId>,
 }
@@ -309,9 +334,8 @@ enum Event {
 }
 
 fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage>) {
-    let mut prev_document = Document::new();
     let mut preprocessors: BTreeMap<ClipId, StreamPreprocessor> = BTreeMap::new();
-    let mut preprocessor_cursor = Cursor::start_of_document(&prev_document);
+    let mut preprocessor_cursor = Cursor::new_empty();
     let mut processors = BTreeMap::<ProcessorInstanceId, ChildThreadProcessorState>::new();
 
     while let Ok(mut msg) = child_thread_receiver.recv() {
@@ -323,6 +347,7 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
 
             // 2. Get the document update
             // and see if we need to restart all processors from the beginning.
+            let prev_document = msg.prev_document;
             let new_document = msg.document;
             let mut restart_all = false;
 
@@ -422,9 +447,6 @@ fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage
                     processor.cursor = preprocessor_cursor.clone();
                 }
             }
-
-            // 2e. Update prev_document
-            prev_document = new_document.clone();
 
             // 3. Add new processors
             for (instance_id, processor) in msg.new_processors {
