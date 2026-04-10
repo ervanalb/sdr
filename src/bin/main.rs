@@ -18,6 +18,26 @@ mod ui;
 /// How often to check if processor parameters need to be saved (in seconds)
 const PROCESSOR_AUTOSAVE_INTERVAL_SECONDS: i64 = 10;
 
+#[derive(Debug, Clone)]
+enum PlaybackAction {
+    Play,
+    Record(Rc<RecordingId>),
+    PlayAndRecord(Rc<RecordingId>),
+}
+
+#[derive(Debug, Clone)]
+struct PlaybackState {
+    r#loop: bool,
+    action: PlaybackAction,
+}
+
+#[derive(Debug, Clone)]
+enum PendingLoopAction {
+    Play,
+    Record,
+    PlayAndRecord,
+}
+
 fn get_processors_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let config_dir = dirs::data_local_dir()
         .ok_or("Could not find local data directory")?
@@ -85,7 +105,9 @@ struct SdrApp {
     last_save_check: DateTime<Utc>,
     document: ActiveDocument,
     document_graphics: DocumentGraphics,
-    recording: Option<Rc<RecordingId>>,
+    playback_state: Option<PlaybackState>,
+    loop_enabled: bool,
+    loop_confirmation_pending: Option<PendingLoopAction>,
     analysis: Analysis,
     processor_graphics: ProcessorGraphics,
     prev_time: DateTime<Utc>,
@@ -117,7 +139,9 @@ impl SdrApp {
             last_save_check: now,
             document: ActiveDocument::new(),
             document_graphics: DocumentGraphics::new(),
-            recording: None,
+            playback_state: None,
+            loop_enabled: false,
+            loop_confirmation_pending: None,
             analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
             processor_graphics: ProcessorGraphics::new(),
             prev_time: now,
@@ -172,11 +196,17 @@ impl eframe::App for SdrApp {
         let hardware_results = hardware.update(&mut self.hardware_params);
 
         // Add new content to the document
-        if let Some(recording_id) = &self.recording {
-            self.document
-                .update_recording(recording_id, hardware_results);
+        if let Some(state) = &self.playback_state {
+            let recording_id = match &state.action {
+                PlaybackAction::Record(id) | PlaybackAction::PlayAndRecord(id) => Some(id),
+                PlaybackAction::Play => None,
+            };
 
-            // Advance playhead during recording
+            if let Some(id) = recording_id {
+                self.document.update_recording(id, hardware_results);
+            }
+
+            // Advance playhead during any playback state
             self.playhead += dt;
         }
 
@@ -258,15 +288,6 @@ impl eframe::App for SdrApp {
                 ui.add_space(8.0);
                 ui.heading("Hardware Control");
                 ui.separator();
-
-                let mut record_enabled = self.recording.is_some();
-                if ui.checkbox(&mut record_enabled, "Record").changed() {
-                    if record_enabled && self.recording.is_none() {
-                        self.recording = Some(self.document.record(now, self.playhead));
-                    } else if !record_enabled {
-                        self.recording = None;
-                    }
-                }
 
                 if ui.button("Enumerate Devices").clicked() {
                     self.hardware_params.enumerate = true;
@@ -436,6 +457,136 @@ impl eframe::App for SdrApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let wgpu_render_state = frame.wgpu_render_state().unwrap();
 
+            // Playback control buttons at the top
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+
+                let button_size = egui::vec2(40.0, 40.0);
+
+                if ui.add_sized(button_size, egui::Button::new("⏮")).clicked() {
+                    // Seek to beginning
+                    self.playhead = 0.0;
+                }
+
+                if ui.add_sized(button_size, egui::Button::new("⏭")).clicked() {
+                    // Seek to end
+                    // TODO: implement when document has duration info
+                }
+
+                let is_recording = self.playback_state.as_ref().map_or(false, |state| {
+                    matches!(state.action, PlaybackAction::Record(_) | PlaybackAction::PlayAndRecord(_))
+                });
+
+                let record_button = egui::Button::new("⏺").fill(if is_recording {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.weak_bg_fill
+                });
+
+                if ui.add_sized(button_size, record_button).clicked() {
+                    // Toggle record
+                    match &self.playback_state {
+                        None => {
+                            // Starting new recording from None
+                            if self.loop_enabled {
+                                // Show confirmation modal
+                                self.loop_confirmation_pending = Some(PendingLoopAction::Record);
+                            } else {
+                                let recording_id = self.document.record(now, self.playhead);
+                                self.playback_state = Some(PlaybackState {
+                                    r#loop: false,
+                                    action: PlaybackAction::Record(recording_id),
+                                });
+                            }
+                        }
+                        Some(state) => {
+                            self.playback_state = match &state.action {
+                                PlaybackAction::Play => {
+                                    let recording_id = self.document.record(now, self.playhead);
+                                    Some(PlaybackState {
+                                        r#loop: state.r#loop,
+                                        action: PlaybackAction::PlayAndRecord(recording_id),
+                                    })
+                                }
+                                PlaybackAction::Record(_) => {
+                                    self.loop_enabled = false;
+                                    None
+                                }
+                                PlaybackAction::PlayAndRecord(_) => Some(PlaybackState {
+                                    r#loop: state.r#loop,
+                                    action: PlaybackAction::Play,
+                                }),
+                            };
+                        }
+                    };
+                }
+
+                if ui.add_sized(button_size, egui::Button::new("⏹")).clicked() {
+                    // Stop
+                    self.loop_enabled = false;
+                    self.playback_state = None;
+                }
+
+                let is_playing = self.playback_state.as_ref().map_or(false, |state| {
+                    matches!(state.action, PlaybackAction::Play | PlaybackAction::PlayAndRecord(_))
+                });
+
+                let play_button = egui::Button::new("▶").fill(if is_playing {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.weak_bg_fill
+                });
+
+                if ui.add_sized(button_size, play_button).clicked() {
+                    // Toggle play
+                    match &self.playback_state {
+                        None => {
+                            // Starting new playback from None
+                            if self.loop_enabled {
+                                // Show confirmation modal
+                                self.loop_confirmation_pending = Some(PendingLoopAction::Play);
+                            } else {
+                                self.playback_state = Some(PlaybackState {
+                                    r#loop: false,
+                                    action: PlaybackAction::Play,
+                                });
+                            }
+                        }
+                        Some(state) => {
+                            self.playback_state = match &state.action {
+                                PlaybackAction::Play => {
+                                    self.loop_enabled = false;
+                                    None
+                                }
+                                PlaybackAction::Record(id) => Some(PlaybackState {
+                                    r#loop: state.r#loop,
+                                    action: PlaybackAction::PlayAndRecord(id.clone()),
+                                }),
+                                PlaybackAction::PlayAndRecord(id) => Some(PlaybackState {
+                                    r#loop: state.r#loop,
+                                    action: PlaybackAction::Record(id.clone()),
+                                }),
+                            };
+                        }
+                    };
+                }
+
+                ui.add_enabled_ui(self.playback_state.is_none(), |ui| {
+                    let loop_button = egui::Button::new("🔁").fill(if self.loop_enabled {
+                        ui.visuals().selection.bg_fill
+                    } else {
+                        ui.visuals().widgets.inactive.weak_bg_fill
+                    });
+
+                    if ui.add_sized(button_size, loop_button).clicked() {
+                        // Toggle loop (only when not playing/recording)
+                        self.loop_enabled = !self.loop_enabled;
+                    }
+                });
+            });
+
+            let playback_enabled = self.playback_state.is_some();
+
             self::ui::canvas::ui(
                 ui,
                 &mut self.viewport_state,
@@ -446,12 +597,61 @@ impl eframe::App for SdrApp {
                 dt,
                 &mut self.hardware_params,
                 &self.bands_info,
-                self.recording.is_some(),
+                playback_enabled,
                 &wgpu_render_state,
                 &mut self.processor_graphics,
                 &self.processor_parameters,
             );
         });
+
+        // Loop mode confirmation modal
+        if let Some(pending_action) = self.loop_confirmation_pending.clone() {
+            egui::Window::new("Enable Loop Mode")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Loop mode will clear all existing content.");
+                    ui.label("Do you want to proceed?");
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button("No").clicked() {
+                            self.loop_confirmation_pending = None;
+                        }
+
+                        if ui.button("Yes").clicked() {
+                            // Clear document and reset playhead
+                            self.document = ActiveDocument::new();
+                            self.playhead = 0.0;
+
+                            // Start playback/recording with loop enabled
+                            self.playback_state = match pending_action {
+                                PendingLoopAction::Play => Some(PlaybackState {
+                                    r#loop: true,
+                                    action: PlaybackAction::Play,
+                                }),
+                                PendingLoopAction::Record => {
+                                    let recording_id = self.document.record(now, 0.0);
+                                    Some(PlaybackState {
+                                        r#loop: true,
+                                        action: PlaybackAction::Record(recording_id),
+                                    })
+                                }
+                                PendingLoopAction::PlayAndRecord => {
+                                    let recording_id = self.document.record(now, 0.0);
+                                    Some(PlaybackState {
+                                        r#loop: true,
+                                        action: PlaybackAction::PlayAndRecord(recording_id),
+                                    })
+                                }
+                            };
+
+                            self.loop_confirmation_pending = None;
+                        }
+                    });
+                });
+        }
 
         // Delete confirmation modal
         if let Some((processor_id, processor_name)) = self.delete_confirmation_processor.clone() {

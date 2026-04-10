@@ -49,7 +49,7 @@ pub fn ui(
     dt: f64,
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
-    is_recording: bool,
+    playback_enabled: bool,
     wgpu_render_state: &egui_wgpu::RenderState,
     processor_graphics: &mut ProcessorGraphics,
     processor_parameters: &BTreeMap<ProcessorId, ProcessorParameters>,
@@ -486,8 +486,8 @@ pub fn ui(
             // Refresh for the borrow checker
             let clip = document_graphics.clips.get(&clip_id).unwrap();
 
-            // Handle starting drag (disabled during recording)
-            if !is_recording && head_bar_response.drag_started() {
+            // Handle starting drag (disabled during playback)
+            if !playback_enabled && head_bar_response.drag_started() {
                 clip_drag_state = Some(ClipDragState {
                     clip_id,
                     proposed_reference_time: clip.descriptor.reference_time,
@@ -552,8 +552,8 @@ pub fn ui(
         });
     }
 
-    // Draw hover line in X-axis label region (when not recording)
-    if !is_recording && timeline_response.hovered() {
+    // Draw hover line in X-axis label region (when not playing/recording)
+    if !playback_enabled && timeline_response.hovered() {
         if let Some(pointer_pos) = timeline_response.hover_pos() {
             let hover_x = pointer_pos.x;
             if hover_x >= figure_rect.left() && hover_x <= figure_rect.right() {
@@ -577,8 +577,8 @@ pub fn ui(
         );
     }
 
-    // Handle primary button click in X-axis label region to set playhead and deselect clips (only when not recording)
-    if !is_recording && timeline_response.clicked_by(egui::PointerButton::Primary) {
+    // Handle primary button click in X-axis label region to set playhead and deselect clips (only when not playing/recording)
+    if !playback_enabled && timeline_response.clicked_by(egui::PointerButton::Primary) {
         if let Some(pointer_pos) = timeline_response.interact_pointer_pos() {
             let canvas_x = pointer_pos.x - figure_rect.left();
             let time = viewport.canvas_x(canvas_x);
