@@ -256,10 +256,9 @@ impl Analysis {
         }
 
         // 3. Send document snapshot to processing thread
-        let msg = ProcessingInputMessage {
+        let msg = ProcessingInputMessage::Process {
             removed_processors,
             new_processors,
-            prev_document: self.prev_document.clone(),
             document: document.clone(),
             active_clips: active_clips.clone(),
         };
@@ -272,19 +271,17 @@ impl Analysis {
     // in a way that is not consistent with .expire()
     // since the last call to .process().
     pub fn process_expiry(&mut self, document: &Document, retain_time: f64) {
-        // Call expire on all processor histories
+        // 1. Call expire on all processor histories
         for processor_state in self.processors.values_mut() {
             processor_state.history.expire(retain_time);
         }
 
-        // This prevents the shortening of clips from triggering reprocessing
+        // 2. Send document snapshot to proecssing thread
+        let msg = ProcessingInputMessage::ProcessExpiry {
+            document: document.clone(),
+        };
+        self.processing_thread_sender.send(msg).unwrap();
         self.prev_document = document.clone();
-    }
-
-    pub fn expire(&mut self, retain_time: f64) {
-        // Note: ProcessorHistory::expire still takes DateTime<Utc>, so we skip calling it for now
-        // TODO: Update ProcessorHistory::expire to take f64
-        let _ = retain_time;
     }
 
     pub fn get_processor_history_mut(
@@ -318,12 +315,16 @@ struct ChildThreadProcessorState {
     cursor: Cursor,
 }
 
-struct ProcessingInputMessage {
-    removed_processors: Vec<ProcessorInstanceId>,
-    new_processors: Vec<(ProcessorInstanceId, Box<dyn Processor>)>,
-    prev_document: Document,
-    document: Document,
-    active_clips: BTreeSet<ClipId>,
+enum ProcessingInputMessage {
+    Process {
+        removed_processors: Vec<ProcessorInstanceId>,
+        new_processors: Vec<(ProcessorInstanceId, Box<dyn Processor>)>,
+        document: Document,
+        active_clips: BTreeSet<ClipId>,
+    },
+    ProcessExpiry {
+        document: Document,
+    },
 }
 
 #[derive(Debug)]
@@ -335,135 +336,202 @@ enum Event {
 
 fn processing_thread_loop(child_thread_receiver: Receiver<ProcessingInputMessage>) {
     let mut preprocessors: BTreeMap<ClipId, StreamPreprocessor> = BTreeMap::new();
+    let mut prev_document = Document::new();
+    let mut prev_active_clips = BTreeSet::new();
     let mut preprocessor_cursor = Cursor::new_empty();
     let mut processors = BTreeMap::<ProcessorInstanceId, ChildThreadProcessorState>::new();
 
     while let Ok(mut msg) = child_thread_receiver.recv() {
         'interrupted: loop {
-            // 1. Remove processors
-            for instance_id in msg.removed_processors {
-                processors.remove(&instance_id);
-            }
-
-            // 2. Get the document update
-            // and see if we need to restart all processors from the beginning.
-            let prev_document = msg.prev_document;
-            let new_document = msg.document;
-            let mut restart_all = false;
-
-            // 2a. Deleted clips
-            for (clip_id, _prev_clip) in prev_document.removed_clips(&new_document) {
-                // See if this clip removal invalidates the cursor
-                let clip_cursor = preprocessor_cursor.get(clip_id);
-                if matches!(clip_cursor, ClipCursor::Index(_) | ClipCursor::After) {
-                    // This clip invalidates all cursors
-                    restart_all = true;
-                } else {
-                    // Remove this clip from all cursors
-                    preprocessor_cursor.remove_clip(clip_id);
-                    for processor in processors.values_mut() {
-                        processor.cursor.remove_clip(clip_id);
+            match msg {
+                ProcessingInputMessage::Process {
+                    removed_processors,
+                    document: new_document,
+                    new_processors,
+                    active_clips,
+                } => {
+                    // 1. Remove processors
+                    for instance_id in removed_processors {
+                        processors.remove(&instance_id);
                     }
+
+                    // 2. Get the document update
+                    // and see if we need to restart all processors from the beginning.
+                    let mut restart_all = false;
+
+                    // 2a. Deleted clips
+                    for (clip_id, _prev_clip) in prev_document.removed_clips(&new_document) {
+                        // See if this clip removal invalidates the cursor
+                        let clip_cursor = preprocessor_cursor.get(clip_id);
+                        if matches!(clip_cursor, ClipCursor::Index(_) | ClipCursor::After) {
+                            // This clip invalidates all cursors
+                            restart_all = true;
+                        } else {
+                            // Remove this clip from all cursors
+                            preprocessor_cursor.remove_clip(clip_id);
+                            for processor in processors.values_mut() {
+                                processor.cursor.remove_clip(clip_id);
+                            }
+                        }
+                    }
+
+                    // 2b. Modified clips
+                    if let Some(cursor_t) = preprocessor_cursor.time(&prev_document) {
+                        for (clip_id, prev_clip, new_clip) in
+                            prev_document.modified_clips(&new_document)
+                        {
+                            let ClipDescriptor {
+                                name: _,
+                                frequency: prev_frequency,
+                                sample_rate: prev_sample_rate,
+                                reference_time: prev_start_time,
+                                chunk_size: prev_chunk_size,
+                            } = prev_clip.descriptor;
+                            let ClipDescriptor {
+                                name: _,
+                                frequency,
+                                sample_rate,
+                                reference_time: start_time,
+                                chunk_size,
+                            } = new_clip.descriptor;
+
+                            let clip_cursor = preprocessor_cursor.get(clip_id);
+                            let new_clip_start_t = new_clip
+                                .descriptor
+                                .time(new_clip.chunks.start_index() as f64);
+                            let clip_affects_history =
+                                matches!(clip_cursor, ClipCursor::Index(_) | ClipCursor::After)
+                                    || new_clip_start_t < cursor_t;
+
+                            let descriptor_changed = frequency != prev_frequency
+                                || sample_rate != prev_sample_rate
+                                || start_time != prev_start_time
+                                || chunk_size != prev_chunk_size;
+
+                            if clip_affects_history
+                                && (descriptor_changed
+                                    || !new_clip.chunks.is_continuation_of(&prev_clip.chunks)
+                                    || {
+                                        // If we are are `After` the clip, it has already been "finalized" in the processors.
+                                        // So we don't allow any further edits to the chunk data,
+                                        // even if the edits constitute a continuation.
+                                        matches!(clip_cursor, ClipCursor::After)
+                                            && new_clip.chunks.end_index()
+                                                > prev_clip.chunks.end_index()
+                                    })
+                            {
+                                // This clip invalidates all cursors
+                                restart_all = true;
+                            }
+                        }
+                    }
+
+                    // 2c. New clips
+                    for (clip_id, new_clip) in prev_document.added_clips(&new_document) {
+                        if let Some(cursor_t) = preprocessor_cursor.time(&prev_document)
+                            && {
+                                let clip_start_t = new_clip
+                                    .descriptor
+                                    .time(new_clip.chunks.start_index() as f64);
+                                clip_start_t < cursor_t
+                            }
+                        {
+                            // This clip invalidates all cursors
+                            restart_all = true;
+                        } else {
+                            // Add this clip to all cursors
+                            preprocessor_cursor.add_clip(clip_id);
+                            for processor in processors.values_mut() {
+                                processor.cursor.add_clip(clip_id);
+                            }
+                        }
+                    }
+
+                    // 2d. Invalidate all cursors if the flag was set
+                    if restart_all {
+                        preprocessor_cursor = Cursor::start_of_document(&new_document);
+                        for processor in processors.values_mut() {
+                            processor.processor.reset();
+                            processor.cursor = preprocessor_cursor.clone();
+                        }
+                    }
+
+                    // 3. Add new processors
+                    for (instance_id, processor) in new_processors {
+                        // Adding a new processor means we need to preprocess from the beginning
+                        // (but we don't need to invalidate existing processors)
+                        preprocessor_cursor = Cursor::start_of_document(&new_document);
+                        processors.insert(
+                            instance_id,
+                            ChildThreadProcessorState {
+                                processor,
+                                cursor: preprocessor_cursor.clone(),
+                            },
+                        );
+                    }
+
+                    prev_document = new_document.clone();
+                    prev_active_clips = active_clips.clone();
                 }
-            }
+                ProcessingInputMessage::ProcessExpiry {
+                    document: new_document,
+                } => {
+                    // 1. Get the document update
+                    // and see if we need to restart all processors from the beginning.
+                    let mut restart_all = false;
 
-            // 2b. Modified clips
-            if let Some(cursor_t) = preprocessor_cursor.time(&prev_document) {
-                for (clip_id, prev_clip, new_clip) in prev_document.modified_clips(&new_document) {
-                    let ClipDescriptor {
-                        name: _,
-                        frequency: prev_frequency,
-                        sample_rate: prev_sample_rate,
-                        reference_time: prev_start_time,
-                        chunk_size: prev_chunk_size,
-                    } = prev_clip.descriptor;
-                    let ClipDescriptor {
-                        name: _,
-                        frequency,
-                        sample_rate,
-                        reference_time: start_time,
-                        chunk_size,
-                    } = new_clip.descriptor;
+                    // 1a. Deleted clips
+                    // These only invalidate the cursor if the cursor is not After them.
+                    for (clip_id, _prev_clip) in prev_document.removed_clips(&new_document) {
+                        let clip_cursor = preprocessor_cursor.get(clip_id);
+                        if matches!(clip_cursor, ClipCursor::Before | ClipCursor::Index(_)) {
+                            // This clip invalidates all cursors
+                            restart_all = true;
+                        } else {
+                            // Remove this clip from all cursors.
+                            preprocessor_cursor.remove_clip(clip_id);
+                            for processor in processors.values_mut() {
+                                processor.cursor.remove_clip(clip_id);
+                            }
+                        }
+                    }
 
-                    let clip_cursor = preprocessor_cursor.get(clip_id);
-                    let new_clip_start_t = new_clip
-                        .descriptor
-                        .time(new_clip.chunks.start_index() as f64);
-                    let clip_affects_history =
-                        matches!(clip_cursor, ClipCursor::Index(_) | ClipCursor::After)
-                            || new_clip_start_t < cursor_t;
-
-                    let descriptor_changed = frequency != prev_frequency
-                        || sample_rate != prev_sample_rate
-                        || start_time != prev_start_time
-                        || chunk_size != prev_chunk_size;
-
-                    if clip_affects_history
-                        && (descriptor_changed
-                            || !new_clip.chunks.is_continuation_of(&prev_clip.chunks)
-                            || {
-                                // If we are are `After` the clip, it has already been "finalized" in the processors.
-                                // So we don't allow any further edits to the chunk data,
-                                // even if the edits constitute a continuation.
-                                matches!(clip_cursor, ClipCursor::After)
-                                    && (new_clip.chunks.start_index()
-                                        > prev_clip.chunks.start_index()
-                                        || new_clip.chunks.end_index()
-                                            > prev_clip.chunks.end_index())
-                            })
+                    // 2b. Modified clips
+                    // These only invalidate the cursor if the cursor is not after the clip's new start_index
+                    // (indicating a discontinuity in the data)
+                    for (clip_id, _prev_clip, new_clip) in
+                        prev_document.modified_clips(&new_document)
                     {
-                        // This clip invalidates all cursors
-                        restart_all = true;
+                        let clip_cursor = preprocessor_cursor.get(clip_id);
+                        if matches!(clip_cursor, ClipCursor::Before)
+                            || matches!(clip_cursor, ClipCursor::Index(i) if i < new_clip.chunks.start_index())
+                        {
+                            restart_all = true;
+                        }
                     }
+
+                    // 2c. New clips (invalid--expiry never creates new clips)
+                    if prev_document.added_clips(&new_document).next().is_some() {
+                        panic!("process_expiry() called with added clips--expiry cannot add clips")
+                    }
+
+                    // 2d. Invalidate all cursors if the flag was set
+                    if restart_all {
+                        preprocessor_cursor = Cursor::start_of_document(&new_document);
+                        for processor in processors.values_mut() {
+                            processor.processor.reset();
+                            processor.cursor = preprocessor_cursor.clone();
+                        }
+                    }
+
+                    prev_document = new_document.clone();
                 }
             }
 
-            // 2c. New clips
-            for (clip_id, new_clip) in prev_document.added_clips(&new_document) {
-                if let Some(cursor_t) = preprocessor_cursor.time(&prev_document)
-                    && {
-                        let clip_start_t = new_clip
-                            .descriptor
-                            .time(new_clip.chunks.start_index() as f64);
-                        clip_start_t < cursor_t
-                    }
-                {
-                    // This clip invalidates all cursors
-                    restart_all = true;
-                } else {
-                    // Add this clip to all cursors
-                    preprocessor_cursor.add_clip(clip_id);
-                    for processor in processors.values_mut() {
-                        processor.cursor.add_clip(clip_id);
-                    }
-                }
-            }
-
-            // 2d. Invalidate all cursors if the flag was set
-            if restart_all {
-                preprocessor_cursor = Cursor::start_of_document(&new_document);
-                for processor in processors.values_mut() {
-                    processor.processor.reset();
-                    processor.cursor = preprocessor_cursor.clone();
-                }
-            }
-
-            // 3. Add new processors
-            for (instance_id, processor) in msg.new_processors {
-                // Adding a new processor means we need to preprocess from the beginning
-                // (but we don't need to invalidate existing processors)
-                preprocessor_cursor = Cursor::start_of_document(&new_document);
-                processors.insert(
-                    instance_id,
-                    ChildThreadProcessorState {
-                        processor,
-                        cursor: preprocessor_cursor.clone(),
-                    },
-                );
-            }
-
-            // 4. Process from the preprocessor cursor (which will be the earliest)
-            while let Some(event) = preprocessor_cursor.advance(&new_document, &msg.active_clips) {
+            // Process from the preprocessor cursor (which will be the earliest)
+            let new_document = &prev_document;
+            let active_clips = &prev_active_clips;
+            while let Some(event) = preprocessor_cursor.advance(new_document, active_clips) {
                 match event {
                     Event::ClipStart(clip_id) => {
                         let clip = new_document.clips.get(&clip_id).unwrap();

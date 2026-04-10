@@ -1001,22 +1001,20 @@ impl ProcessorHistory for FmHistory {
                     }
                 },
                 FmMessage::EndTransmission(transmission_id) => {
-                    self.transmissions
-                        .get_mut(&transmission_id)
-                        .expect("Tried to end a transmission that doesn't exist")
-                        .active = false;
+                    if let Some(transmission) = self.transmissions.get_mut(&transmission_id) {
+                        transmission.active = false;
+                    }
+                    // Transmission may be missing if it was expired
                 }
                 FmMessage::PushChunk {
                     transmission_id,
                     iq_data,
                     audio_data,
                 } => {
-                    let transmission = self
-                        .transmissions
-                        .get_mut(&transmission_id)
-                        .expect("Tried to push to a transmission that doesn't exist");
-
-                    transmission.push(iq_data, audio_data);
+                    if let Some(transmission) = self.transmissions.get_mut(&transmission_id) {
+                        transmission.push(iq_data, audio_data);
+                    }
+                    // Transmission may be missing if it was expired
                 }
             }
         }
