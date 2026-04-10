@@ -18,6 +18,9 @@ mod ui;
 /// How often to check if processor parameters need to be saved (in seconds)
 const PROCESSOR_AUTOSAVE_INTERVAL_SECONDS: i64 = 10;
 
+/// Length of the loop buffer in seconds
+const LOOP_LENGTH: f64 = 10.0;
+
 #[derive(Debug, Clone)]
 enum PlaybackAction {
     Play,
@@ -228,13 +231,17 @@ impl eframe::App for SdrApp {
             &self.document.active_clips,
         );
 
-        // Handle expiration
-        let retain_time = self.playhead - 10.; // XXX testing
-        self.document.expire(retain_time);
-        self.document_graphics
-            .process_expiry(&self.document.document, retain_time);
-        self.analysis
-            .process_expiry(&self.document.document, retain_time);
+        // Handle expiration (only in loop mode)
+        if let Some(state) = &self.playback_state {
+            if state.r#loop {
+                let retain_time = self.playhead - LOOP_LENGTH;
+                self.document.expire(retain_time);
+                self.document_graphics
+                    .process_expiry(&self.document.document, retain_time);
+                self.analysis
+                    .process_expiry(&self.document.document, retain_time);
+            }
+        }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -458,23 +465,36 @@ impl eframe::App for SdrApp {
             let wgpu_render_state = frame.wgpu_render_state().unwrap();
 
             // Playback control buttons at the top
+            let mut scroll_to_playhead = false;
+
             ui.horizontal(|ui| {
                 ui.add_space(4.0);
 
                 let button_size = egui::vec2(40.0, 40.0);
 
-                if ui.add_sized(button_size, egui::Button::new("⏮")).clicked() {
-                    // Seek to beginning
-                    self.playhead = 0.0;
-                }
-
-                if ui.add_sized(button_size, egui::Button::new("⏭")).clicked() {
-                    // Seek to end
-                    // TODO: implement when document has duration info
-                }
-
                 let is_recording = self.playback_state.as_ref().map_or(false, |state| {
-                    matches!(state.action, PlaybackAction::Record(_) | PlaybackAction::PlayAndRecord(_))
+                    matches!(
+                        state.action,
+                        PlaybackAction::Record(_) | PlaybackAction::PlayAndRecord(_)
+                    )
+                });
+
+                ui.add_enabled_ui(!is_recording, |ui| {
+                    if ui.add_sized(button_size, egui::Button::new("⏮")).clicked() {
+                        // Seek to beginning: find earliest clip start time
+                        if let Some(time) = self.document.document.earliest_time() {
+                            self.playhead = time;
+                            scroll_to_playhead = true;
+                        }
+                    }
+
+                    if ui.add_sized(button_size, egui::Button::new("⏭")).clicked() {
+                        // Seek to end: find latest clip end time
+                        if let Some(time) = self.document.document.latest_time() {
+                            self.playhead = time;
+                            scroll_to_playhead = true;
+                        }
+                    }
                 });
 
                 let record_button = egui::Button::new("⏺").fill(if is_recording {
@@ -488,13 +508,13 @@ impl eframe::App for SdrApp {
                     match &self.playback_state {
                         None => {
                             // Starting new recording from None
-                            if self.loop_enabled {
-                                // Show confirmation modal
+                            if self.loop_enabled && !self.document.document.clips.is_empty() {
+                                // Show confirmation modal only if document has clips
                                 self.loop_confirmation_pending = Some(PendingLoopAction::Record);
                             } else {
                                 let recording_id = self.document.record(now, self.playhead);
                                 self.playback_state = Some(PlaybackState {
-                                    r#loop: false,
+                                    r#loop: self.loop_enabled,
                                     action: PlaybackAction::Record(recording_id),
                                 });
                             }
@@ -528,7 +548,10 @@ impl eframe::App for SdrApp {
                 }
 
                 let is_playing = self.playback_state.as_ref().map_or(false, |state| {
-                    matches!(state.action, PlaybackAction::Play | PlaybackAction::PlayAndRecord(_))
+                    matches!(
+                        state.action,
+                        PlaybackAction::Play | PlaybackAction::PlayAndRecord(_)
+                    )
                 });
 
                 let play_button = egui::Button::new("▶").fill(if is_playing {
@@ -542,12 +565,12 @@ impl eframe::App for SdrApp {
                     match &self.playback_state {
                         None => {
                             // Starting new playback from None
-                            if self.loop_enabled {
-                                // Show confirmation modal
+                            if self.loop_enabled && !self.document.document.clips.is_empty() {
+                                // Show confirmation modal only if document has clips
                                 self.loop_confirmation_pending = Some(PendingLoopAction::Play);
                             } else {
                                 self.playback_state = Some(PlaybackState {
-                                    r#loop: false,
+                                    r#loop: self.loop_enabled,
                                     action: PlaybackAction::Play,
                                 });
                             }
@@ -586,6 +609,10 @@ impl eframe::App for SdrApp {
             });
 
             let playback_enabled = self.playback_state.is_some();
+            let loop_active = self
+                .playback_state
+                .as_ref()
+                .map_or(false, |state| state.r#loop);
 
             self::ui::canvas::ui(
                 ui,
@@ -598,6 +625,8 @@ impl eframe::App for SdrApp {
                 &mut self.hardware_params,
                 &self.bands_info,
                 playback_enabled,
+                loop_active,
+                scroll_to_playhead,
                 &wgpu_render_state,
                 &mut self.processor_graphics,
                 &self.processor_parameters,

@@ -12,6 +12,8 @@ use sdr::ui::{Viewport, paint_elided_text};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use crate::LOOP_LENGTH;
+
 const SCROLL_SPEED: f32 = 1.0;
 const WHEEL_ZOOM_SPEED: f32 = 1.0;
 const DRAG_ZOOM_SPEED: f32 = 1.01;
@@ -50,6 +52,8 @@ pub fn ui(
     hardware_params: &mut HardwareParams,
     bands_info: &BandsInfo,
     playback_enabled: bool,
+    loop_active: bool,
+    scroll_to_playhead: bool,
     wgpu_render_state: &egui_wgpu::RenderState,
     processor_graphics: &mut ProcessorGraphics,
     processor_parameters: &BTreeMap<ProcessorId, ProcessorParameters>,
@@ -81,7 +85,12 @@ pub fn ui(
 
     let figure_size = figure_rect.size();
     let min_scale_y = figure_size.y / highest_freq as f32;
-    let min_scale_x = min_scale_y * 1e6; // Difference in dynamic range between default scales of X and Y axes
+    let min_scale_x = if loop_active {
+        // When loop mode is active, set min_scale_x so the entire loop fits in the viewport
+        figure_size.x / LOOP_LENGTH as f32
+    } else {
+        min_scale_y * 1e6 // Difference in dynamic range between default scales of X and Y axes
+    };
     let min_scale = vec2(min_scale_x, min_scale_y);
     let max_zoom = 1e9;
 
@@ -193,7 +202,65 @@ pub fn ui(
     let max_translation_y = (viewport.scale_y * highest_freq - figure_size.y as f64).max(0.0);
     let offset_y = figure_size.y as f64;
 
-    viewport.translation_x = viewport.translation_x.min(0.0);
+    // Sticky viewport tracking for loop mode
+    let sticky_viewport_id = ui.id().with("sticky_viewport_translation");
+    let prev_translation_x: Option<f64> = ui
+        .ctx()
+        .memory_mut(|m| *m.data.get_temp_mut_or_default(sticky_viewport_id));
+
+    // Clamp translation_x in loop mode to keep viewport within loop window
+    let new_translation_x = if loop_active {
+        let loop_start_time = *playhead - LOOP_LENGTH;
+        let loop_end_time = *playhead;
+
+        let min_translation_x = -viewport.scale_x * loop_end_time + figure_size.x as f64;
+        let max_translation_x = -viewport.scale_x * loop_start_time;
+        let max_translation_x = max_translation_x.max(min_translation_x);
+
+        // Check if we should stick to the right edge
+        if let Some(prev_translation_x) = prev_translation_x {
+            if viewport.translation_x <= prev_translation_x {
+                // User hasn't moved (or has moved right) since last frame, stick to current min_translation_x
+                viewport.translation_x = min_translation_x;
+            }
+        }
+
+        let unclamped_translation_x = viewport.translation_x;
+        viewport.translation_x = viewport
+            .translation_x
+            .clamp(min_translation_x, max_translation_x);
+
+        // Store sticky state if we got clamped to min_translation_x
+        if unclamped_translation_x <= min_translation_x {
+            Some(viewport.translation_x)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Store sticky translation state in egui memory
+    ui.ctx().memory_mut(|m| {
+        m.data.insert_temp(sticky_viewport_id, new_translation_x);
+    });
+
+    // Scroll to playhead if requested
+    if scroll_to_playhead {
+        let playhead_x = viewport.scale_x * *playhead;
+        let viewport_left = -viewport.translation_x;
+        let viewport_right = viewport_left + figure_size.x as f64;
+
+        // If playhead is offscreen to the left, left-align it
+        if playhead_x < viewport_left {
+            viewport.translation_x = -playhead_x;
+        }
+        // If playhead is offscreen to the right, right-align it
+        else if playhead_x > viewport_right {
+            viewport.translation_x = -(playhead_x - figure_size.x as f64);
+        }
+    }
+
     viewport.translation_y = viewport
         .translation_y
         .clamp(offset_y, max_translation_y + offset_y);
@@ -507,10 +574,7 @@ pub fn ui(
                 if head_bar_response.dragged() {
                     let drag = head_bar_response.drag_delta();
                     let time_delta = drag.x as f64 / viewport.scale_x;
-                    let min_reference_time = clip.descriptor.reference_time
-                        - clip.descriptor.time(clip.start_index as f64);
-                    state.proposed_reference_time =
-                        (state.proposed_reference_time + time_delta).max(min_reference_time);
+                    state.proposed_reference_time = state.proposed_reference_time + time_delta;
                 }
 
                 // Draw ghost outline if this clip is being dragged

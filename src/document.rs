@@ -137,6 +137,20 @@ impl Document {
         }
     }
 
+    /// Find the earliest time in the document (earliest clip start)
+    pub fn earliest_time(&self) -> Option<f64> {
+        self.clips.values()
+            .map(|clip| clip.descriptor.time(clip.chunks.start_index() as f64))
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// Find the latest time in the document (latest clip end)
+    pub fn latest_time(&self) -> Option<f64> {
+        self.clips.values()
+            .map(|clip| clip.descriptor.time(clip.chunks.end_index() as f64))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
     pub fn removed_clips<'a>(
         &'a self,
         new: &'a Document,
