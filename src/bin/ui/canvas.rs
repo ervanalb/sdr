@@ -94,6 +94,12 @@ pub fn ui(
     let min_scale = vec2(min_scale_x, min_scale_y);
     let max_zoom = 1e9;
 
+    // Sticky viewport tracking for loop mode
+    let sticky_viewport_id = ui.id().with("sticky_viewport_translation");
+    let prev_translation_x: Option<f64> = ui
+        .ctx()
+        .memory_mut(|m| *m.data.get_temp_mut_or_default(sticky_viewport_id));
+
     // Handle scroll and zoom
     if ui.rect_contains_pointer(ui_rect) {
         let (scroll_delta, zoom_delta, pointer_pos) = ui.input(|i| {
@@ -121,9 +127,13 @@ pub fn ui(
             // Keep pointer position stationary
             if let Some(pointer_pos) = pointer_pos {
                 let pointer_canvas = pointer_pos - figure_rect.min;
-                viewport.translation_x = pointer_canvas.x as f64
-                    - (pointer_canvas.x as f64 - viewport.translation_x)
-                        * (viewport.scale_x / old_scale_x);
+                // Don't adjust translation_x if we are in "sticky" mode--
+                // this should keep us in sticky mode
+                if prev_translation_x.is_none() {
+                    viewport.translation_x = pointer_canvas.x as f64
+                        - (pointer_canvas.x as f64 - viewport.translation_x)
+                            * (viewport.scale_x / old_scale_x);
+                }
                 viewport.translation_y = pointer_canvas.y as f64
                     - (pointer_canvas.y as f64 - viewport.translation_y)
                         * (viewport.scale_y / old_scale_y);
@@ -201,12 +211,6 @@ pub fn ui(
     //    (viewport.scale_x * overall_size.x as f64 - figure_size.x as f64).max(0.0);
     let max_translation_y = (viewport.scale_y * highest_freq - figure_size.y as f64).max(0.0);
     let offset_y = figure_size.y as f64;
-
-    // Sticky viewport tracking for loop mode
-    let sticky_viewport_id = ui.id().with("sticky_viewport_translation");
-    let prev_translation_x: Option<f64> = ui
-        .ctx()
-        .memory_mut(|m| *m.data.get_temp_mut_or_default(sticky_viewport_id));
 
     // Clamp translation_x in loop mode to keep viewport within loop window
     let new_translation_x = if loop_active {

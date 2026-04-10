@@ -76,7 +76,7 @@ pub fn paint_elided_text(
 pub enum PlayState {
     Paused,
     PlayTemp { seek_on_release: f64 }, // Temporary play mode, with time to seek to on release
-    Play,                               // Locked play mode
+    Play,                              // Locked play mode
 }
 
 /// Inspector state that can be stored in processor history to share across transmissions
@@ -121,7 +121,11 @@ pub fn stream_transmission_ui(
     };
 
     let interact_id = ui.id().with("transmission_interact");
-    let response = ui.interact(rect, interact_id, egui::Sense::click_and_drag());
+    let response = ui.interact(
+        rect.intersect(figure_rect),
+        interact_id,
+        egui::Sense::click_and_drag(),
+    );
 
     let visuals = ui.visuals().widgets.style(&response);
 
