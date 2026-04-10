@@ -323,14 +323,18 @@ impl ActiveDocument {
     }
 
     pub fn update_recording(&mut self, recording_id: &Rc<RecordingId>, result: HardwareResult) {
-        if result.chunks.is_empty() {
-            return;
-        }
-
         let recording = self
             .recordings
             .get_mut(&**recording_id)
             .expect("Recording not found");
+
+        // Remove streams from stream_to_clip mapping that are no longer active
+        recording.stream_to_clip.retain(|stream_id, _| {
+            result
+                .active_streams
+                .iter()
+                .any(|(active_stream_id, _)| active_stream_id == stream_id)
+        });
 
         // Group chunks by stream_id
         for chunk in result.chunks {

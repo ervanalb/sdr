@@ -675,7 +675,7 @@ impl ProcessorUi for FmUi {
                         fm_history.transmissions.get(&next_transmission_id)
                     {
                         let next_start_time =
-                            next_transmission.time(transmission.chunks.start_index() as f64);
+                            next_transmission.time(next_transmission.chunks.start_index() as f64);
                         inspector.transmission_id = next_transmission_id;
                         inspector.time = next_start_time;
                         self.player = None; // Invalidate the player due to seek

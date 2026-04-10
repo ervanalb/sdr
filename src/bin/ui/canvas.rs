@@ -308,7 +308,7 @@ pub fn ui(
             });
 
             // Handle starting drag (disabled during recording)
-            if !is_recording && response.drag_started() {
+            if response.drag_started() {
                 drag_state = Some(RxStreamDragState {
                     device_id: device_id.clone(),
                     channel_idx,
