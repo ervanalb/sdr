@@ -159,7 +159,6 @@ pub struct ClipProcessor {
     clip_reference_time: f64,
     clip_chunk_size: usize,
     clip_sample_rate: f64,
-    clip_chunk_count: usize,
 }
 
 impl ClipProcessor {
@@ -237,7 +236,6 @@ impl ClipProcessor {
             clip_reference_time: clip_descriptor.reference_time,
             clip_chunk_size: clip_descriptor.chunk_size,
             clip_sample_rate: clip_descriptor.sample_rate,
-            clip_chunk_count: 0,
         })
     }
 

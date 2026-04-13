@@ -19,7 +19,7 @@ mod ui;
 const PROCESSOR_AUTOSAVE_INTERVAL_SECONDS: i64 = 10;
 
 /// Length of the loop buffer in seconds
-const LOOP_LENGTH: f64 = 10.0;
+const LOOP_LENGTH: f64 = 120.0;
 
 #[derive(Debug, Clone)]
 enum PlaybackAction {
@@ -38,7 +38,6 @@ struct PlaybackState {
 enum PendingLoopAction {
     Play,
     Record,
-    PlayAndRecord,
 }
 
 fn get_processors_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -462,8 +461,6 @@ impl eframe::App for SdrApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let wgpu_render_state = frame.wgpu_render_state().unwrap();
-
             // Playback control buttons at the top
             let mut scroll_to_playhead = false;
 
@@ -627,7 +624,6 @@ impl eframe::App for SdrApp {
                 playback_enabled,
                 loop_active,
                 scroll_to_playhead,
-                &wgpu_render_state,
                 &mut self.processor_graphics,
                 &self.processor_parameters,
             );
@@ -665,13 +661,6 @@ impl eframe::App for SdrApp {
                                     Some(PlaybackState {
                                         r#loop: true,
                                         action: PlaybackAction::Record(recording_id),
-                                    })
-                                }
-                                PendingLoopAction::PlayAndRecord => {
-                                    let recording_id = self.document.record(now, 0.0);
-                                    Some(PlaybackState {
-                                        r#loop: true,
-                                        action: PlaybackAction::PlayAndRecord(recording_id),
                                     })
                                 }
                             };

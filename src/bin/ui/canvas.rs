@@ -10,7 +10,7 @@ use sdr::processor::ProcessorParameters;
 use sdr::processor_graphics::ProcessorGraphics;
 use sdr::ui::{Viewport, paint_elided_text};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::LOOP_LENGTH;
 
@@ -54,7 +54,6 @@ pub fn ui(
     playback_enabled: bool,
     loop_active: bool,
     scroll_to_playhead: bool,
-    wgpu_render_state: &egui_wgpu::RenderState,
     processor_graphics: &mut ProcessorGraphics,
     processor_parameters: &BTreeMap<ProcessorId, ProcessorParameters>,
 ) {
