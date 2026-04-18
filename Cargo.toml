@@ -36,6 +36,8 @@ realfft = "3.5.0"
 hound = "3.5"
 cpal = "0.17"
 dirs = "5.0"
+nemotron-asr = { version = "0.1", features = ["ggml_backend_dl"] }
+oneshot = "0.1"
 
 [profile.dev]
 opt-level = 3

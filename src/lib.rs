@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod asr_provider;
 pub mod audio;
 pub mod band_info;
 pub mod chunked_deque;
