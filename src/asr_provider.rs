@@ -1,10 +1,12 @@
 use crate::id_factory::IdFactory;
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 
 type StreamId = usize;
+type Canary = Arc<()>;
+type WeakCanary = Weak<()>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrError {
@@ -13,12 +15,13 @@ pub enum AsrError {
 
 enum WorkerRequest {
     CreateStream {
-        reply: oneshot::Sender<StreamId>,
+        reply: oneshot::Sender<(StreamId, Canary)>,
     },
     Transcribe {
         stream_id: StreamId,
         audio_data: Box<[i16]>,
         reply: oneshot::Sender<Option<String>>,
+        _canary: Canary,
     },
 }
 
@@ -39,6 +42,7 @@ impl Clone for AsrProvider {
 pub struct AsrStream {
     stream_id: StreamId,
     request_tx: Sender<WorkerRequest>,
+    canary: Canary,
 }
 
 impl AsrProvider {
@@ -65,11 +69,12 @@ impl AsrProvider {
             .send(WorkerRequest::CreateStream { reply: reply_tx })
             .map_err(|_| AsrError::Crashed)?;
 
-        let stream_id = reply_rx.recv().map_err(|_| AsrError::Crashed)?;
+        let (stream_id, canary) = reply_rx.recv().map_err(|_| AsrError::Crashed)?;
 
         Ok(AsrStream {
             stream_id,
             request_tx: self.request_tx.clone(),
+            canary,
         })
     }
 
@@ -99,25 +104,31 @@ impl AsrProvider {
             }
         };
 
-        let mut streams: BTreeMap<StreamId, nemotron_asr::Stream> = BTreeMap::new();
+        let mut streams: BTreeMap<StreamId, (nemotron_asr::Stream, WeakCanary)> = BTreeMap::new();
         let mut id_factory = IdFactory::default();
 
         while let Ok(request) = request_rx.recv() {
+            // Clean up dead streams
+            streams.retain(|_, (_, canary)| canary.upgrade().is_some());
+
             match request {
                 WorkerRequest::CreateStream { reply } => {
                     let stream = context
                         .create_stream(None)
                         .expect("Failed to create ASR stream");
                     let stream_id = id_factory.create();
-                    streams.insert(stream_id, stream);
-                    reply.send(stream_id).ok();
+                    let canary = Arc::new(());
+                    let weak_canary = Arc::downgrade(&canary);
+                    streams.insert(stream_id, (stream, weak_canary));
+                    reply.send((stream_id, canary)).ok();
                 }
                 WorkerRequest::Transcribe {
                     stream_id,
                     audio_data,
                     reply,
+                    _canary,
                 } => {
-                    let stream = streams
+                    let (stream, _) = streams
                         .get_mut(&stream_id)
                         .expect("Invalid stream ID - this is a bug");
                     let transcript = stream.process(&audio_data);
@@ -142,6 +153,7 @@ impl AsrStream {
                 stream_id: self.stream_id,
                 audio_data,
                 reply: reply_tx,
+                _canary: self.canary.clone(),
             })
             .map_err(|_| AsrError::Crashed)?;
 
