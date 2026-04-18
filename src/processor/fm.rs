@@ -9,13 +9,13 @@ use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    asr_provider::AsrProvider,
+    asr_provider::{self, AsrProvider, AsrStream},
     audio::{self, AudioBuffer, AudioOutput, FeedResult},
     chunked_deque::ChunkedDeque,
     document::ClipId,
     dsp::{
         CubicInterpolator, FmDemod, Ifft, OverlapExpand, OverlapReduce, RealFft, RealIfft,
-        fft_bin2freq, fft_dc_bin, fft_freq2bin, hann_window,
+        Rechunker, fft_bin2freq, fft_dc_bin, fft_freq2bin, hann_window,
     },
     id_factory::IdFactory,
     preprocessor::PreprocessedClipDescriptor,
@@ -31,6 +31,7 @@ type TransmissionId = usize;
 
 pub const CHANNEL_MARGIN: f64 = 0.05; // Add 5% of channel bandwidth as margin on each side
 const AUDIO_CUTOFF_FREQ: f64 = 22e3;
+const ASR_CUTOFF_FREQ: f64 = asr_provider::SAMPLE_RATE * 0.45; // Cutoff slightly below Nyquist
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FmProcessorParameters {
@@ -56,10 +57,10 @@ impl FmProcessorParameters {
         &self,
         _device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        _asr_provider: Option<&AsrProvider>,
+        asr_provider: Option<&AsrProvider>,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         let (sender, receiver) = channel();
-        let processor = FmProcessor::new(self, sender);
+        let processor = FmProcessor::new(self, sender, asr_provider.cloned());
         let history = FmHistory::new(self.frequency, self.bandwidth, receiver);
         (Box::new(processor), Box::new(history))
     }
@@ -84,15 +85,21 @@ pub struct FmProcessor {
     clips: BTreeMap<ClipId, ClipProcessor>,
     sender: Sender<FmMessage>,
     transmission_id_factory: IdFactory,
+    asr_provider: Option<AsrProvider>,
 }
 
 impl FmProcessor {
-    pub fn new(parameters: &FmProcessorParameters, sender: Sender<FmMessage>) -> FmProcessor {
+    pub fn new(
+        parameters: &FmProcessorParameters,
+        sender: Sender<FmMessage>,
+        asr_provider: Option<AsrProvider>,
+    ) -> FmProcessor {
         FmProcessor {
             clips: BTreeMap::new(),
             parameters: parameters.clone(),
             sender,
             transmission_id_factory: IdFactory::default(),
+            asr_provider,
         }
     }
 }
@@ -106,9 +113,12 @@ impl Processor for FmProcessor {
     fn start_clip(&mut self, clip_id: usize, clip_descriptor: &PreprocessedClipDescriptor) {
         match self.clips.entry(clip_id) {
             Entry::Vacant(e) => {
-                if let Some(processor) =
-                    ClipProcessor::new(clip_id, &self.parameters, clip_descriptor)
-                {
+                if let Some(processor) = ClipProcessor::new(
+                    clip_id,
+                    &self.parameters,
+                    clip_descriptor,
+                    self.asr_provider.as_ref(),
+                ) {
                     e.insert(processor);
                 }
             }
@@ -156,6 +166,11 @@ pub struct ClipProcessor {
     audio_ifft: RealIfft,
     audio_overlap_reduce: OverlapReduce<f32>,
     audio_interpolator: CubicInterpolator<f32>,
+    asr_signal_bins: usize,
+    asr_ifft: RealIfft,
+    asr_overlap_reduce: OverlapReduce<f32>,
+    asr_interpolator: CubicInterpolator<f32>,
+    asr: Option<(Rechunker<f32>, AsrStream)>,
     active_transmission: Option<TransmissionId>,
     output_sample_rate: f64,
     clip_reference_time: f64,
@@ -168,6 +183,7 @@ impl ClipProcessor {
         clip_id: ClipId,
         parameters: &FmProcessorParameters,
         clip_descriptor: &PreprocessedClipDescriptor,
+        asr_provider: Option<&AsrProvider>,
     ) -> Option<ClipProcessor> {
         let fft_size = clip_descriptor.fft_size;
 
@@ -211,6 +227,13 @@ impl ClipProcessor {
             (0.5 * ifft_size as f64 * AUDIO_CUTOFF_FREQ / output_sample_rate).round() as usize;
         let audio_ifft_sample_rate = audio_fft_size as f64 * output_sample_rate / ifft_size as f64;
 
+        let asr_fft_size = 2
+            * (0.5 * ifft_size as f64 * asr_provider::SAMPLE_RATE / output_sample_rate).ceil()
+                as usize;
+        let asr_signal_bins =
+            (0.5 * ifft_size as f64 * ASR_CUTOFF_FREQ / output_sample_rate).round() as usize;
+        let asr_ifft_sample_rate = asr_fft_size as f64 * output_sample_rate / ifft_size as f64;
+
         Some(ClipProcessor {
             clip_id,
             clip_name: clip_descriptor.clip_name.clone(),
@@ -233,6 +256,19 @@ impl ClipProcessor {
             audio_ifft: RealIfft::new(audio_fft_size),
             audio_overlap_reduce: OverlapReduce::new(audio_fft_size / 2),
             audio_interpolator: CubicInterpolator::new(audio_ifft_sample_rate / audio::SAMPLE_RATE),
+            asr_signal_bins,
+            asr_ifft: RealIfft::new(asr_fft_size),
+            asr_overlap_reduce: OverlapReduce::new(asr_fft_size / 2),
+            asr_interpolator: CubicInterpolator::new(
+                asr_ifft_sample_rate / asr_provider::SAMPLE_RATE,
+            ),
+            asr: asr_provider.map(|provider| {
+                let rechunker = Rechunker::new(provider.chunk_samples());
+                let stream = provider
+                    .create_stream()
+                    .expect("Could not create ASR stream");
+                (rechunker, stream)
+            }),
             active_transmission: None,
             output_sample_rate,
             clip_reference_time: clip_descriptor.reference_time,
@@ -352,11 +388,57 @@ impl ClipProcessor {
         let audio_data = self.audio_overlap_reduce.process(&audio_data);
         let audio_data = self.audio_interpolator.process(&audio_data);
 
+        // Automatic speech recognition (ASR)
+        let transcription = if let Some((asr_rechunker, asr_stream)) = self.asr.as_mut() {
+            // Apply AA filter by selecting only bins below the cutoff freq
+            let demodulated_bin_count = self.demodulated_fft.size() / 2 + 1;
+            let asr_bin_count = self.asr_ifft.size() / 2 + 1;
+            let mut asr_spectrum =
+                vec![Complex::ZERO; asr_bin_count * fft_count].into_boxed_slice();
+            for (in_fft, out_fft) in demodulated_spectrum
+                .chunks_exact(demodulated_bin_count)
+                .zip(asr_spectrum.chunks_exact_mut(asr_bin_count))
+            {
+                // Copy in FFT data
+                out_fft[..self.asr_signal_bins].clone_from_slice(&in_fft[..self.asr_signal_bins]);
+            }
+
+            // IFFT (downsamples because IFFT is shorter than FFT)
+            let asr_data = self.asr_ifft.process(asr_spectrum);
+            // Reconstruct asr signal at new sample rate
+            let asr_data = self.asr_overlap_reduce.process(&asr_data);
+            let asr_data = self.asr_interpolator.process(&asr_data);
+
+            let mut transcription = None;
+            asr_rechunker.process(&asr_data, |asr_data| {
+                // Convert f32 to i16 for ASR
+                let asr_i16_data: Box<[i16]> = asr_data
+                    .iter()
+                    .map(|&sample| (sample.clamp(-1.0, 1.0) * 32767.0) as i16)
+                    .collect();
+
+                // Send to ASR stream and get transcription
+
+                if let Some(t) = asr_stream
+                    .transcribe(asr_i16_data)
+                    .expect("Error running ASR")
+                {
+                    transcription
+                        .get_or_insert_with(|| String::new())
+                        .push_str(&t);
+                }
+            });
+            transcription
+        } else {
+            None
+        };
+
         sender
             .send(FmMessage::PushChunk {
                 transmission_id: *active_transmission_id,
                 iq_data,
                 audio_data,
+                transcription,
             })
             .ok();
     }
@@ -384,6 +466,7 @@ pub enum FmMessage {
         transmission_id: TransmissionId,
         iq_data: Box<[Complex<f32>]>,
         audio_data: Box<[f32]>,
+        transcription: Option<String>,
     },
 }
 
@@ -414,11 +497,13 @@ impl std::fmt::Debug for FmMessage {
                 transmission_id,
                 iq_data,
                 audio_data,
+                transcription,
             } => f
                 .debug_struct("PushChunk")
                 .field("transmission_id", transmission_id)
                 .field("iq_data.len()", &iq_data.len())
                 .field("audio_data.len()", &audio_data.len())
+                .field("transcription", transcription)
                 .finish(),
         }
     }
@@ -796,6 +881,7 @@ impl ProcessorUi for FmUi {
             ui.label(format!("Chunk index: {}", chunk_index));
             ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
             ui.label(format!("IQ samples: {}", chunk.iq_data.len()));
+            ui.label(format!("Transcription: {:?}", chunk.transcription));
 
             ui.separator();
 
@@ -1010,9 +1096,10 @@ impl ProcessorHistory for FmHistory {
                     transmission_id,
                     iq_data,
                     audio_data,
+                    transcription,
                 } => {
                     if let Some(transmission) = self.transmissions.get_mut(&transmission_id) {
-                        transmission.push(iq_data, audio_data);
+                        transmission.push(iq_data, audio_data, transcription);
                     }
                     // Transmission may be missing if it was expired
                 }
@@ -1076,10 +1163,16 @@ impl FmTransmission {
         }
     }
 
-    fn push(&mut self, iq_data: Box<[Complex<f32>]>, audio_data: Box<[f32]>) {
+    fn push(
+        &mut self,
+        iq_data: Box<[Complex<f32>]>,
+        audio_data: Box<[f32]>,
+        transcription: Option<String>,
+    ) {
         self.chunks.push_back(FmTransmissionChunk {
             iq_data,
             audio_data,
+            transcription,
         })
     }
 
@@ -1145,6 +1238,7 @@ impl FmTransmission {
 pub struct FmTransmissionChunk {
     pub iq_data: Box<[Complex<f32>]>,
     pub audio_data: Box<[f32]>,
+    pub transcription: Option<String>,
 }
 
 ///////////////////////////////////////////////////////////////////////////////

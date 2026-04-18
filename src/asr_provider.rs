@@ -1,3 +1,5 @@
+use nemotron_asr::{CacheConfig, LatencyMode};
+
 use crate::id_factory::IdFactory;
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -7,6 +9,8 @@ use std::thread::{self, JoinHandle};
 type StreamId = usize;
 type Canary = Arc<()>;
 type WeakCanary = Weak<()>;
+
+pub const SAMPLE_RATE: f64 = 16_000.; // 16 KHz sample rate for ASR
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrError {
@@ -28,6 +32,7 @@ enum WorkerRequest {
 pub struct AsrProvider {
     request_tx: Sender<WorkerRequest>,
     thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    chunk_samples: usize,
 }
 
 impl Clone for AsrProvider {
@@ -35,6 +40,7 @@ impl Clone for AsrProvider {
         Self {
             request_tx: self.request_tx.clone(),
             thread_handle: Arc::clone(&self.thread_handle),
+            chunk_samples: self.chunk_samples,
         }
     }
 }
@@ -47,19 +53,27 @@ pub struct AsrStream {
 
 impl AsrProvider {
     pub fn new() -> Result<Self, String> {
+        let cache_config = CacheConfig::with_latency(LatencyMode::Low);
+        let chunk_samples = cache_config.chunk_samples() as usize;
+
         let (request_tx, request_rx) = mpsc::channel();
 
         let handle = thread::Builder::new()
             .name("asr-worker".to_string())
             .spawn(move || {
-                Self::worker_thread(request_rx);
+                Self::worker_thread(request_rx, cache_config);
             })
             .map_err(|e| format!("Thread spawn error: {e}"))?;
 
         Ok(Self {
             request_tx,
             thread_handle: Arc::new(Mutex::new(Some(handle))),
+            chunk_samples,
         })
+    }
+
+    pub fn chunk_samples(&self) -> usize {
+        self.chunk_samples
     }
 
     pub fn create_stream(&self) -> Result<AsrStream, AsrError> {
@@ -87,7 +101,7 @@ impl AsrProvider {
         }
     }
 
-    fn worker_thread(request_rx: Receiver<WorkerRequest>) {
+    fn worker_thread(request_rx: Receiver<WorkerRequest>, cache_config: CacheConfig) {
         nemotron_asr::load_backends_from_path(
             std::env::var("GGML_BACKEND_DIR")
                 .expect("GGML_BACKEND_DIR environment variable must be set"),
@@ -114,7 +128,7 @@ impl AsrProvider {
             match request {
                 WorkerRequest::CreateStream { reply } => {
                     let stream = context
-                        .create_stream(None)
+                        .create_stream(Some(&cache_config))
                         .expect("Failed to create ASR stream");
                     let stream_id = id_factory.create();
                     let canary = Arc::new(());
