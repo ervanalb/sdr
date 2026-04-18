@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use eframe::egui;
 use sdr::analysis::{Analysis, ProcessorId};
+use sdr::asr_provider::AsrProvider;
 use sdr::band_info::BandsInfo;
 use sdr::document::{ActiveDocument, RecordingId};
 use sdr::document_graphics::DocumentGraphics;
@@ -132,6 +133,18 @@ impl SdrApp {
         // Try to load processors from disk, or use defaults
         let processor_parameters = load_processors().unwrap_or_default();
 
+        // Try to initialize ASR provider
+        let asr_provider = match AsrProvider::new() {
+            Ok(provider) => {
+                log::info!("ASR provider initialized successfully");
+                Some(provider)
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize ASR provider: {}", e);
+                None
+            }
+        };
+
         Self {
             hardware: Some(Hardware::new()),
             hardware_params: HardwareParams::default(),
@@ -144,7 +157,11 @@ impl SdrApp {
             playback_state: None,
             loop_enabled: false,
             loop_confirmation_pending: None,
-            analysis: Analysis::new(&wgpu_render_state.device, &wgpu_render_state.queue),
+            analysis: Analysis::new(
+                wgpu_render_state.device.clone(),
+                wgpu_render_state.queue.clone(),
+                asr_provider,
+            ),
             processor_graphics: ProcessorGraphics::new(),
             prev_time: now,
             bands_info,

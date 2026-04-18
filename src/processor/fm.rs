@@ -9,6 +9,7 @@ use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    asr_provider::AsrProvider,
     audio::{self, AudioBuffer, AudioOutput, FeedResult},
     chunked_deque::ChunkedDeque,
     document::ClipId,
@@ -55,6 +56,7 @@ impl FmProcessorParameters {
         &self,
         _device: &wgpu::Device,
         _queue: &wgpu::Queue,
+        _asr_provider: Option<&AsrProvider>,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         let (sender, receiver) = channel();
         let processor = FmProcessor::new(self, sender);

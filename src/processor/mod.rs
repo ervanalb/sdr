@@ -1,7 +1,10 @@
 pub mod fm;
 use fm::FmProcessorParameters;
 
-use crate::{document::ClipId, preprocessor::PreprocessedClipDescriptor, ui::Viewport};
+use crate::{
+    asr_provider::AsrProvider, document::ClipId, preprocessor::PreprocessedClipDescriptor,
+    ui::Viewport,
+};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -16,9 +19,10 @@ impl SpecificProcessorParameters {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        asr_provider: Option<&AsrProvider>,
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         match self {
-            SpecificProcessorParameters::Fm(p) => p.create_processor(device, queue),
+            SpecificProcessorParameters::Fm(p) => p.create_processor(device, queue, asr_provider),
         }
     }
 

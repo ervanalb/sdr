@@ -1,4 +1,5 @@
 use crate::{
+    asr_provider::AsrProvider,
     document::{Clip, ClipDescriptor, ClipId, Document},
     id_factory::IdFactory,
     preprocessor::StreamPreprocessor,
@@ -162,11 +163,16 @@ pub struct Analysis {
     _processing_thread_handle: JoinHandle<()>,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    asr_provider: Option<AsrProvider>,
     prev_document: Document,
 }
 
 impl Analysis {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Analysis {
+    pub fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        asr_provider: Option<AsrProvider>,
+    ) -> Analysis {
         let (main_thread_sender, child_thread_receiver) = channel::<ProcessingInputMessage>();
 
         let _processing_thread_handle = spawn(move || {
@@ -178,8 +184,9 @@ impl Analysis {
             processors: BTreeMap::new(),
             processing_thread_sender: main_thread_sender,
             _processing_thread_handle,
-            device: device.clone(),
-            queue: queue.clone(),
+            device,
+            queue,
+            asr_provider,
             prev_document: Document::new(),
         }
     }
@@ -213,7 +220,7 @@ impl Analysis {
             if !self.processors.contains_key(processor_id) {
                 let (processor, history) = processor_parameters
                     .specific_parameters
-                    .create_instance(&self.device, &self.queue);
+                    .create_instance(&self.device, &self.queue, self.asr_provider.as_ref());
                 let instance_id = self.instance_id_factory.create();
                 self.processors.insert(
                     *processor_id,
@@ -235,9 +242,11 @@ impl Analysis {
             {
                 removed_processors.push(processor_state.instance_id);
                 let instance_id = self.instance_id_factory.create();
-                let (processor, history) = parameters
-                    .specific_parameters
-                    .create_instance(&self.device, &self.queue);
+                let (processor, history) = parameters.specific_parameters.create_instance(
+                    &self.device,
+                    &self.queue,
+                    self.asr_provider.as_ref(),
+                );
                 *processor_state = MainThreadProcessorState {
                     instance_id,
                     last_parameters: parameters.clone(),
