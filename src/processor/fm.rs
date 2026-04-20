@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     ops::Range,
     sync::mpsc::{Receiver, Sender, channel},
 };
@@ -61,7 +61,13 @@ impl FmProcessorParameters {
     ) -> (Box<dyn Processor>, Box<dyn ProcessorHistory>) {
         let (sender, receiver) = channel();
         let processor = FmProcessor::new(self, sender, asr_provider.cloned());
-        let history = FmHistory::new(self.frequency, self.bandwidth, receiver);
+        let transcription_latency = asr_provider.map(|p| p.latency()).unwrap_or(0.0);
+        let history = FmHistory::new(
+            self.frequency,
+            self.bandwidth,
+            receiver,
+            transcription_latency,
+        );
         (Box::new(processor), Box::new(history))
     }
 
@@ -872,6 +878,8 @@ impl ProcessorUi for FmUi {
         if let Some(inspector) = &mut self.inspector_state
             && let Some(transmission) = fm_history.transmissions.get(&inspector.transmission_id)
         {
+            let mut seek = None;
+
             // Find the chunk closest to the inspected time
             let chunk_index = (transmission.index(inspector.time) as isize).clamp(
                 transmission.chunks.start_index(),
@@ -881,7 +889,38 @@ impl ProcessorUi for FmUi {
             ui.label(format!("Chunk index: {}", chunk_index));
             ui.label(format!("Audio samples: {}", chunk.audio_data.len()));
             ui.label(format!("IQ samples: {}", chunk.iq_data.len()));
-            ui.label(format!("Transcription: {:?}", chunk.transcription));
+            // Find the current chunk index based on inspector time, accounting for transcription latency
+            let current_chunk_idx =
+                transmission.index(inspector.time + fm_history.transcription_latency) as isize;
+            let current_transcription_idx = transmission
+                .transcription
+                .partition_point(|chunk| chunk.chunk_idx < current_chunk_idx)
+                .saturating_sub(1);
+
+            ui.label("Transcription:");
+            ui.horizontal_wrapped(|ui| {
+                for (idx, transcription_chunk) in transmission.transcription.iter().enumerate() {
+                    let is_current = idx == current_transcription_idx;
+
+                    // Highlight current chunk
+                    let button = if is_current {
+                        egui::Button::new(&transcription_chunk.text)
+                            .fill(ui.visuals().selection.bg_fill)
+                    } else {
+                        egui::Button::new(&transcription_chunk.text)
+                            .fill(egui::Color32::TRANSPARENT)
+                    };
+
+                    // Make chunk clickable to seek
+                    if ui.add(button).clicked() {
+                        // Convert chunk_idx to time, accounting for transcription latency
+                        seek = Some(
+                            transmission.time(transcription_chunk.chunk_idx as f64)
+                                - fm_history.transcription_latency,
+                        );
+                    }
+                }
+            });
 
             ui.separator();
 
@@ -1026,6 +1065,11 @@ impl ProcessorUi for FmUi {
                 // Not playing - clear the player
                 self.player = None;
             }
+
+            if let Some(time) = seek {
+                inspector.time = time;
+                self.player = None;
+            }
         } else {
             self.inspector_state = None;
             self.player = None;
@@ -1043,15 +1087,22 @@ pub struct FmHistory {
     bandwidth: f64,
     receiver: Receiver<FmMessage>,
     pub transmissions: BTreeMap<TransmissionId, FmTransmission>,
+    pub transcription_latency: f64,
 }
 
 impl FmHistory {
-    pub fn new(frequency: f64, bandwidth: f64, receiver: Receiver<FmMessage>) -> Self {
+    pub fn new(
+        frequency: f64,
+        bandwidth: f64,
+        receiver: Receiver<FmMessage>,
+        transcription_latency: f64,
+    ) -> Self {
         FmHistory {
             frequency,
             bandwidth,
             receiver,
             transmissions: BTreeMap::new(),
+            transcription_latency,
         }
     }
 }
@@ -1141,6 +1192,7 @@ pub struct FmTransmission {
     period: f64,
     iq_sample_rate: f64,
     chunks: ChunkedDeque<FmTransmissionChunk>,
+    transcription: VecDeque<TranscriptionChunk>,
 }
 
 impl FmTransmission {
@@ -1160,6 +1212,7 @@ impl FmTransmission {
             period,
             iq_sample_rate,
             chunks: ChunkedDeque::starting_at(start_index),
+            transcription: VecDeque::new(),
         }
     }
 
@@ -1172,13 +1225,24 @@ impl FmTransmission {
         self.chunks.push_back(FmTransmissionChunk {
             iq_data,
             audio_data,
-            transcription,
-        })
+        });
+        if let Some(text) = transcription {
+            self.transcription.push_back(TranscriptionChunk {
+                chunk_idx: self.chunks.end_index(),
+                text,
+            })
+        }
     }
 
     fn prune_old_data(&mut self, retain_time: f64) -> bool {
         let cutoff_index = self.index(retain_time) as isize;
         self.chunks.remove_front(cutoff_index);
+
+        let transcription_cutoff_index = self
+            .transcription
+            .partition_point(|&TranscriptionChunk { chunk_idx, .. }| chunk_idx < cutoff_index);
+        self.transcription.drain(..transcription_cutoff_index);
+
         !self.chunks.is_empty()
     }
 
@@ -1238,7 +1302,11 @@ impl FmTransmission {
 pub struct FmTransmissionChunk {
     pub iq_data: Box<[Complex<f32>]>,
     pub audio_data: Box<[f32]>,
-    pub transcription: Option<String>,
+}
+
+pub struct TranscriptionChunk {
+    pub chunk_idx: isize,
+    pub text: String,
 }
 
 ///////////////////////////////////////////////////////////////////////////////

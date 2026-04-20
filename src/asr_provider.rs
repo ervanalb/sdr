@@ -11,6 +11,7 @@ type Canary = Arc<()>;
 type WeakCanary = Weak<()>;
 
 pub const SAMPLE_RATE: f64 = 16_000.; // 16 KHz sample rate for ASR
+const INHERENT_LATENCY: f64 = 0.560; // ASR latency in seconds
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrError {
@@ -74,6 +75,10 @@ impl AsrProvider {
 
     pub fn chunk_samples(&self) -> usize {
         self.chunk_samples
+    }
+
+    pub fn latency(&self) -> f64 {
+        INHERENT_LATENCY + self.chunk_samples() as f64 / SAMPLE_RATE
     }
 
     pub fn create_stream(&self) -> Result<AsrStream, AsrError> {
