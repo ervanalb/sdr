@@ -4,7 +4,7 @@ use std::{
     sync::mpsc::{Receiver, Sender, channel},
 };
 
-use egui::{Align, Layout};
+use egui::{Align, Layout, Sense};
 use num_complex::Complex;
 use serde::{Deserialize, Serialize};
 
@@ -878,7 +878,7 @@ impl ProcessorUi for FmUi {
         if let Some(inspector) = &mut self.inspector_state
             && let Some(transmission) = fm_history.transmissions.get(&inspector.transmission_id)
         {
-            let mut seek = None;
+            let mut pressed_at = None;
 
             // Find the chunk closest to the inspected time
             let chunk_index = (transmission.index(inspector.time) as isize).clamp(
@@ -897,30 +897,36 @@ impl ProcessorUi for FmUi {
                 .partition_point(|chunk| chunk.chunk_idx < current_chunk_idx)
                 .saturating_sub(1);
 
-            ui.label("Transcription:");
-            ui.horizontal_wrapped(|ui| {
-                for (idx, transcription_chunk) in transmission.transcription.iter().enumerate() {
-                    let is_current = idx == current_transcription_idx;
+            if !transmission.transcription.is_empty() {
+                ui.label("Transcription:");
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (idx, transcription_chunk) in transmission.transcription.iter().enumerate()
+                    {
+                        let is_current = idx == current_transcription_idx;
+                        let text = &transcription_chunk.text;
 
-                    // Highlight current chunk
-                    let button = if is_current {
-                        egui::Button::new(&transcription_chunk.text)
-                            .fill(ui.visuals().selection.bg_fill)
-                    } else {
-                        egui::Button::new(&transcription_chunk.text)
-                            .fill(egui::Color32::TRANSPARENT)
-                    };
+                        // Highlight current chunk
+                        let label = if is_current {
+                            egui::Label::new(egui::RichText::new(text).strong())
+                        } else {
+                            egui::Label::new(text)
+                        };
 
-                    // Make chunk clickable to seek
-                    if ui.add(button).clicked() {
-                        // Convert chunk_idx to time, accounting for transcription latency
-                        seek = Some(
-                            transmission.time(transcription_chunk.chunk_idx as f64)
-                                - fm_history.transcription_latency,
-                        );
+                        let label = label.sense(Sense::drag());
+
+                        // Make chunk clickable to seek
+                        let response = ui.add(label);
+                        if response.hovered() && ui.ctx().input(|i| i.pointer.primary_pressed()) {
+                            // Convert chunk_idx to time, accounting for transcription latency
+                            pressed_at = Some(
+                                transmission.time(transcription_chunk.chunk_idx as f64)
+                                    - fm_history.transcription_latency,
+                            );
+                        }
                     }
-                }
-            });
+                });
+            }
 
             ui.separator();
 
@@ -1066,9 +1072,15 @@ impl ProcessorUi for FmUi {
                 self.player = None;
             }
 
-            if let Some(time) = seek {
-                inspector.time = time;
-                self.player = None;
+            // Handle mouse down on transcription
+            if let Some(time) = pressed_at {
+                let transmission_id = inspector.transmission_id;
+                Self::inspect_and_play(
+                    &mut self.inspector_state,
+                    &mut self.player,
+                    transmission_id,
+                    time,
+                )
             }
         } else {
             self.inspector_state = None;

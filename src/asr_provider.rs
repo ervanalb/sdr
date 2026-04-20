@@ -11,7 +11,8 @@ type Canary = Arc<()>;
 type WeakCanary = Weak<()>;
 
 pub const SAMPLE_RATE: f64 = 16_000.; // 16 KHz sample rate for ASR
-const INHERENT_LATENCY: f64 = 0.560; // ASR latency in seconds
+// ASR algorithm latency in seconds
+const INHERENT_LATENCY: f64 = 0.560 + 0.15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrError {
